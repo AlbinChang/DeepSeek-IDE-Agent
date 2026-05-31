@@ -1,0 +1,156 @@
+# 忽略node_modules文件夹
+node_modules/
+# 忽略日志文件
+logs/
+*.log
+# 忽略环境变量文件
+.env
+# 忽略构建输出文件夹
+dist/
+# 忽略IDE配置文件夹
+.idea/
+# 忽略操作系统生成的文件
+.DS_Store
+# 忽略测试覆盖率报告
+coverage/
+# 忽略临时文件
+tmp/
+# 忽略打包文件
+*.zip
+# 忽略 7z 打包文件
+*.7z
+*.7z.*
+# 忽略编译生成的文件
+*.class
+# 忽略数据库文件
+*.db
+# 忽略缓存文件
+.cache/
+# 忽略编译器生成的文件
+*.o
+# 忽略编译器生成的可执行文件
+*.exe
+# 忽略编译器生成的动态链接库
+*.dll
+# 忽略编译器生成的静态链接库
+*.lib
+# 忽略编译器生成的中间文件
+*.obj
+# 忽略编译器生成的预编译头文件
+*.pch
+# 忽略编译器生成的调试符号文件
+*.pdb
+# 忽略编译器生成的日志文件
+*.log
+# 忽略编译器生成的临时文件
+*.tmp
+# 忽略编译器生成的备份文件 
+*.bak
+# 忽略编译器生成的缓存文件
+*.cache
+# 忽略编译器生成的输出文件
+*.out
+# 忽略编译器生成的错误文件
+*.err
+# 忽略编译器生成的警告文件
+*.warn
+# 忽略编译器生成的报告文件
+*.report
+# 忽略编译器生成的测试文件
+*.test
+# 忽略编译器生成的文档文件
+*.doc
+# 忽略编译器生成的配置文件
+*.config
+# 忽略 tar等打包文件
+*.tar
+# 忽略zip等压缩文件
+*.zip
+# 忽略编译器生成的其他文件
+*.*~
+# 忽略编译器生成的其他文件夹
+build/
+# 忽略gzip等压缩文件
+*.gz
+# 忽略编译器生成的其他文件夹
+output/
+# 忽略编译器生成的其他文件夹
+release/
+# 忽略 .ide-agent
+.ide-agent/
+
+# 忽略用户自定义 LLM 配置目录（包含 API Key）
+.llm/
+
+# 忽略运行时记忆目录（用户指令与防重复犯错记忆）
+.memory/
+
+# 忽略 test-project
+test-project*
+
+# 忽略 Eclipse/JDTLS 产生的元数据文件 (对齐 41.10 节)
+.classpath
+.project
+.settings/
+.factorypath
+bin/
+target/
+
+# 忽略 Playwright 报告与测试输出
+test-results/
+playwright-report/
+test_output*.txt
+test_output_nav_*.txt
+
+# 忽略 Jacoco/测试覆盖率
+jacoco-extract/
+*.md_coverage*
+coverage_verification_*.md
+user_service_*_report.md
+unit_test_coverage_final_report.md
+final_coverage_*.md
+
+# 忽略其他中间文件
+server/undefined/
+client/test-results/
+client/tests/results/
+client/test_output.txt
+client/test_output_*.txt
+
+# 忽略tests
+tests/
+
+# ===== Open-source 安全忽略（防止敏感信息泄露） =====
+# 环境变量（保留示例文件）
+.env.*
+!.env.example
+!.env.*.example
+
+# 本地私钥/证书/签名文件
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+
+# 常见密钥与凭据落地文件
+secrets/
+secret/
+**/secrets/*.json
+**/*token*.txt
+**/*apikey*.txt
+
+# 运行时缓存与本地工作数据
+.temp/
+.tmp-image-check/
+.cache/
+
+# 本地编辑器/会话状态
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+.github/
+.claude/
+.rules/

@@ -1,0 +1,15 @@
+{
+  "_comment": "MCP 工具配置文件示例 — 将此文件复制并修改为你需要的 MCP 服务器配置",
+  "_usage": "在 workspace 根目录创建 .mcp/ 文件夹，将每个 MCP 服务器的配置保存为单独的 .json 文件",
+
+  "name": "example-server",
+  "description": "这是一个示例 MCP 服务器配置。请根据实际需要修改 name、command、args 等字段。",
+  "transport": "stdio",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-example"],
+  "env": {
+    "API_KEY": "${YOUR_API_KEY_ENV_VAR}"
+  },
+  "autoApprove": [],
+  "timeout": 30000
+}

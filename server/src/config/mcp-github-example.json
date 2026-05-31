@@ -1,0 +1,19 @@
+{
+  "name": "github",
+  "description": "GitHub API — 仓库管理、Issue、PR、代码搜索、文件操作等",
+  "transport": "stdio",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-github"],
+  "env": {
+    "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+  },
+  "autoApprove": [
+    "search_repositories",
+    "search_code",
+    "get_file_contents",
+    "list_commits",
+    "list_issues",
+    "get_issue"
+  ],
+  "timeout": 30000
+}

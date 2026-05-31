@@ -1,0 +1,37 @@
+{
+  "name": "deepseek-ide-agent-server",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Fastify backend for DeepSeek IDE Agent",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch --max-old-space-size=4096 --exclude \"test-workspace-*\" --exclude \"test-ws-*\" src/index.ts",
+    "build": "tsc && tsc-alias && npm run postbuild",
+    "postbuild": "xcopy /E /I /Y src\\config dist\\config",
+    "start": "node --max-old-space-size=4096 dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/websocket": "^11.2.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@playwright/mcp": "^0.0.75",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "iconv-lite": "^0.7.2",
+    "js-yaml": "^4.1.1",
+    "jschardet": "^3.1.4",
+    "mathjs": "^15.2.0",
+    "openai": "^6.25.0",
+    "simple-git": "^3.31.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.19.37",
+    "tsc-alias": "^1.8.16",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3",
+    "vitest": "^1.6.1"
+  }
+}

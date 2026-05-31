@@ -1,0 +1,8 @@
+{
+  "devPort": 5174,
+  "staticPort": 5174,
+  "host": "0.0.0.0",
+  "apiPort": 3001,
+  "wsPort": 3001,
+  "terminalPort": 3003
+}

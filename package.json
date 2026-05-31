@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "build": "npm run build --prefix server && npm run build --prefix terminal-server && npm run build --prefix client",
+    "dev": "node scripts/start-services.mjs dev",
+    "start": "node scripts/start-services.mjs start",
+    "check:conf": "node scripts/start-services.mjs check"
+  }
+}
