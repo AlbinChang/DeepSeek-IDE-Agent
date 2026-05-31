@@ -87,7 +87,7 @@ npm run dev
 | 服务 | 端口 | 标签 | 说明 |
 | :--- | :--- | :--- | :--- |
 | 前端页面 (client) | **5174** | `WEB` | Vite 开发服务器，浏览器访问入口 |
-| Agent 主服务 (server) | **3001** | `API` | 主 Agent + 评估 Agent 双核引擎 |
+| Agent 主服务 (server) | **3001** | `API` | 主 Agent + 评估 Agent 双核引擎（⚠️ 仅支持单实例） |
 | 终端服务 (terminal-server) | **3003** | `PTY` | 伪终端服务，执行 Shell 命令 |
 
 ### 4.2 生产模式
@@ -102,6 +102,8 @@ npm run start   # 再启动
 打开浏览器访问：**`http://localhost:5174`**
 
 > 如果端口被占用，可通过 `.env` 中的 `DEV_PORT`、`PORT`、`TERMINAL_SERVER_PORT` 自定义端口号。
+> 
+> ⚠️ **多窗口限制**：后端服务仅支持单实例运行，如需同时操作多个工作区，请参阅 [Q7](#q7能同时打开两个浏览器窗口操作不同工作区吗)。
 
 ## 5. 首次使用
 
@@ -311,6 +313,29 @@ npm run check:conf
 ### Q6：如何离线/生产环境部署？
 
 详见 [DEPLOYMENT.md](./DEPLOYMENT.md)，包含完整的离线打包、部署和排错指南。
+
+### Q7：能同时打开两个浏览器窗口操作不同工作区吗？
+
+**当前不支持。** Agent 主服务（端口 `3001`）设计为单实例运行，同时只能管理一个工作区。如果打开两个浏览器标签页，它们会共享同一个后端服务和工作区状态，可能导致冲突。
+
+**替代方案**：拷贝一份完整项目到另一个目录，修改 `.env` 中的端口配置（`PORT`、`TERMINAL_SERVER_PORT`、`DEV_PORT` 全部 +1 或设为其他空闲端口），然后在该副本中启动第二套服务即可。
+
+例如：
+
+```bash
+# 1. 拷贝项目
+cp -r deepseek-ide-agent deepseek-ide-agent-2    # macOS/Linux
+# 或 Windows PowerShell：
+# Copy-Item -Recurse deepseek-ide-agent deepseek-ide-agent-2
+
+# 2. 修改副本的 .env 端口（避免冲突）
+# PORT=3002
+# TERMINAL_SERVER_PORT=3004
+# DEV_PORT=5175
+
+# 3. 在副本中启动
+cd deepseek-ide-agent-2 && npm run dev
+```
 
 ---
 
