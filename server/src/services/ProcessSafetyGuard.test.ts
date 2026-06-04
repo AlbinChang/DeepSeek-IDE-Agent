@@ -71,6 +71,19 @@ describe('ProcessSafetyGuard — Kill intent parsing', () => {
     it('detects kill-port <port>', () => {
         const intent = guard.parseKillIntent('npx kill-port 3001');
         expect(intent).not.toBeNull();
+        expect(intent!.targetPorts).toContain(3001);
+    });
+
+    it('detects PowerShell port-to-process kill pipelines', () => {
+        const intent = guard.parseKillIntent('Get-NetTCPConnection -LocalPort 3001 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }');
+        expect(intent).not.toBeNull();
+        expect(intent!.targetPorts).toContain(3001);
+    });
+
+    it('detects netstat/findstr protected-port kill pipelines', () => {
+        const intent = guard.parseKillIntent('netstat -ano | findstr :3001; taskkill /F /PID 12345');
+        expect(intent).not.toBeNull();
+        expect(intent!.targetPorts).toContain(3001);
     });
 
     it('does NOT flag non-kill commands', () => {
@@ -112,6 +125,31 @@ describe('ProcessSafetyGuard — evaluate (safety verdict)', () => {
     it('rejects kill-port against protected port', () => {
         const verdict = guard.evaluate('npx kill-port 3001');
         expect(verdict.allowed).toBe(false);
+        expect(verdict.blockedPorts).toContain(3001);
+    });
+
+    it('rejects fkill against protected port', () => {
+        const verdict = guard.evaluate('fkill 5174');
+        expect(verdict.allowed).toBe(false);
+        expect(verdict.blockedPorts).toContain(5174);
+    });
+
+    it('rejects fuser against protected port', () => {
+        const verdict = guard.evaluate('fuser -k 3003/tcp');
+        expect(verdict.allowed).toBe(false);
+        expect(verdict.blockedPorts).toContain(3003);
+    });
+
+    it('rejects Get-NetTCPConnection to Stop-Process against protected port', () => {
+        const verdict = guard.evaluate('Get-NetTCPConnection -LocalPort 3001 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }');
+        expect(verdict.allowed).toBe(false);
+        expect(verdict.blockedPorts).toContain(3001);
+    });
+
+    it('rejects netstat/findstr to taskkill against protected port even with explicit PID', () => {
+        const verdict = guard.evaluate('netstat -ano | findstr :3001; taskkill /F /PID 12345');
+        expect(verdict.allowed).toBe(false);
+        expect(verdict.blockedPorts).toContain(3001);
     });
 
     it('rejects Get-Process xxx | Stop-Process mass kill', () => {
@@ -146,6 +184,38 @@ describe('ProcessSafetyGuard — protected ports', () => {
         const text = guard.getProtectedPortsText();
         expect(text).toContain('3001');
         expect(text).toContain('/');
+    });
+});
+
+describe('ProcessSafetyGuard — protected port usage', () => {
+    let guard: ProcessSafetyGuard;
+
+    beforeEach(() => {
+        guard = ProcessSafetyGuard.getInstance();
+        guard.refreshProtectedPorts();
+    });
+
+    it('rejects starting Vite on an Agent reserved port', () => {
+        const verdict = guard.evaluateProtectedPortUsage('vite --host 0.0.0.0 --port 5174');
+        expect(verdict.allowed).toBe(false);
+        expect(verdict.blockedPorts).toContain(5174);
+    });
+
+    it('rejects setting PORT to an Agent reserved port before starting a server', () => {
+        const verdict = guard.evaluateProtectedPortUsage('$env:PORT=3001; npm run dev');
+        expect(verdict.allowed).toBe(false);
+        expect(verdict.blockedPorts).toContain(3001);
+    });
+
+    it('rejects python http.server on an Agent reserved port', () => {
+        const verdict = guard.evaluateProtectedPortUsage('python -m http.server 3003');
+        expect(verdict.allowed).toBe(false);
+        expect(verdict.blockedPorts).toContain(3003);
+    });
+
+    it('allows common alternate development ports', () => {
+        const verdict = guard.evaluateProtectedPortUsage('vite --host 0.0.0.0 --port 5173');
+        expect(verdict.allowed).toBe(true);
     });
 });
 

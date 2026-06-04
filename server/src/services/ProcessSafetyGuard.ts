@@ -6,7 +6,8 @@
  * 2. 检测大模型是否试图通过命令杀死进程，若目标 PID 关联到受保护端口则拦截
  * 3. 禁止杀死系统关键服务进程（Windows services / Linux system daemons）
  * 4. 强制"杀进程必须显式指定 PID"的契约，禁止按进程名批量杀进程
- * 5. 跨平台：Windows (netstat / tasklist) + Linux/macOS (ss / lsof / /proc)
+ * 5. 禁止用户服务启动命令监听 Agent 受保护端口
+ * 6. 跨平台：Windows (netstat / tasklist) + Linux/macOS (ss / lsof / /proc)
  * 
  * 对齐：
  * - TECH_SPEC.md §5.0 & §17.0 运行规范
@@ -15,8 +16,6 @@
  */
 
 import { execSync } from 'child_process';
-import * as os from 'os';
-import * as path from 'path';
 import * as fs from 'fs';
 import { config as globalConfig } from '@/config/index.js';
 
@@ -38,6 +37,8 @@ export interface KillAttempt {
     killTool: string;
     /** 从命令中提取到的 PID 列表 */
     targetPids: number[];
+    /** 从端口杀进程命令或管道中提取到的目标端口列表 */
+    targetPorts: number[];
     /** 从命令中提取到的进程名模式 */
     targetProcessNames: string[];
     /** 是否按进程名批量杀（危险） */
@@ -48,6 +49,12 @@ export interface KillVerdict {
     allowed: boolean;
     reason: string;
     blockedPids: number[];
+    blockedPorts: number[];
+}
+
+export interface ProtectedPortUsageVerdict {
+    allowed: boolean;
+    reason: string;
     blockedPorts: number[];
 }
 
@@ -214,6 +221,17 @@ export class ProcessSafetyGuard {
 
     getProtectedPortsText(): string {
         return this.protectedPorts.join('/');
+    }
+
+    private addUniqueNumber(target: number[], value: number): void {
+        if (Number.isFinite(value) && value > 0 && !target.includes(value)) {
+            target.push(value);
+        }
+    }
+
+    private getProtectedMatches(ports: number[]): number[] {
+        const protectedSet = new Set(this.protectedPorts);
+        return [...new Set(ports.filter(port => protectedSet.has(port)))];
     }
 
     // ========================================================================
@@ -593,6 +611,7 @@ export class ProcessSafetyGuard {
 
         // 提取 PID（更精确：找 kill 工具后面的数字，而非命令中所有数字）
         const targetPids: number[] = [];
+        const targetPorts: number[] = [];
         const targetProcessNames: string[] = [];
 
         // 方法 1: 直接通过 kill 命令参数提取 PID
@@ -638,14 +657,53 @@ export class ProcessSafetyGuard {
         }
 
         // 方法 3: 从 kill-port / fkill 提取
-        const killPortMatch = command.match(/(?:kill-port|fkill)\s+(\d+)/i);
-        if (killPortMatch) {
-            const port = parseInt(killPortMatch[1], 10);
-            if (port > 0) {
-                // 查询该端口对应的 PID
-                const portPids = this.queryPortPids(port);
-                for (const pid of portPids) {
-                    if (!targetPids.includes(pid)) targetPids.push(pid);
+        const portKillMatch = command.match(/\b(?:kill-port|fkill)\b([^|;&\n\r]*)/i);
+        if (portKillMatch) {
+            const numericArgs = portKillMatch[1].match(/\b\d{2,5}\b/g) || [];
+            for (const rawPort of numericArgs) {
+                const port = parseInt(rawPort, 10);
+                if (port > 0) {
+                    this.addUniqueNumber(targetPorts, port);
+                    // 查询该端口对应的 PID
+                    const portPids = this.queryPortPids(port);
+                    for (const pid of portPids) {
+                        this.addUniqueNumber(targetPids, pid);
+                    }
+                }
+            }
+        }
+
+        // 方法 4: PowerShell 端口 → OwningProcess → Stop-Process 管道
+        const netPortPatterns = [
+            /\bGet-Net(?:TCPConnection|UDPEndpoint)\b[^|;&\n\r]*\b-LocalPort\s+(\d{2,5})/gi,
+            /\bLocalPort\b[^|;&\n\r\d]{0,30}(\d{2,5})/gi,
+        ];
+        for (const pattern of netPortPatterns) {
+            let match: RegExpExecArray | null;
+            while ((match = pattern.exec(command)) !== null) {
+                const port = parseInt(match[1], 10);
+                if (port > 0) {
+                    this.addUniqueNumber(targetPorts, port);
+                    const portPids = this.queryPortPids(port);
+                    for (const pid of portPids) {
+                        this.addUniqueNumber(targetPids, pid);
+                    }
+                }
+            }
+        }
+
+        // 方法 5: netstat/ss/lsof/findstr/Select-String 查端口后再 taskkill/Stop-Process
+        const portDiscoveryPatterns = [
+            /\b(?:netstat|ss|lsof)\b[^|;&\n\r]*:(\d{2,5})\b/gi,
+            /\bfindstr\b\s+['"]?:?(\d{2,5})\b/gi,
+            /\bSelect-String\b[^|;&\n\r]*(?:-Pattern\s+)?['"]?:?(\d{2,5})\b/gi,
+        ];
+        for (const pattern of portDiscoveryPatterns) {
+            let match: RegExpExecArray | null;
+            while ((match = pattern.exec(command)) !== null) {
+                const port = parseInt(match[1], 10);
+                if (port > 0) {
+                    this.addUniqueNumber(targetPorts, port);
                 }
             }
         }
@@ -653,13 +711,14 @@ export class ProcessSafetyGuard {
         // 如果完全没有提取到 PID 也没有进程名，但有 kill 关键词
         // 检查是否是 fuser -k 模式（作用于端口）
         if (targetPids.length === 0 && targetProcessNames.length === 0) {
-            const fuserMatch = command.match(/fuser\s+-k\s+(\d+)\/tcp/i);
+            const fuserMatch = command.match(/fuser\s+-k\s+(\d+)\/(?:tcp|udp)/i);
             if (fuserMatch) {
                 const port = parseInt(fuserMatch[1], 10);
                 if (port > 0) {
+                    this.addUniqueNumber(targetPorts, port);
                     const portPids = this.queryPortPids(port);
                     for (const pid of portPids) {
-                        if (!targetPids.includes(pid)) targetPids.push(pid);
+                        this.addUniqueNumber(targetPids, pid);
                     }
                 }
             }
@@ -669,13 +728,59 @@ export class ProcessSafetyGuard {
             rawCommand: command,
             killTool: matchedTool,
             targetPids,
+            targetPorts,
             targetProcessNames,
             isMassKill,
         };
     }
 
     // ========================================================================
-    // 6. 综合裁决
+    // 6. 受保护端口占用意图检测
+    // ========================================================================
+
+    /**
+     * 检测命令是否试图启动用户服务并绑定 Agent 受保护端口。
+     * 只拦截高置信启动/监听形态，避免影响 netstat/curl 等只读诊断命令。
+     */
+    evaluateProtectedPortUsage(command: string): ProtectedPortUsageVerdict {
+        this.refreshProtectedPorts();
+        const blockedPorts: number[] = [];
+
+        const addIfMatched = (port: number, patterns: RegExp[]) => {
+            if (patterns.some(pattern => pattern.test(command))) {
+                this.addUniqueNumber(blockedPorts, port);
+            }
+        };
+
+        for (const port of this.protectedPorts) {
+            const portText = String(port);
+            const patterns = [
+                new RegExp(`(?:--port|--dev-port|--listen|--host-port|-p|-l)\\s*[=:]?\\s*['\"]?${portText}\\b`, 'i'),
+                new RegExp(`\\$env:(?:PORT|VITE_PORT|DEV_PORT|SERVER_PORT|HOST_PORT)\\s*=\\s*['\"]?${portText}\\b`, 'i'),
+                new RegExp(`\\b(?:PORT|VITE_PORT|DEV_PORT|SERVER_PORT|HOST_PORT)\\s*=\\s*['\"]?${portText}\\b`, 'i'),
+                new RegExp(`\\b(?:python|python3|py)\\b[^|;&\\n\\r]*\\bhttp\\.server\\b[^|;&\\n\\r]*\\b${portText}\\b`, 'i'),
+                new RegExp(`\\b(?:vite|next|nuxt|astro|webpack-dev-server|http-server|live-server)\\b[^|;&\\n\\r]*(?:--port|-p|--listen|-l)?[^|;&\\n\\r]*\\b${portText}\\b`, 'i'),
+                new RegExp(`\\bserve\\b[^|;&\\n\\r]*(?:-l|--listen|--port|-p)\\s*${portText}\\b`, 'i'),
+                new RegExp(`\\bdocker\\b[^|;&\\n\\r]*(?:-p|--publish)\\s+${portText}:\\d+\\b`, 'i'),
+            ];
+            addIfMatched(port, patterns);
+        }
+
+        if (blockedPorts.length > 0) {
+            const portText = blockedPorts.join('/');
+            return {
+                allowed: false,
+                reason: `[Agent 端口保护拦截] 命令试图让用户进程监听 Agent 已占用的核心端口 (${portText})。` +
+                    `这些端口保留给 DeepSeek IDE Agent 的 API、终端或前端服务，写代码、启动开发服务器、Docker 映射或测试服务时都必须改用其他端口。`,
+                blockedPorts,
+            };
+        }
+
+        return { allowed: true, reason: '未检测到受保护端口监听意图', blockedPorts: [] };
+    }
+
+    // ========================================================================
+    // 7. 综合裁决
     // ========================================================================
 
     /**
@@ -683,6 +788,8 @@ export class ProcessSafetyGuard {
      * @returns KillVerdict — allowed 为 true 表示安全可执行
      */
     evaluate(command: string): KillVerdict {
+        this.refreshProtectedPorts();
+        this.refreshChildPids();
         const blockedPids: number[] = [];
         const blockedPorts: number[] = [];
         const reasons: string[] = [];
@@ -691,6 +798,27 @@ export class ProcessSafetyGuard {
         const killIntent = this.parseKillIntent(command);
         if (!killIntent) {
             return { allowed: true, reason: '非进程终止命令', blockedPids: [], blockedPorts: [] };
+        }
+
+        // === 第 0.5 层：端口杀进程工具/管道命中受保护端口时，先验拦截 ===
+        const protectedTargetPorts = this.getProtectedMatches(killIntent.targetPorts);
+        if (protectedTargetPorts.length > 0) {
+            return {
+                allowed: false,
+                reason: `[自我保护拦截] 命令试图按端口终止 Agent 核心服务端口 (${protectedTargetPorts.join('/')})。` +
+                    `禁止使用 kill-port/fkill/fuser/Get-NetTCPConnection→Stop-Process 等端口杀进程方式处理这些端口；端口冲突时请改用其他用户服务端口，或让用户手动处理。`,
+                blockedPids: killIntent.targetPids,
+                blockedPorts: protectedTargetPorts,
+            };
+        }
+
+        if (killIntent.killTool === 'kill-port/fkill') {
+            return {
+                allowed: false,
+                reason: `[安全拦截] 禁止使用 ${killIntent.killTool} 这类按端口匹配的杀进程工具。请先查询并确认具体 PID，且不得终止绑定 Agent 核心端口 (${this.getProtectedPortsText()}) 的进程。`,
+                blockedPids: killIntent.targetPids,
+                blockedPorts: [],
+            };
         }
 
         // === 第 1 层：禁止按进程名批量杀进程（无论目标是谁） ===
@@ -782,7 +910,7 @@ export class ProcessSafetyGuard {
     }
 
     // ========================================================================
-    // 7. 简便入口：执行前拦截
+    // 8. 简便入口：执行前拦截
     // ========================================================================
 
     /**
@@ -790,6 +918,11 @@ export class ProcessSafetyGuard {
      * 如果命令试图杀死受保护的进程，直接抛出错误
      */
     guard(command: string): void {
+        const portUsageVerdict = this.evaluateProtectedPortUsage(command);
+        if (!portUsageVerdict.allowed) {
+            throw new Error(portUsageVerdict.reason);
+        }
+
         const verdict = this.evaluate(command);
         if (!verdict.allowed) {
             throw new Error(verdict.reason);

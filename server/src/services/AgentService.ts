@@ -7,6 +7,7 @@ import { NeverMistakeTools } from '@/tools/NeverMistakeTools.js';
 import { UserPreferenceTools } from '@/tools/UserPreferenceTools.js';
 import { FileTools } from '@/tools/FileTools.js';
 import { BrowserMcpAdapter } from '@/services/BrowserMcpAdapter.js';
+import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 import { FileIO } from '@/utils/FileIO.js';
 import { SystemTools } from '@/tools/SystemTools.js';
 import { CalculatorTool } from '@/tools/custom/CalculatorTool.js';
@@ -456,7 +457,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_powershell_command...');
         this.toolManager.registerTool({
             name: 'run_powershell_command',
-            description: '在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。PowerShell 字符串引号规则见系统提示词中的 powershell_quoting_contract。',
+            description: '在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。PowerShell 字符串引号规则见系统提示词中的 powershell_quoting_contract。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -476,7 +477,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_cmd_command...');
         this.toolManager.registerTool({
             name: 'run_cmd_command',
-            description: '在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。适合纯文本处理（findstr、dir、type）和简单文件操作。',
+            description: '在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。适合纯文本处理（findstr、dir、type）和简单文件操作。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -918,6 +919,17 @@ export class AgentService extends EventEmitter {
             '- Windows 上优先用 run_powershell_command；仅在用户明确要求或命令确实只能在 cmd.exe 下执行时才用 run_cmd_command；Linux/macOS 上仅能用 run_powershell_command。',
         ].join('\n');
 
+        const processSafetyGuard = ProcessSafetyGuard.getInstance();
+        processSafetyGuard.refreshProtectedPorts();
+        const protectedPortsText = processSafetyGuard.getProtectedPortsText();
+        const servicePortProtectionPrompt = [
+            '### Agent 服务端口保护 (AGENT SERVICE PORT PROTECTION)',
+            `- 当前 Agent 已占用/保留的核心端口：${protectedPortsText}。这些端口来自各服务 server_conf.json 与环境变量，是系统资产，不是用户项目可清理资源。`,
+            '- 禁止杀死、释放、清理或重启这些端口上的进程；禁止使用 taskkill、Stop-Process、kill、kill-port、fkill、fuser -k，或 netstat/lsof/ss/Get-NetTCPConnection 管道到杀进程命令来处理这些端口。',
+            '- 编写、修改、生成或启动用户项目代码、配置、脚本、Docker 映射、示例命令、文档时，禁止把这些端口作为用户应用监听端口或宿主端口。',
+            '- 如果用户应用遇到这些端口 EADDRINUSE 或启动冲突，必须改用非保留端口（如 3000、3002、3004、5173、8000、8080），而不是尝试释放 Agent 端口。'
+        ].join('\n');
+
         const gitAutomationPrompt = envInfo.gitAvailable
             ? [
                 '### Git 版本管理策略 (LLM-DRIVEN GIT VIA TERMINAL)',
@@ -1105,6 +1117,9 @@ export class AgentService extends EventEmitter {
 
             // 4.55 终端 shell 选择策略（按可用性显式选 shell）
             terminalShellPrompt,
+
+            // 4.555 Agent 服务端口保护（避免杀死自身或抢占核心端口）
+            servicePortProtectionPrompt,
 
             // 4.56 临时文件治理策略（默认 .temp）
             tempFilePolicyPrompt,
