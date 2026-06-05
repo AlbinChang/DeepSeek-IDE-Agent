@@ -346,12 +346,12 @@ export class AgentService extends EventEmitter {
         // 补全文件系统工具：listFiles, searchFiles, deletePath
         this.toolManager.registerTool({
             name: 'list_files',
-            description: '获取目录结构（受控递归）。必须提供 depth（递归深度，1-5），用于限制遍历范围、防止信息爆炸。返回结果中每一项都会明确标注是文件还是目录。',
+            description: '获取目录结构（受控递归）。必须提供 depth（递归深度，1-10），用于限制遍历范围、防止信息爆炸。返回结果中每一项都会明确标注是文件还是目录。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '目录相对路径，默认为 "."' },
-                    depth: { type: 'number', description: '必填：递归深度（整数，范围 1-5）。1 表示仅当前目录下一层。' }
+                    depth: { type: 'number', description: '必填：递归深度（整数，范围 1-10）。1 表示仅当前目录下一层。' }
                 },
                 required: ['depth']
             },

@@ -8,7 +8,7 @@ import { config as globalConfig } from '@/config/index.js';
 import { WORKSPACE_SKILL_CONTAINER_DIRECTORIES, isWorkspaceSkillPath } from '@/utils/WorkspaceSkillPaths.js';
 
 export class FileTools {
-    private static readonly LIST_FILES_MAX_DEPTH = 5;
+    private static readonly LIST_FILES_MAX_DEPTH = 10;
     private static readonly LIST_FILES_MAX_ITEMS = 1200;
     private static readonly AGENT_SYSTEM_DIR_NAMES = new Set([
         '.ide-agent',
@@ -55,7 +55,7 @@ export class FileTools {
             return {
                 status: 'error',
                 error: 'DEPTH_REQUIRED',
-                message: '参数 depth 为必填整数，范围 1-5。'
+                message: '参数 depth 为必填整数，范围 1-10。'
             };
         }
 
