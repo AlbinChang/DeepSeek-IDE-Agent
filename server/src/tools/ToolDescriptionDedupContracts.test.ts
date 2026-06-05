@@ -26,12 +26,15 @@ describe('tool description deduplication contracts', () => {
         const source = await readSource('services/AgentService.ts');
         const multiFileWrite = extractToolDescription(source, 'multi_file_write');
         const singleFileWrite = extractToolDescription(source, 'single_file_write');
+        const singleFileEdit = extractToolDescription(source, 'single_file_edit');
 
         expect(multiFileWrite.length).toBeLessThanOrEqual(1500);
-        expect(singleFileWrite.length).toBeLessThanOrEqual(2200);
+        expect(singleFileWrite.length).toBeLessThanOrEqual(1200);
+        expect(singleFileEdit.length).toBeLessThanOrEqual(3000);
         expect(countOccurrences(multiFileWrite, 'single_file_write')).toBeLessThanOrEqual(3);
         expect(countOccurrences(singleFileWrite, 'multi_file_write')).toBeLessThanOrEqual(1);
-        expect(countOccurrences(singleFileWrite, 'lineCount')).toBeLessThanOrEqual(5);
+        expect(countOccurrences(singleFileWrite, 'startLine')).toBeLessThanOrEqual(1);
+        expect(countOccurrences(singleFileEdit, 'oldText')).toBeLessThanOrEqual(8);
     });
 
     it('keeps todo and browser_mcp_call descriptions concise', async () => {

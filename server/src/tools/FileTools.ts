@@ -490,7 +490,7 @@ export class FileTools {
     }
 
     /**
-    * Agent 行级精修写入 - 用于 single_file_write
+    * Agent 行级精修写入 - 底层引擎（供 single_file_edit insert 操作复用）
      * 支持在特定行插入、替换或删除代码的极高稳健性操作
      */
     static async patchFileByLines(workspaceRoot: string, unsafePath: string, content: string, startLine: number, lineCount: number = 0, encodingOverride?: string) {
@@ -678,7 +678,194 @@ export class FileTools {
     }
 
     /**
-     * Agent 文件删除
+     * Agent 文本级精准替换 - 用于 single_file_edit replace 操作
+     *
+     * 行业最佳实践：基于 oldText 全文精准匹配后替换，消除行号/行范围幻觉风险。
+     * - oldText 必须与文件中的原文完全一致（含空白、缩进、换行）
+     * - 若 oldText 在文件中出现多次，返回歧义错误并列出各次出现位置的行号
+     * - newText 为空字符串时等价于删除 oldText
+     */
+    static async editFileByReplace(
+        workspaceRoot: string,
+        unsafePath: string,
+        oldText: string,
+        newText: string
+    ) {
+        const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
+
+        try {
+            // 文件必须存在
+            try {
+                await fs.access(fullPath);
+            } catch {
+                return {
+                    status: 'error',
+                    mode: 'text_replace',
+                    path: fullPath,
+                    error: 'FILE_NOT_FOUND',
+                    message: `文件不存在，无法执行替换操作。新建文件请使用 single_file_write。`
+                };
+            }
+
+            const stats = await fs.stat(fullPath);
+            const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+            if (stats.size > MAX_SIZE) {
+                return {
+                    status: 'error',
+                    mode: 'text_replace',
+                    path: fullPath,
+                    error: 'FILE_TOO_LARGE',
+                    message: `文件大小超限 (${(stats.size / 1024 / 1024).toFixed(1)}MB > 5MB)，拒绝编辑。`
+                };
+            }
+
+            const rawBuffer = await fs.readFile(fullPath);
+
+            try {
+                FileIO.checkBinaryHeader(rawBuffer);
+            } catch {
+                return {
+                    status: 'error',
+                    mode: 'text_replace',
+                    path: fullPath,
+                    error: 'BINARY_FILE_DETECTED',
+                    message: '拒绝执行：检测到目标文件可能是二进制文件。'
+                };
+            }
+
+            // null 字节守卫
+            if (oldText.includes('\u0000') || newText.includes('\u0000')) {
+                return {
+                    status: 'error',
+                    mode: 'text_replace',
+                    path: fullPath,
+                    error: 'NULL_BYTE_IN_CONTENT',
+                    message: 'oldText 或 newText 含 null 字节（\\u0000），操作已拒绝。'
+                };
+            }
+
+            // oldText 不能为空
+            if (!oldText) {
+                return {
+                    status: 'error',
+                    mode: 'text_replace',
+                    path: fullPath,
+                    error: 'OLD_TEXT_EMPTY',
+                    message: 'oldText 不能为空。若要插入内容请使用 action: "insert"。若要删除内容请使用 replace 并传入要删除的原文和空 newText。'
+                };
+            }
+
+            const { content: rawContent, encoding: detectedEncoding } = FileIO.decodeBuffer(rawBuffer);
+            const encoding = detectedEncoding;
+
+            // 写入体积守卫
+            const MAX_PATCH_CHARS = 5 * 1024 * 1024;
+            if (newText.length > MAX_PATCH_CHARS) {
+                return {
+                    status: 'error',
+                    mode: 'text_replace',
+                    path: fullPath,
+                    error: 'CONTENT_TOO_LARGE',
+                    message: `newText 长度 ${(newText.length / 1024 / 1024).toFixed(1)}M 字符超过 5M 上限。`
+                };
+            }
+
+            // 统计 oldText 出现次数，记录各次出现的位移
+            let searchFrom = 0;
+            const occurrences: number[] = [];
+            while (true) {
+                const idx = rawContent.indexOf(oldText, searchFrom);
+                if (idx === -1) break;
+                occurrences.push(idx);
+                searchFrom = idx + 1;
+            }
+
+            if (occurrences.length === 0) {
+                return {
+                    status: 'error',
+                    mode: 'text_replace',
+                    path: fullPath,
+                    error: 'OLD_TEXT_NOT_FOUND',
+                    message: `未在文件中找到 oldText。请使用 read_file 确认文件当前内容，确保 oldText 与原文完全一致（含空白、缩进、换行）。`
+                };
+            }
+
+            if (occurrences.length > 1) {
+                // 计算每个出现位置的行号
+                const lines = rawContent.split('\n');
+                const linePositions = occurrences.map(offset => {
+                    let charCount = 0;
+                    for (let i = 0; i < lines.length; i++) {
+                        charCount += lines[i].length + 1; // +1 for \n
+                        if (charCount > offset) return i + 1;
+                    }
+                    return lines.length;
+                });
+                return {
+                    status: 'error',
+                    mode: 'text_replace',
+                    path: fullPath,
+                    error: 'OLD_TEXT_AMBIGUOUS',
+                    occurrences: occurrences.length,
+                    message: `oldText 在文件中出现了 ${occurrences.length} 次（行 ${linePositions.join(', ')}），请提供更多上下文使 oldText 唯一。` +
+                        `建议：在 oldText 中包含目标位置前后各 1~2 行的原文以消除歧义。`
+                };
+            }
+
+            // 执行替换
+            const newContent = rawContent.slice(0, occurrences[0]) + newText + rawContent.slice(occurrences[0] + oldText.length);
+
+            // 编码并写入（复用底层原子化写出）
+            const finalBuffer = FileIO.encodeString(newContent, encoding);
+            await FileIO.writeFile(unsafePath, workspaceRoot, finalBuffer);
+
+            // 构建操作后上下文快照
+            const newLines = newContent.split(/\r?\n|\r|\u2028|\u2029/);
+            const replacementLine = rawContent.slice(0, occurrences[0]).split('\n').length;
+            const lineNumWidth = String(newLines.length).length;
+            const snapshotStart = Math.max(0, replacementLine - 4);
+            const snapshotEnd = Math.min(newLines.length, replacementLine + newText.split('\n').length + 3);
+            const contextSnapshot = newLines
+                .slice(snapshotStart, snapshotEnd)
+                .map((l, i) => `${String(snapshotStart + i + 1).padStart(lineNumWidth)}: ${l}`)
+                .join('\n');
+
+            return {
+                status: 'success',
+                mode: 'text_replace',
+                path: fullPath,
+                encoding,
+                oldTextLength: oldText.length,
+                newTextLength: newText.length,
+                newTotalLines: newLines.length,
+                contextSnapshot
+            };
+        } catch (err: any) {
+            console.error(`[FileTools] editFileByReplace Error: ${err.message}`);
+            if (err.message?.startsWith('[ENCODING_LOSS]')) {
+                return { status: 'error', mode: 'text_replace', error: 'ENCODING_LOSS', message: err.message };
+            }
+            return { status: 'error', mode: 'text_replace', message: err.message };
+        }
+    }
+
+    /**
+     * Agent 行级精准插入 - 用于 single_file_edit insert 操作
+     * 在指定行号 startLine 前插入 newText。
+     * 复用 patchFileByLines 的编码检测、EOL 风格保持、越界守卫等底层逻辑，lineCount 固定为 0。
+     */
+    static async editFileByInsert(
+        workspaceRoot: string,
+        unsafePath: string,
+        startLine: number,
+        newText: string
+    ) {
+        // 委托给 patchFileByLines：lineCount=0 表示纯插入
+        return await FileTools.patchFileByLines(workspaceRoot, unsafePath, newText, startLine, 0);
+    }
+
+    /**
+    * Agent 文件删除
      */
     static async deletePath(workspaceRoot: string, unsafePath: string, recursive: boolean = false) {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);

@@ -120,6 +120,24 @@ function sanitizeWriteToolArgsForClient(toolName: string, args: any, meta: Clien
         }, meta);
     }
 
+    if (toolName === "single_file_edit") {
+        const oldTextChars = typeof args.oldText === "string" ? args.oldText.length : 0;
+        const newTextChars = typeof args.newText === "string" ? args.newText.length : 0;
+        const totalContentChars = oldTextChars + newTextChars;
+        if (totalContentChars > 0) {
+            meta.redacted = true;
+            meta.redactedStringChars += totalContentChars;
+            meta.totalContentChars = totalContentChars;
+        }
+
+        return sanitizeValueForClient({
+            ...args,
+            oldText: oldTextChars > 0 ? hiddenTextSummary(oldTextChars, "old_text") : args.oldText,
+            newText: newTextChars > 0 ? hiddenTextSummary(newTextChars, "new_text") : args.newText,
+            action: args.action,
+        }, meta);
+    }
+
     if (toolName === "multi_file_write") {
         const files = Array.isArray(args.files) ? args.files : [];
         let totalContentChars = 0;

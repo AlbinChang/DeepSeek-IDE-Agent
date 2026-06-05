@@ -35,10 +35,25 @@ const createManager = () => {
             properties: {
                 path: { type: 'string' },
                 content: { type: 'string' },
-                startLine: { type: 'integer', minimum: 1 },
-                lineCount: { type: 'integer', minimum: 0 }
+                encoding: { type: 'string' }
             },
-            required: ['path', 'content', 'startLine']
+            required: ['path', 'content']
+        },
+        execute: async () => ({ status: 'success' })
+    });
+    manager.registerTool({
+        name: 'single_file_edit',
+        description: 'test single editor',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string' },
+                action: { type: 'string', enum: ['replace', 'insert'] },
+                oldText: { type: 'string' },
+                newText: { type: 'string' },
+                startLine: { type: 'integer', minimum: 1 }
+            },
+            required: ['path', 'action', 'newText']
         },
         execute: async () => ({ status: 'success' })
     });
@@ -85,28 +100,25 @@ describe('ToolManager argument validation', () => {
         );
     });
 
-    it('rejects single_file_write when startLine is missing', async () => {
+    it('rejects single_file_write when content is missing', async () => {
         await expect(createManager().executeTool('user', 'single_file_write', {
-            path: 'report.md',
-            content: 'hello'
-        }, 'trace')).rejects.toThrow('startLine 缺少必填字段');
+            path: 'report.md'
+        }, 'trace')).rejects.toThrow('content 缺少必填字段');
     });
 
-    it('rejects single_file_write when startLine is below one', async () => {
-        await expect(createManager().executeTool('user', 'single_file_write', {
+    it('rejects single_file_edit when action is missing', async () => {
+        await expect(createManager().executeTool('user', 'single_file_edit', {
             path: 'report.md',
-            content: 'hello',
-            startLine: 0
-        }, 'trace')).rejects.toThrow('startLine 必须 >= 1');
+            newText: 'hello'
+        }, 'trace')).rejects.toThrow('action 缺少必填字段');
     });
 
-    it('rejects single_file_write when lineCount is negative', async () => {
-        await expect(createManager().executeTool('user', 'single_file_write', {
+    it('rejects single_file_edit when action is invalid', async () => {
+        await expect(createManager().executeTool('user', 'single_file_edit', {
             path: 'report.md',
-            content: 'hello',
-            startLine: 1,
-            lineCount: -1
-        }, 'trace')).rejects.toThrow('lineCount 必须 >= 0');
+            action: 'delete',
+            newText: ''
+        }, 'trace')).rejects.toThrow('action');
     });
 
     it('rejects browser_mcp_call when toolName is missing', async () => {
