@@ -6,7 +6,7 @@
  *
  * 职责范围：
  *  - 流式调用 AI API，收集 text / reasoning / tool_calls
- *  - 网络超时自动重试（指数退避，最多 RETRY_LIMIT 次）
+ *  - 网络层错误自动重试（指数退避，最多 RETRY_LIMIT 次，可通过 AGENT_API_RETRY_LIMIT 配置）
  *  - 按顺序执行工具调用，将结果推入 activeHistory
  *  - 每轮调用后执行 prepareMessages 整理上下文
  *  - 向前端 emit 事件（text / reasoning / annotation / stage / error）
@@ -28,8 +28,11 @@ import { extractReasoningText } from "../utils/ReasoningUtils.js";
 
 const getTS = () => getBeijingLogTimePrefix();
 
-/** 最大流式重试次数（网络超时 / ECONNRESET） */
-const RETRY_LIMIT = 3;
+/**
+ * 最大流式重试次数（网络超时 / 连接错误 / DNS 失败等）。
+ * 从 globalConfig.agent.apiRetryLimit 读取（可通过环境变量 AGENT_API_RETRY_LIMIT 覆盖，默认 3 次）。
+ */
+const RETRY_LIMIT = globalConfig.agent.apiRetryLimit;
 const CLIENT_INLINE_STRING_LIMIT = 1200;
 const CLIENT_MAX_ARRAY_ITEMS = 80;
 const CLIENT_MAX_OBJECT_KEYS = 80;
@@ -457,19 +460,33 @@ export class AgentTurnEngine {
                 } catch (error: any) {
                     if (abortSignal?.aborted) throw error;
 
-                    // 判断是否为超时或网络错误 (Undici TypeError: terminated, BodyTimeoutError 等)
-                    const isTimeout =
-                        error.cause?.code === "UND_ERR_BODY_TIMEOUT" ||
-                        error.message?.includes("Timeout") ||
-                        error.message?.includes("terminated") ||
+                    // ================================================================
+                    // 判断是否为可重试的网络层错误（连接未建立 / DNS 失败 / 流中断等）
+                    // ================================================================
+                    // 核心判据：error.status === undefined 表示从未收到 HTTP 响应，
+                    // 即连接根本未到达服务器，必定是网络层问题，应重试。
+                    // 覆盖场景：DNS 解析失败(ENOTFOUND)、连接被拒(ECONNREFUSED)、
+                    // 流式中断(UND_ERR_BODY_TIMEOUT/terminated)、TLS 握手失败等。
+                    const isRetryableNetworkError =
+                        error.status === undefined ||                          // 无 HTTP 响应 = 网络层错误
                         error.code === "ETIMEDOUT" ||
+                        error.code === "ECONNRESET" ||
+                        error.cause?.code === "ENOTFOUND" ||                  // DNS 解析失败
+                        error.cause?.code === "ECONNREFUSED" ||              // 连接被拒
                         error.cause?.code === "ECONNRESET" ||
-                        error.code === "ECONNRESET";
+                        error.cause?.code === "EAI_AGAIN" ||                  // DNS 临时失败
+                        error.cause?.code === "EPIPE" ||                     // 管道断裂
+                        error.cause?.code === "UND_ERR_BODY_TIMEOUT" ||      // undici 流读超时
+                        error.cause?.code === "UND_ERR_CONNECT_TIMEOUT" ||   // undici 连接超时
+                        (typeof error.cause?.code === 'string' && error.cause.code.startsWith("UND_ERR_")) || // 其他 undici 错误
+                        error.cause?.message?.includes("fetch failed") ||     // fetch 通用失败
+                        error.message?.includes("terminated");               // 流式连接被终止
 
-                    if (isTimeout && retryCount < RETRY_LIMIT) {
+                    if (isRetryableNetworkError && retryCount < RETRY_LIMIT) {
                         retryCount++;
+                        const errCode = error.cause?.code || error.code || error.status || 'NETWORK';
                         console.warn(
-                            `${getTS()} [AgentTurnEngine] 遇到网络异常或流式中断 (${error.message || "ECONNRESET/TIMEOUT"})，正在进行第 ${retryCount}/${RETRY_LIMIT} 次重试...`
+                            `${getTS()} [AgentTurnEngine] 遇到网络层错误 (code=${errCode})，正在进行第 ${retryCount}/${RETRY_LIMIT} 次重试...`
                         );
                         emit({ type: "stage", content: `网络连接中断，正在自动进行第 ${retryCount} 次自动重试...` });
                         // 制造视觉断层补偿

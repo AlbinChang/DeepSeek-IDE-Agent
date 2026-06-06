@@ -123,6 +123,7 @@ export const config = {
     // Agent 运行参数
     agent: {
         maxTurns: parsePositiveInt(process.env.AGENT_MAX_TURNS, 1000, 1),
+        apiRetryLimit: parsePositiveInt(process.env.AGENT_API_RETRY_LIMIT, 3, 0),
     },
 
     // read_file 工具限制
