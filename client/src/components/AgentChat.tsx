@@ -204,12 +204,21 @@ export const AgentChat: React.FC = () => {
     const [historyIndex, setHistoryIndex] = useState<number>(-1);
     const [tempInput, setTempInput] = useState<string>('');
 
+    // 本地历史持久化 key（按工作区隔离）
+    const historyStorageKey = workspaceRoot ? `instruct_history_${workspaceRoot.replace(/[^a-zA-Z0-9\-_]/g, '_')}` : null;
+
     // 初次加载和回车发送后加载记录
     const fetchInstructHistory = async () => {
         if (!workspaceRoot) return;
-        // Electron 模式：暂不获取远程指示历史
+        // Electron 模式：从 localStorage 读取本地历史
         if (electronBridge.isElectron) {
-            setInstructHistory([]);
+            try {
+                const raw = historyStorageKey ? localStorage.getItem(historyStorageKey) : null;
+                const parsed = raw ? JSON.parse(raw) : [];
+                setInstructHistory(Array.isArray(parsed) ? parsed : []);
+            } catch {
+                setInstructHistory([]);
+            }
             return;
         }
         try {
@@ -222,6 +231,32 @@ export const AgentChat: React.FC = () => {
             console.error('Failed to fetch instruct history:', error);
         }
     };
+
+    // 本地保存用户指令到 localStorage（Electron 模式）
+    // 存储顺序：[最新, ..., 最旧]，与 ArrowUp 从 index 0 开始匹配
+    const saveLocalInstruct = useCallback((content: string) => {
+        if (!electronBridge.isElectron || !historyStorageKey || !content.trim()) return;
+        try {
+            const raw = localStorage.getItem(historyStorageKey);
+            const existing: string[] = raw ? JSON.parse(raw) : [];
+            // 去重：避免连续相同指令
+            if (existing.length > 0 && existing[0] === content.trim()) return;
+            // 前置插入，最新在前，最多 50 条
+            const updated = [content.trim(), ...existing].slice(0, 50);
+            localStorage.setItem(historyStorageKey, JSON.stringify(updated));
+        } catch { /* ignore */ }
+    }, [historyStorageKey]);
+
+    // 监听新用户消息 → 自动保存到本地历史
+    useEffect(() => {
+        if (!electronBridge.isElectron || messages.length === 0) return;
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg?.role === 'user' && lastMsg?.content) {
+            saveLocalInstruct(String(lastMsg.content));
+            // 刷新列表
+            fetchInstructHistory();
+        }
+    }, [messages.length]);
 
     useEffect(() => {
         fetchInstructHistory();
