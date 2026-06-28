@@ -5,6 +5,7 @@ import 'xterm/css/xterm.css';
 import { useAgentContext } from '@/providers/AgentContext';
 import { USER_ID, TERMINAL_HTTP_BASE } from '@/config';
 import { Lock } from 'lucide-react';
+import { electronBridge } from '@/services/electron-bridge';
 
 export const Terminal: React.FC = () => {
     const { workspaceRoot } = useAgentContext();
@@ -101,6 +102,56 @@ export const Terminal: React.FC = () => {
         const connectTerminal = () => {
             if (isDisposed) return;
             
+            // ── Electron 模式：使用 IPC 直接操作 node-pty ──
+            if (electronBridge.isElectron) {
+                console.log(`[Terminal] [${new Date().toLocaleTimeString()}] Connecting via Electron IPC...`);
+                
+                // 创建终端会话
+                electronBridge.createTerminal({
+                    userId: USER_ID,
+                    sessionId,
+                    workDir: workspaceRoot,
+                    cols: term.cols,
+                    rows: term.rows,
+                }).then((result: any) => {
+                    if (isDisposed) return;
+                    console.log('[Terminal] Electron PTY created:', result);
+                    isReadyRef.current = true;
+                    term.focus();
+                }).catch((err: any) => {
+                    if (isDisposed) return;
+                    console.error('[Terminal] Failed to create PTY:', err);
+                    // 重试
+                    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+                    reconnectTimeoutRef.current = setTimeout(connectTerminal, 2000);
+                });
+                
+                // 监听终端输出
+                const outputCleanup = electronBridge.onTerminalOutput((output: any) => {
+                    if (isDisposed || output.sessionId !== sessionId) return;
+                    if (output.type === 'exit') {
+                        console.warn('[Terminal] PTY exited, reconnecting...');
+                        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+                        reconnectTimeoutRef.current = setTimeout(connectTerminal, 300);
+                        return;
+                    }
+                    try {
+                        term.write(output.data, () => {
+                            if (term.buffer.active.baseY > 0) {
+                                term.scrollToBottom();
+                            }
+                        });
+                    } catch (err) {
+                        // ignore write errors
+                    }
+                });
+                
+                return () => {
+                    outputCleanup();
+                    electronBridge.destroyTerminal(sessionId);
+                };
+            }
+            
             // [Fix] 显式销毁旧的 SSE 实例，防止多连接导致的重复字符输出
             if (activeESRef.current) {
                 console.log(`[Terminal] Closing stale EventSource before reconnect...`);
@@ -175,11 +226,15 @@ export const Terminal: React.FC = () => {
             if (!dataDisposer) {
                 dataDisposer = term.onData((data) => {
                     processInputBufferForClear(data);
-                    fetch(`${TERMINAL_HTTP_BASE}/terminal/input`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ userId: USER_ID, sessionId, data, root: workspaceRoot, cols: term.cols, rows: term.rows })
-                    }).catch(err => console.error('[Terminal] Input failed', err));
+                    if (electronBridge.isElectron) {
+                        electronBridge.sendTerminalInput(sessionId, data);
+                    } else {
+                        fetch(`${TERMINAL_HTTP_BASE}/terminal/input`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ userId: USER_ID, sessionId, data, root: workspaceRoot, cols: term.cols, rows: term.rows })
+                        }).catch(err => console.error('[Terminal] Input failed', err));
+                    }
                 });
             }
 
@@ -227,11 +282,15 @@ export const Terminal: React.FC = () => {
 
                     console.log(`[Terminal] [${new Date().toLocaleTimeString()}] Debounced Resize: ${cols}x${rows}`);
                     lastDimsRef.current = { cols, rows };
-                    fetch(`${TERMINAL_HTTP_BASE}/terminal/resize`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ userId: USER_ID, sessionId, cols, rows, root: workspaceRoot })
-                    }).catch(err => console.error('[Terminal] Resize failed', err));
+                    if (electronBridge.isElectron) {
+                        electronBridge.resizeTerminal(sessionId, cols, rows);
+                    } else {
+                        fetch(`${TERMINAL_HTTP_BASE}/terminal/resize`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ userId: USER_ID, sessionId, cols, rows, root: workspaceRoot })
+                        }).catch(err => console.error('[Terminal] Resize failed', err));
+                    }
                     termInstance.scrollToBottom();
                 }, 300); // 300ms 稳定后发送
             };
@@ -302,11 +361,15 @@ export const Terminal: React.FC = () => {
                         const { cols, rows } = term;
                         if (lastDimsRef.current?.cols !== cols || lastDimsRef.current?.rows !== rows) {
                             lastDimsRef.current = { cols, rows };
-                            fetch(`${TERMINAL_HTTP_BASE}/terminal/resize`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ userId: USER_ID, sessionId, cols, rows, root: workspaceRoot })
-                            }).catch(err => console.error('[Terminal] Initial resize failed', err));
+                            if (electronBridge.isElectron) {
+                                electronBridge.resizeTerminal(sessionId, cols, rows);
+                            } else {
+                                fetch(`${TERMINAL_HTTP_BASE}/terminal/resize`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ userId: USER_ID, sessionId, cols, rows, root: workspaceRoot })
+                                }).catch(err => console.error('[Terminal] Initial resize failed', err));
+                            }
                         }
                     }
                 } catch (e) {}

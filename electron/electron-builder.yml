@@ -1,0 +1,47 @@
+appId: com.deepseek.ide-agent
+productName: DeepSeek IDE Agent
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist/**/*
+  - ../server/src/config/**/*
+  - ../.env
+
+extraResources:
+  - from: ../server/src/config
+    to: config
+  - from: ../.env
+    to: .env
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/icon.ico
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  icon: resources/icon.icns
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+  icon: resources/icon.png
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+asar: true
+asarUnpack:
+  - node_modules/node-pty/**
+  - node_modules/@playwright/**

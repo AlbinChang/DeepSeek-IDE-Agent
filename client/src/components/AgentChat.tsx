@@ -8,6 +8,7 @@ import { SettingsModal } from '@/components/SettingsModal';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
 import { useAgentContext } from '@/providers/AgentContext';
 import { USER_ID, API_BASE } from '@/config';
+import { electronBridge } from '@/services/electron-bridge';
 import type { Message, MessagePart, StreamProgress } from '@/hooks/useAgentSSE';
 
 interface ChatMessageItemProps {
@@ -206,6 +207,11 @@ export const AgentChat: React.FC = () => {
     // 初次加载和回车发送后加载记录
     const fetchInstructHistory = async () => {
         if (!workspaceRoot) return;
+        // Electron 模式：暂不获取远程指示历史
+        if (electronBridge.isElectron) {
+            setInstructHistory([]);
+            return;
+        }
         try {
             const res = await fetch(`${API_BASE}/api/chat/instructs?userId=${USER_ID}&workspace=${encodeURIComponent(workspaceRoot)}`);
             const _data = await res.json();

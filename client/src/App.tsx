@@ -15,6 +15,7 @@ import { WorkerManager } from '@/services/WorkerManager';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
 import { useAgentContext } from '@/providers/AgentContext';
 import { USER_ID, WS_BASE, GATEWAY_EVENT, LEGACY_WS_EVENT } from '@/config';
+import { electronBridge } from '@/services/electron-bridge';
 
 // 拖拽分割线组件 (对齐 工业级交互规范)
 const ResizeHandle = ({ className = '', id }: { className?: string; id?: string }) => (
@@ -169,6 +170,44 @@ function App() {
     let isDisposed = false;
     const connectTimer = window.setTimeout(() => {
       if (isDisposed) return;
+      // Electron 模式：不使用 WebSocket，改用 IPC 事件（通过 electronBridge.onSystemEvent）
+      if (electronBridge.isElectron) {
+        // 订阅 IPC 系统事件替代 WebSocket
+        const sysCleanup = electronBridge.onSystemEvent((event) => {
+          if (!event) return;
+          window.dispatchEvent(new CustomEvent(GATEWAY_EVENT, { detail: event }));
+          window.dispatchEvent(new CustomEvent(LEGACY_WS_EVENT, { detail: event }));
+          const payload = (event as any).payload || {};
+          switch (event.type) {
+            case 'system:ready':
+              if (payload && payload.initialized && payload.workspaceRoot) {
+                if (payload.workspaceRoot !== workspaceRootRef.current) {
+                  setWorkspaceRoot(payload.workspaceRoot);
+                }
+              }
+              break;
+            case 'system:standby':
+              break;
+            case 'editor:lock':
+              setLockedFiles(prev => ({ ...prev, [payload.path]: payload.toolCallId }));
+              break;
+            case 'editor:unlock':
+              setLockedFiles(prev => {
+                const next = { ...prev };
+                delete next[payload.path];
+                return next;
+              });
+              break;
+            case 'terminal:data':
+              window.dispatchEvent(new CustomEvent('ui:terminal:data', { detail: payload }));
+              break;
+          }
+        });
+        // 在 cleanup 中取消订阅
+        const origCleanup = () => { sysCleanup(); };
+        (window as any).__electronSysCleanup = origCleanup;
+        return;
+      }
       WorkerManager.connect('system-events', `${WS_BASE}/ws/events?userId=${USER_ID}${urlSuffix}`, (msg) => {
           if (!msg) return;
         const normalized = (msg?.jsonrpc === '2.0' && msg?.method === 'event/push' && msg?.params)
@@ -235,9 +274,16 @@ function App() {
     return () => {
       isDisposed = true;
       clearTimeout(connectTimer);
+      if (electronBridge.isElectron) {
+        // 清理 IPC 系统事件订阅
+        const sysCleanup = (window as any).__electronSysCleanup;
+        if (typeof sysCleanup === 'function') sysCleanup();
+        delete (window as any).__electronSysCleanup;
+      } else {
         WorkerManager.close('system-events');
-        window.removeEventListener('keydown', handleKeyDown);
-        window.removeEventListener('ui:file:select', onFileSelectRequest);
+      }
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('ui:file:select', onFileSelectRequest);
     };
   }, [closeActiveFile, navigateToFile, workspaceRoot]);
 

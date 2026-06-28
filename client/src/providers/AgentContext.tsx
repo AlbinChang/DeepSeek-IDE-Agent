@@ -1,6 +1,7 @@
 ﻿import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { USER_ID, API_BASE } from '@/config';
+import { electronBridge } from '@/services/electron-bridge';
 
 export interface ModelProviderConfig {
     id: string;
@@ -156,27 +157,39 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         syncWorkspaceRootToUrl(normalizedPath);
     };
 
+    // 统一的设置状态应用函数（Electron IPC 和 Web fetch 共用）
+    const applySettingsState = (normalized: UserSettings) => {
+        setSettings(normalized);
+        setProviderState(normalized.activeProvider || normalized.providers[0]?.id || '');
+        setModelState(normalized.activeModel || normalized.providers[0]?.modelId || '');
+        if (normalized.locale) setLocaleState(normalized.locale);
+        localStorage.setItem('agent-settings', JSON.stringify(normalized));
+        localStorage.setItem('agent-provider', normalized.activeProvider || normalized.providers[0]?.id || '');
+        localStorage.setItem('agent-model', normalized.activeModel || normalized.providers[0]?.modelId || '');
+    };
+
     // 初始同步：从后端恢复配置 (对齐 6.1 节：后端持久化)
     useEffect(() => {
         const initSettings = async () => {
             try {
-                const rootParam = workspaceRoot ? `&root=${encodeURIComponent(workspaceRoot)}` : '';
-                const res = await fetch(`${API_BASE}/api/settings?userId=${USER_ID}${rootParam}`);
-                // 深度修复：针对 204 No Content (无工作区) 进行静默处理，避免 JSON 解析报错
-                if (res.ok && res.status !== 204) {
-                    const data = await res.json();
-                    if (data && data.providers && data.providers.length > 0) {
-                        const normalized = normalizeSettings(data);
-                        setSettings(normalized);
-                        setProviderState(normalized.activeProvider || normalized.providers[0].id);
-                        setModelState(normalized.activeModel || normalized.providers[0].modelId);
-                        if (normalized.locale) setLocaleState(normalized.locale);
-
-                        localStorage.setItem('agent-settings', JSON.stringify(normalized));
-                        localStorage.setItem('agent-provider', normalized.activeProvider || normalized.providers[0].id);
-                        localStorage.setItem('agent-model', normalized.activeModel || normalized.providers[0].modelId);
-                        
-                        console.log('[Settings] Successfully restored from backend persistent store');
+                if (electronBridge.isElectron) {
+                    // Electron IPC 直读设置
+                    const result = await electronBridge.getSettings(USER_ID);
+                    if (result?.success && result?.settings?.providers?.length > 0) {
+                        const normalized = normalizeSettings(result.settings);
+                        applySettingsState(normalized);
+                        console.log('[Settings] Restored via Electron IPC');
+                    }
+                } else {
+                    const rootParam = workspaceRoot ? `&root=${encodeURIComponent(workspaceRoot)}` : '';
+                    const res = await fetch(`${API_BASE}/api/settings?userId=${USER_ID}${rootParam}`);
+                    if (res.ok && res.status !== 204) {
+                        const data = await res.json();
+                        if (data && data.providers && data.providers.length > 0) {
+                            const normalized = normalizeSettings(data);
+                            applySettingsState(normalized);
+                            console.log('[Settings] Successfully restored from backend persistent store');
+                        }
                     }
                 }
             } catch (e) {
@@ -189,17 +202,25 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     // 同步配置到后端Agent助手服务
     const syncSettingsWithServer = useCallback(async (currentSettings: UserSettings) => {
         try {
-            const res = await fetch(`${API_BASE}/api/settings/sync`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+            if (electronBridge.isElectron) {
+                await electronBridge.syncSettings({
                     userId: USER_ID,
-                    workspaceRoot: workspaceRoot || undefined,
-                    settings: currentSettings
-                })
-            });
-            const result = await res.json();
-            console.log('[Settings] Database Sync Status:', result.status);
+                    settings: currentSettings,
+                    root: workspaceRoot || undefined,
+                });
+            } else {
+                const res = await fetch(`${API_BASE}/api/settings/sync`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        userId: USER_ID,
+                        workspaceRoot: workspaceRoot || undefined,
+                        settings: currentSettings
+                    })
+                });
+                const result = await res.json();
+                console.log('[Settings] Database Sync Status:', result.status);
+            }
         } catch (e) {
             console.error('[Settings] Persistence failed:', e);
         }
@@ -213,21 +234,23 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     }, [settings, syncSettingsWithServer]);
 
     const refreshSettings = async () => {
-        // 主动刷新：从后端获取最新的“快照”状态
         try {
-            const rootParam = workspaceRoot ? `&root=${encodeURIComponent(workspaceRoot)}` : '';
-            const res = await fetch(`${API_BASE}/api/settings?userId=${USER_ID}${rootParam}`);
-            if (!res.ok || res.status === 204) return;
-            const data = await res.json();
-            const normalized = normalizeSettings(data);
-            setSettings(normalized);
-            setProviderState(normalized.activeProvider || normalized.providers[0].id);
-            setModelState(normalized.activeModel || normalized.providers[0].modelId);
-            if (normalized.locale) setLocaleState(normalized.locale);
-            localStorage.setItem('agent-settings', JSON.stringify(normalized));
-            localStorage.setItem('agent-provider', normalized.activeProvider || normalized.providers[0].id);
-            localStorage.setItem('agent-model', normalized.activeModel || normalized.providers[0].modelId);
-            console.log('[Settings] Current Workspace Config:', normalized);
+            if (electronBridge.isElectron) {
+                const result = await electronBridge.getSettings(USER_ID);
+                if (result?.success && result?.settings?.providers?.length > 0) {
+                    const normalized = normalizeSettings(result.settings);
+                    applySettingsState(normalized);
+                    console.log('[Settings] Refreshed via Electron IPC:', normalized);
+                }
+            } else {
+                const rootParam = workspaceRoot ? `&root=${encodeURIComponent(workspaceRoot)}` : '';
+                const res = await fetch(`${API_BASE}/api/settings?userId=${USER_ID}${rootParam}`);
+                if (!res.ok || res.status === 204) return;
+                const data = await res.json();
+                const normalized = normalizeSettings(data);
+                applySettingsState(normalized);
+                console.log('[Settings] Current Workspace Config:', normalized);
+            }
         } catch (e) {
             console.error('Failed to fetching settings:', e);
         }

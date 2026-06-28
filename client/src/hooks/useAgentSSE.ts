@@ -4,6 +4,7 @@ import { USER_ID, API_BASE } from "@/config";
 import { useAgentContext } from "@/providers/AgentContext";
 import { db } from "@/services/db";
 import { createClientId } from "@/utils/id";
+import { electronBridge } from "@/services/electron-bridge";
 
 export interface MessagePart {
     id: string;
@@ -347,17 +348,18 @@ export function useAgentSSE() {
             abortControllerRef.current.abort();
             abortControllerRef.current = null;
         }
-        try {
-            await fetch(`${API_BASE}/api/chat/stop`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ userId: USER_ID, workspaceRoot })
-            });
-        } catch (e) {
-            console.error("Failed to stop chat:", e);
-        } finally {
-            setIsLoading(false);
+        if (!electronBridge.isElectron) {
+            try {
+                await fetch(`${API_BASE}/api/chat/stop`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ userId: USER_ID, workspaceRoot })
+                });
+            } catch (e) {
+                console.error("Failed to stop chat:", e);
+            }
         }
+        setIsLoading(false);
     }, [workspaceRoot]);
 
     const append = useCallback(async (msg: { id: string, role: 'user', content: string }) => {
@@ -478,6 +480,117 @@ export function useAgentSSE() {
             }
         };
 
+        // ── 统一的 Chunk 处理器（Electron IPC 和 Web SSE 共用） ──
+        const processStreamChunk = (chunk: any) => {
+            if (chunk.type === 'stage') {
+                startTransition(() => {
+                    setData(prev => [...prev, { type: 'stage', message: chunk.content, timestamp: chunk.timestamp || Date.now() }].slice(-MAX_STAGE_ITEMS));
+                });
+                return;
+            }
+
+            if (chunk.method === 'todo/update' && chunk.params?.todos) {
+                startTransition(() => setTodos(chunk.params.todos));
+                return;
+            }
+
+            if (chunk.type === 'progress') {
+                startTransition(() => {
+                    setStreamProgress({
+                        receivedChars: Number(chunk.receivedChars) || 0,
+                        contentChars: Number(chunk.contentChars) || 0,
+                        reasoningChars: Number(chunk.reasoningChars) || 0,
+                        toolArgumentChars: Number(chunk.toolArgumentChars) || 0,
+                        deltaChars: Number(chunk.deltaChars) || 0,
+                        channel: chunk.channel,
+                        toolName: chunk.toolName,
+                        turn: chunk.turn,
+                        updatedAt: chunk.timestamp || Date.now()
+                    });
+                });
+                return;
+            }
+
+            // text/reasoning 事件：累积到 pendingDeltasRef，通过 rAF 批量刷新
+            if (chunk.type === 'text' || chunk.type === 'reasoning') {
+                if (rafId !== null) {
+                    cancelAnimationFrame(rafId);
+                    flushPendingDeltas();
+                }
+                pendingDeltasRef.current.push({
+                    type: chunk.type,
+                    content: chunk.content || "",
+                    turn: chunk.turn,
+                });
+                scheduleFlush();
+                return;
+            }
+
+            // 非 text/reasoning 事件：先刷新 pending deltas
+            if (rafId !== null) {
+                cancelAnimationFrame(rafId);
+                flushPendingDeltas();
+            }
+
+            const sanitizedAnnotationParams = chunk.type === 'annotation'
+                ? sanitizeAnnotationParams(chunk.method, chunk.params)
+                : undefined;
+
+            setMessages(prev => {
+                const next = [...prev];
+                let lastIndex = next.length - 1;
+                let last = next[lastIndex];
+
+                if (!last || last.role !== "assistant" || (last.isFinal && chunk.type !== 'done' && chunk.type !== 'error' && chunk.type !== 'init')) {
+                    last = { 
+                        id: currentAssistantMsgId, 
+                        role: "assistant", 
+                        content: "", 
+                        parts: [], 
+                        timestamp: Date.now(),
+                        traceId: chunk.traceId
+                    };
+                    next.push(last);
+                    lastIndex = next.length - 1;
+                } else {
+                    last = { ...last, parts: [...(last.parts || [])] };
+                    next[lastIndex] = last;
+                }
+
+                switch (chunk.type) {
+                    case "init":
+                        last.traceId = chunk.traceId;
+                        break;
+                    case "annotation":
+                        last.parts.push({
+                            id: createClientId(),
+                            type: 'annotation',
+                            content: chunk.content || chunk.method || "",
+                            method: chunk.method,
+                            params: sanitizedAnnotationParams,
+                            timestamp: Date.now()
+                        });
+                        break;
+                    case "error":
+                        last.parts.push({ 
+                            id: createClientId(), 
+                            type: 'error', 
+                            content: chunk.content || chunk.message || "An internal error occurred", 
+                            timestamp: Date.now() 
+                        });
+                        last.isFinal = true;
+                        break;
+                    case "done":
+                        last.isFinal = true;
+                        db.chatHistory.put({ ...sanitizeMessageForClient(userMsg), workspaceRoot }).catch(console.error);
+                        db.chatHistory.put({ ...sanitizeMessageForClient(last), workspaceRoot }).catch(console.error);
+                        break;
+                }
+
+                return trimMessagesForMemory(next);
+            });
+        };
+
         // 构建用户指令：若有打开文件且有文本选中，附加文件路径与行列区间
         const ctx = editorContextRef.current;
         const hasAttachedContext = !!(ctx.activeFile && ctx.hasSelection);
@@ -490,6 +603,50 @@ export function useAgentSSE() {
             const defaultEffort = activeProvider?.defaultReasoningEffort === 'max' ? 'max' : 'high';
             const shouldEnableThinking = activeProvider?.enableThinking !== false;
 
+            const reasoningEffortValue = shouldEnableThinking
+                ? ((): 'high' | 'max' => {
+                    try {
+                        const v = window.localStorage.getItem('reasoning_effort');
+                        if (v === 'max' || v === 'high') return v;
+                        return defaultEffort;
+                    } catch {
+                        return defaultEffort;
+                    }
+                })()
+                : undefined;
+
+            // ═══════════════════════════════════════
+            // Electron IPC 路径（替换 SSE fetch）
+            // ═══════════════════════════════════════
+            if (electronBridge.isElectron) {
+                await electronBridge.startAgentChat(
+                    {
+                        userId: USER_ID,
+                        userInstruct,
+                        root: workspaceRoot,
+                        locale,
+                        provider,
+                        model,
+                        traceId: currentTraceId,
+                        reasoningEffort: reasoningEffortValue,
+                    },
+                    (chunk) => {
+                        processStreamChunk(chunk);
+                    },
+                    controller.signal
+                );
+                
+                // 流结束后刷新 pending deltas
+                if (rafId !== null) {
+                    cancelAnimationFrame(rafId);
+                    rafId = null;
+                }
+                flushPendingDeltas();
+            } else {
+
+            // ═══════════════════════════════════════
+            // Web SSE 路径（原有逻辑）
+            // ═══════════════════════════════════════
             const res = await fetch(`${API_BASE}/api/chat/sse`, {
                 method: "POST", 
                 headers: { "Content-Type": "application/json" },
@@ -500,19 +657,8 @@ export function useAgentSSE() {
                     locale,
                     provider,
                     model,
-                    traceId: currentTraceId, // 2. 强制透传给后端
-                    // 2026.04: 思考强度 (high | max)；从 localStorage 读取，前端 UI 会写入
-                    reasoningEffort: shouldEnableThinking
-                        ? ((): 'high' | 'max' => {
-                            try {
-                                const v = window.localStorage.getItem('reasoning_effort');
-                                if (v === 'max' || v === 'high') return v;
-                                return defaultEffort;
-                            } catch {
-                                return defaultEffort;
-                            }
-                        })()
-                        : undefined
+                    traceId: currentTraceId,
+                    reasoningEffort: reasoningEffortValue,
                 }),
                 signal: controller.signal
             });
@@ -572,118 +718,8 @@ export function useAgentSSE() {
                                 }
                             }
                             
-                            if (chunk.type === 'stage') {
-                                startTransition(() => {
-                                    setData(prev => [...prev, { type: 'stage', message: chunk.content, timestamp: chunk.timestamp || Date.now() }].slice(-MAX_STAGE_ITEMS));
-                                });
-                                continue;
-                            }
-
-                            if (chunk.method === 'todo/update' && chunk.params?.todos) {
-                                startTransition(() => setTodos(chunk.params.todos));
-                                continue;
-                            }
-
-                            if (chunk.type === 'progress') {
-                                startTransition(() => {
-                                    setStreamProgress({
-                                        receivedChars: Number(chunk.receivedChars) || 0,
-                                        contentChars: Number(chunk.contentChars) || 0,
-                                        reasoningChars: Number(chunk.reasoningChars) || 0,
-                                        toolArgumentChars: Number(chunk.toolArgumentChars) || 0,
-                                        deltaChars: Number(chunk.deltaChars) || 0,
-                                        channel: chunk.channel,
-                                        toolName: chunk.toolName,
-                                        turn: chunk.turn,
-                                        updatedAt: chunk.timestamp || Date.now()
-                                    });
-                                });
-                                continue;
-                            }
-
-                            // 【性能优化】text/reasoning 事件：累积到 pendingDeltasRef，通过 rAF 批量刷新
-                            if (chunk.type === 'text' || chunk.type === 'reasoning') {
-                                // 先刷新已有的非 delta 事件（如之前的 annotation）
-                                if (rafId !== null) {
-                                    cancelAnimationFrame(rafId);
-                                    flushPendingDeltas();
-                                }
-                                pendingDeltasRef.current.push({
-                                    type: chunk.type,
-                                    content: chunk.content || "",
-                                    turn: chunk.turn,
-                                });
-                                scheduleFlush();
-                                continue;
-                            }
-
-                            // 非 text/reasoning 事件（annotation、error、done、init）：先刷新 pending deltas，再立即更新
-                            if (rafId !== null) {
-                                cancelAnimationFrame(rafId);
-                                flushPendingDeltas();
-                            }
-
-                            // 预计算 annotation 参数（在 setMessages 外部执行，避免阻塞状态更新）
-                            const sanitizedAnnotationParams = chunk.type === 'annotation'
-                                ? sanitizeAnnotationParams(chunk.method, chunk.params)
-                                : undefined;
-
-                            setMessages(prev => {
-                                const next = [...prev];
-                                let lastIndex = next.length - 1;
-                                let last = next[lastIndex];
-
-                                if (!last || last.role !== "assistant" || (last.isFinal && chunk.type !== 'done' && chunk.type !== 'error' && chunk.type !== 'init')) {
-                                    last = { 
-                                        id: currentAssistantMsgId, 
-                                        role: "assistant", 
-                                        content: "", 
-                                        parts: [], 
-                                        timestamp: Date.now(),
-                                        traceId: chunk.traceId
-                                    };
-                                    next.push(last);
-                                    lastIndex = next.length - 1;
-                                } else {
-                                    last = { ...last, parts: [...(last.parts || [])] };
-                                    next[lastIndex] = last;
-                                }
-
-                                // 注意: text/reasoning 事件已通过上方的批量累积路径处理（rAF 批量刷新），
-                                // 此处 switch 仅处理 annotation/error/done/init 等非 delta 事件
-                                switch (chunk.type) {
-                                    case "init":
-                                        last.traceId = chunk.traceId;
-                                        break;
-                                    case "annotation":
-                                        last.parts.push({
-                                            id: createClientId(),
-                                            type: 'annotation',
-                                            content: chunk.content || chunk.method || "",
-                                            method: chunk.method,
-                                            params: sanitizedAnnotationParams,  // 预计算，避免在 setMessages 内重复执行
-                                            timestamp: Date.now()
-                                        });
-                                        break;
-                                    case "error":
-                                        last.parts.push({ 
-                                            id: createClientId(), 
-                                            type: 'error', 
-                                            content: chunk.content || chunk.message || "An internal error occurred", 
-                                            timestamp: Date.now() 
-                                        });
-                                        last.isFinal = true;
-                                        break;
-                                    case "done":
-                                        last.isFinal = true;
-                                        // 全面落库（异步，不阻塞 UI 更新）
-                                        db.chatHistory.put({ ...sanitizeMessageForClient(userMsg), workspaceRoot }).catch(console.error);
-                                        db.chatHistory.put({ ...sanitizeMessageForClient(last), workspaceRoot }).catch(console.error);
-                                        break;
-                                }
-
-                                return trimMessagesForMemory(next);
-                            });
+                            // 统一使用 processStreamChunk（与 Electron IPC 路径共享逻辑）
+                            processStreamChunk(chunk);
                         } catch (e) {
                             console.error("Failed to parse SSE chunk", e, dataString);
                         }
@@ -697,6 +733,7 @@ export function useAgentSSE() {
                 rafId = null;
             }
             flushPendingDeltas();
+            } // 结束 else 块（Web SSE 路径）
         } catch (e: any) { 
             // 异常时也刷新剩余的 delta
             if (rafId !== null) {
@@ -730,16 +767,19 @@ export function useAgentSSE() {
         if (!window.confirm("确定清空当前工作区的会话历史吗？")) return;
         
         try {
-            await fetch(`${API_BASE}/api/chat/clear`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ userId: USER_ID, workspaceRoot })
-            });
+            if (!electronBridge.isElectron) {
+                await fetch(`${API_BASE}/api/chat/clear`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ userId: USER_ID, workspaceRoot })
+                });
+            }
+            // Electron 模式：仅清空本地 IndexedDB
             await db.chatHistory.where("workspaceRoot").equals(workspaceRoot).delete();
             setMessages([]);
             setData([]);
             setStreamProgress(null);
-            setTodos([]); // 2026.03: 显式清空前端 Todo 状态 (防止 UI 滞留)
+            setTodos([]);
         } catch (e) {
             console.error("Failed to clear history:", e);
         }

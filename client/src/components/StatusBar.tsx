@@ -2,6 +2,7 @@
 import { GitBranch, Hash, Activity, User, Cpu, Code2 } from 'lucide-react';
 import { USER_ID, API_BASE, GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
+import { electronBridge } from '@/services/electron-bridge';
 
 interface StatusBarData {
     user?: {
@@ -64,6 +65,17 @@ export const StatusBar: React.FC = () => {
         // 使用轮询代替纯 WS 推送，确保在网络不稳定时状态依然能最终一致
         const fetchStatus = async () => {
             try {
+                // Electron 模式：跳过 HTTP 轮询，使用本地系统信息
+                if (electronBridge.isElectron) {
+                    setStatus(prev => ({
+                        ...prev,
+                        user: { id: USER_ID, name: 'Electron' },
+                        model: { provider: prev?.model?.provider || 'local', id: prev?.model?.id || 'electron' },
+                        git: prev?.git || { branch: 'master', isDirty: false },
+                        tokens: prev?.tokens || { total: 0 },
+                    }));
+                    return;
+                }
                 // 对齐 33.1 节：使用全局配置的 API_BASE，并关联当前 workspaceRoot
                 const url = new URL(`${API_BASE}/api/system/status/realtime`);
                 url.searchParams.set('userId', USER_ID);
@@ -81,7 +93,10 @@ export const StatusBar: React.FC = () => {
                     setStatus(data.payload);
                 }
             } catch (err) {
-                console.error('[StatusBar] Polling failed:', err);
+                // Electron 模式下不打印错误（预期行为）
+                if (!electronBridge.isElectron) {
+                    console.error('[StatusBar] Polling failed:', err);
+                }
             }
         };
 

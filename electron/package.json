@@ -1,0 +1,44 @@
+{
+  "name": "deepseek-ide-agent-electron",
+  "version": "1.0.0",
+  "description": "DeepSeek IDE Agent - Electron Desktop Application",
+  "main": "dist/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build:main": "tsc -p tsconfig.json",
+    "build:renderer": "cd ../client && npm run build",
+    "build": "npm run build:main && npm run build:renderer",
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/websocket": "^11.2.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@playwright/mcp": "^0.0.75",
+    "dotenv": "^16.4.7",
+    "electron-store": "^10.0.0",
+    "iconv-lite": "^0.7.2",
+    "js-yaml": "^4.1.1",
+    "jschardet": "^3.1.4",
+    "mathjs": "^15.2.0",
+    "node-pty": "^1.1.0",
+    "openai": "^6.25.0",
+    "simple-git": "^3.31.1"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.19.37",
+    "concurrently": "^9.1.0",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

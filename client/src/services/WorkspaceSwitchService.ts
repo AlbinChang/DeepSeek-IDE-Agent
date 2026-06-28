@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { API_BASE, USER_ID } from '@/config';
 import { disconnectWorkspaceConnections } from '@/services/WorkspaceConnectionService';
+import { electronBridge } from '@/services/electron-bridge';
 
 let switchQueue: Promise<void> = Promise.resolve();
 let latestSwitchToken = 0;
@@ -20,12 +21,20 @@ async function waitForWorkspaceStatus(expectedRoot: string | null, timeoutMs = 6
 
     while (Date.now() - start < timeoutMs) {
         try {
-            const res = await axios.get(`${API_BASE}/api/workspace/status`, {
-                params: { userId: USER_ID },
-                timeout: 2000
-            });
-            const initialized = !!res?.data?.initialized;
-            const serverRoot = (res?.data?.workspaceRoot || null) as string | null;
+            let initialized = false;
+            let serverRoot: string | null = null;
+            if (electronBridge.isElectron) {
+                const status = await electronBridge.getWorkspaceStatus({ userId: USER_ID });
+                initialized = status.initialized;
+                serverRoot = status.workspaceRoot;
+            } else {
+                const res = await axios.get(`${API_BASE}/api/workspace/status`, {
+                    params: { userId: USER_ID },
+                    timeout: 2000
+                });
+                initialized = !!res?.data?.initialized;
+                serverRoot = (res?.data?.workspaceRoot || null) as string | null;
+            }
             const normalizedServer = normalizeRootForCompare(serverRoot);
 
             if (!expectedRoot) {
@@ -79,13 +88,24 @@ export async function switchWorkspace(
         }
 
         if (requestedPath) {
-            const res = await axios.post(`${API_BASE}/api/workspace/init`, { path: requestedPath, userId: USER_ID });
-            const root = (res?.data?.workspaceRoot || requestedPath) as string;
+            let root: string;
+            if (electronBridge.isElectron) {
+                const result = await electronBridge.initWorkspace({ userId: USER_ID, root: requestedPath });
+                if (!result.success) throw new Error(result.error || 'Workspace init failed');
+                root = result.root || requestedPath;
+            } else {
+                const res = await axios.post(`${API_BASE}/api/workspace/init`, { path: requestedPath, userId: USER_ID });
+                root = (res?.data?.workspaceRoot || requestedPath) as string;
+            }
             const confirmedRoot = await waitForWorkspaceStatus(root);
             return { status: 'success', workspaceRoot: confirmedRoot || root };
         }
 
-        await axios.post(`${API_BASE}/api/workspace/reset`, { userId: USER_ID });
+        if (electronBridge.isElectron) {
+            await electronBridge.resetWorkspace({ userId: USER_ID });
+        } else {
+            await axios.post(`${API_BASE}/api/workspace/reset`, { userId: USER_ID });
+        }
         await waitForWorkspaceStatus(null);
         return { status: 'success', workspaceRoot: null };
     };

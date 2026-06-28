@@ -1,0 +1,168 @@
+/**
+ * Electron Main Process Entry
+ * 
+ * 将原来的三进程架构 (client ↔ server ↔ terminal-server) 合并为单进程 Electron 应用。
+ * Main Process 直接运行 Agent 引擎、node-pty、文件系统操作，通过 IPC 与 Renderer 通信。
+ */
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import * as path from 'path';
+import * as fs from 'fs';
+import { fileURLToPath } from 'url';
+
+// ── 路径初始化（对齐 server/src/utils/PathUtils.ts 的逻辑） ──
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+/** Electron 应用根目录 (electron/)。
+ * 编译后 __dirname = electron/dist/main/，需两级 ../ 回到 electron/。
+ * 开发时若用 tsx 直跑源码则 __dirname = electron/src/main/，同样两级 ../ 回到 electron/。
+ */
+export const ELECTRON_ROOT = path.resolve(__dirname, '../..');
+/** 项目根目录 (web-ide-agent/) */
+export const PROJECT_ROOT = path.resolve(ELECTRON_ROOT, '..');
+/** Server 源码目录 */
+export const SERVER_SRC = path.join(PROJECT_ROOT, 'server', 'src');
+/** 配置文件目录 */
+export const CONFIG_ROOT = path.join(PROJECT_ROOT, 'server', 'src', 'config');
+/** 客户端构建输出 */
+export const CLIENT_DIST = path.join(PROJECT_ROOT, 'client', 'dist');
+/** 日志目录 */
+export const LOG_DIR = path.join(PROJECT_ROOT, 'logs');
+/** Preload 脚本路径（编译后在 electron/dist/preload.cjs）。Electron preload 在 type=module 包内需要 .cjs。 */
+const PRELOAD_PATH = path.join(ELECTRON_ROOT, 'dist', 'preload.cjs');
+
+// ── 加载 .env ──
+// 使用动态 import 避免顶层 dotenv 副作用
+let dotenv: any;
+try {
+    dotenv = await import('dotenv');
+    const envPath = path.join(PROJECT_ROOT, '.env');
+    if (fs.existsSync(envPath)) {
+        dotenv.config({ path: envPath });
+        console.log('[Electron] .env loaded from', envPath);
+    }
+} catch {
+    console.log('[Electron] dotenv not available, skipping .env load');
+}
+
+// ── 判断是否开发模式 ──
+const isDev = !app.isPackaged && (process.argv.includes('--dev') || process.env.NODE_ENV === 'development' || !app.isPackaged);
+
+// ── 窗口引用 ──
+let mainWindow: BrowserWindow | null = null;
+
+// ── IPC 处理器注册（延迟导入，避免循环依赖） ──
+async function registerIpcHandlers() {
+    console.log('[Electron] Registering IPC handlers...');
+    
+    // 动态导入各 IPC 模块
+    const { registerAgentIpc } = await import('./ipc/agent-handlers.js');
+    const { registerFileIpc } = await import('./ipc/file-handlers.js');
+    const { registerTerminalIpc } = await import('./ipc/terminal-handlers.js');
+    const { registerGitIpc } = await import('./ipc/git-handlers.js');
+    const { registerSettingsIpc } = await import('./ipc/settings-handlers.js');
+    const { registerContextIpc, registerCompletionIpc } = await import('./ipc/context-handlers.js');
+    const { registerAppIpc } = await import('./ipc/app-handlers.js');
+
+    registerAgentIpc(ipcMain, mainWindow!);
+    registerFileIpc(ipcMain);
+    registerTerminalIpc(ipcMain, mainWindow!);
+    registerGitIpc(ipcMain);
+    registerSettingsIpc(ipcMain);
+    registerContextIpc(ipcMain, mainWindow!);
+    registerCompletionIpc(ipcMain, mainWindow!);
+    registerAppIpc(ipcMain, mainWindow!);
+
+    console.log('[Electron] All IPC handlers registered.');
+}
+
+// ── 创建主窗口 ──
+function createMainWindow(): BrowserWindow {
+    const win = new BrowserWindow({
+        width: 1400,
+        height: 900,
+        minWidth: 900,
+        minHeight: 600,
+        title: 'DeepSeek IDE Agent',
+        backgroundColor: '#1e1e1e', // VS Code dark theme background
+        show: false, // 等 ready-to-show 再显示，避免白屏
+        webPreferences: {
+            preload: PRELOAD_PATH,
+            nodeIntegration: false,       // 安全：禁用 Node 集成
+            contextIsolation: true,        // 安全：启用上下文隔离
+            sandbox: false,                // 需要 preload 访问 Node API
+            webSecurity: true,
+            spellcheck: false,
+        },
+    });
+
+    console.log(`[Electron] Preload path: ${PRELOAD_PATH} (exists: ${fs.existsSync(PRELOAD_PATH)})`);
+
+    // 加载页面
+    if (isDev) {
+        const devPort = process.env.VITE_DEV_PORT || '5174';
+        const devUrl = `http://localhost:${devPort}`;
+        console.log(`[Electron] Dev mode: loading ${devUrl}`);
+        win.loadURL(devUrl);
+        win.webContents.openDevTools({ mode: 'detach' });
+    } else {
+        // 生产模式：加载 Vite 构建的静态文件
+        const indexPath = path.join(CLIENT_DIST, 'index.html');
+        if (fs.existsSync(indexPath)) {
+            console.log(`[Electron] Production mode: loading ${indexPath}`);
+            win.loadFile(indexPath);
+        } else {
+            console.error(`[Electron] Build not found at ${indexPath}, falling back to dev`);
+            win.loadURL('http://localhost:5174');
+        }
+    }
+
+    // 就绪后显示窗口
+    win.once('ready-to-show', () => {
+        win.show();
+        win.focus();
+    });
+
+    // 窗口关闭时清理
+    win.on('closed', () => {
+        mainWindow = null;
+    });
+
+    return win;
+}
+
+// ── 应用生命周期 ──
+app.whenReady().then(async () => {
+    console.log('[Electron] App ready, creating main window...');
+    
+    mainWindow = createMainWindow();
+    
+    // 注册所有 IPC 处理器
+    await registerIpcHandlers();
+    
+    // macOS: 点击 dock 图标时重新创建窗口
+    app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) {
+            mainWindow = createMainWindow();
+        }
+    });
+});
+
+// 所有窗口关闭时退出（macOS 除外）
+app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+        app.quit();
+    }
+});
+
+// 防止多实例
+if (!app.requestSingleInstanceLock()) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (mainWindow) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.focus();
+        }
+    });
+}

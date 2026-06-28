@@ -14,6 +14,7 @@ import { useInlineCompletions } from '@/hooks/useInlineCompletions';
 import { USER_ID, API_BASE, WS_BASE, GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
+import { electronBridge } from '@/services/electron-bridge';
 
 interface FileEditorProps {
   activeFile: string;
@@ -99,13 +100,25 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     setIsSaving(true);
     try {
-      await axios.post(`${API_BASE}/api/files/save`, {
-        path: activeFile,
-        content: contentToSave,
-        encoding: fileEncoding,
-        userId: USER_ID,
-        root: effectiveRoot
-      });
+      if (electronBridge.isElectron) {
+        // Electron IPC 直写文件系统（零网络开销）
+        const result = await electronBridge.writeFile({
+          filePath: activeFile,
+          content: contentToSave,
+          encoding: fileEncoding,
+          root: effectiveRoot,
+        });
+        if (!result.success) throw new Error(result.error || 'File write failed');
+      } else {
+        // Web 模式：通过 REST API
+        await axios.post(`${API_BASE}/api/files/save`, {
+          path: activeFile,
+          content: contentToSave,
+          encoding: fileEncoding,
+          userId: USER_ID,
+          root: effectiveRoot
+        });
+      }
 
       if (!isMountedRef.current) return;
       setSavedContent(contentToSave);
@@ -261,6 +274,45 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           if (!effectiveRoot) return;
           const rootParam = `&root=${encodeURIComponent(effectiveRoot)}`;
 
+          // Electron 模式：通过 IPC 直接读取本地文件
+          if (electronBridge.isElectron) {
+            const result = await electronBridge.readFile({
+              filePath: activeFile,
+              root: effectiveRoot,
+            });
+
+            if (signal.aborted || activeFileRef.current !== activeFile) {
+              console.log(`[Editor] Fetching aborted or stale for ${activeFile}`);
+              return;
+            }
+
+            if (!result || !result.content) {
+              throw new Error(`[IO_FAILURE] 文件读取失败 (IPC): ${result?.error || '无内容'}`);
+            }
+
+            console.log(`[Editor] Content fetched (IPC) for ${activeFile}, length: ${result.content.length}`);
+            setFileEncoding(result.encoding || 'utf8');
+            setSavedContent(result.content || '');
+            setIsDirty(false);
+            setFileContent(result.content || '');
+
+            // Diff 模式：通过 IPC 获取 Git 原始版本
+            if (viewMode === 'diff') {
+              try {
+                const gitResult = await electronBridge.gitDiff({
+                  root: effectiveRoot,
+                  file: activeFile,
+                });
+                setOriginalContent(gitResult?.content || '');
+              } catch {
+                console.warn('[Editor] Git diff failed (likely Untracked), rendering as whole-file addition.');
+                setOriginalContent('');
+              }
+            }
+            return;
+          }
+
+          // Web 模式：HTTP 请求
           // 并发执行：拉取服务器内容，注入 signal 确保请求可随时中止
           const requests: Promise<any>[] = [
             axios.get(`${API_BASE}/api/files/content?path=${encodeURIComponent(activeFile)}${rootParam}`, { signal })
@@ -423,6 +475,9 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       WorkerManager.close('context');
       return;
     }
+
+    // Electron 模式：跳过 WebSocket 连接（补全/上下文由 IPC 替代）
+    if (electronBridge.isElectron) return;
 
     const urlSuffix = `userId=${USER_ID}&root=${encodeURIComponent(workspaceRoot)}`;
 

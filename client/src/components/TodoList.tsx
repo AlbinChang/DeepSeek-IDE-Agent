@@ -3,6 +3,7 @@ import { CheckCircle2, Circle, Clock } from 'lucide-react';
 import axios from 'axios';
 import { USER_ID, API_BASE, GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
+import { electronBridge } from '@/services/electron-bridge';
 
 export const TodoList: React.FC = () => {
     const { workspaceRoot, todos: contextTodos, setTodos: setContextTodos } = useAgentContext();
@@ -15,6 +16,8 @@ export const TodoList: React.FC = () => {
     useEffect(() => {
         const fetchTodos = async () => {
             if (!workspaceRoot) return;
+            // Electron 模式：跳过 HTTP 请求，依赖 GATEWAY_EVENT 接收 Agent 端推送
+            if (electronBridge.isElectron) return;
             try {
                 // 2026.03 解耦重构: 使用显式 root 路径拉取任务清单
                 const res = await axios.get(`${API_BASE}/api/todos?userId=${USER_ID}&root=${encodeURIComponent(workspaceRoot)}`);

@@ -3,6 +3,7 @@ import { Search, FileText, Loader2, Box } from 'lucide-react';
 import axios from 'axios';
 import { API_BASE } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
+import { electronBridge } from '@/services/electron-bridge';
 
 interface SearchPanelProps {
   onFileSelect: (path: string) => void;
@@ -40,12 +41,24 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFi
     setIsLoading(true);
     debounceTimer.current = setTimeout(async () => {
       try {
-        const res = await axios.get(
-          `${API_BASE}/api/search?q=${encodeURIComponent(trimmed)}&root=${encodeURIComponent(workspaceRoot)}`,
-          { timeout: 8000 }
-        );
-        // 服务端返回绝对路径数组，提取文件名用于展示
-        setResults(Array.isArray(res.data) ? res.data : []);
+        if (electronBridge.isElectron) {
+          // Electron IPC 直搜文件系统（免 HTTP 往返）
+          const result = await electronBridge.searchFiles({
+            pattern: trimmed,
+            root: workspaceRoot,
+            maxResults: 100,
+          });
+          setResults(result.success && Array.isArray(result.results)
+            ? result.results.map(r => r.path)
+            : []);
+        } else {
+          // Web 模式：通过 REST API
+          const res = await axios.get(
+            `${API_BASE}/api/search?q=${encodeURIComponent(trimmed)}&root=${encodeURIComponent(workspaceRoot)}`,
+            { timeout: 8000 }
+          );
+          setResults(Array.isArray(res.data) ? res.data : []);
+        }
       } catch {
         setResults([]);
       } finally {

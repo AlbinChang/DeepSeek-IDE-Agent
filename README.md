@@ -72,6 +72,11 @@ cd client && npm install && cd ..
 cd terminal-server && npm install && cd ..
 ```
 
+> **Electron 桌面模式**（可选）：如需使用桌面应用，额外安装：
+> ```bash
+> cd electron && npm install && cd ..
+> ```
+
 > 如果遇到 `node-pty` 等原生模块编译失败，请确保已安装 [Windows Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)（Windows）或 Xcode Command Line Tools（macOS）。
 
 ## 4. 启动项目
@@ -104,6 +109,26 @@ npm run start   # 再启动
 > 如果端口被占用，可通过 `.env` 中的 `DEV_PORT`、`PORT`、`TERMINAL_SERVER_PORT` 自定义端口号。
 > 
 > ⚠️ **多窗口限制**：后端服务仅支持单实例运行，如需同时操作多个工作区，请参阅 [Q7](#q7能同时打开两个浏览器窗口操作不同工作区吗)。
+
+### 4.4 Electron 桌面模式 🆕
+
+性能敏感的本地开发场景，推荐使用 Electron 桌面应用模式——将三个进程合并为单应用，**零网络开销**。
+
+```powershell
+# 首次需安装 Electron 依赖（含 ~100MB 二进制，仅需一次）
+cd electron && npm install && cd ..
+
+# 一键启动桌面应用
+npm run electron:dev
+```
+
+详细启动指南、构建打包、常见问题请参阅：**[📖 docs/STARTUP.md](docs/STARTUP.md)**
+
+| 指标 | Web 模式 | Electron 模式 |
+|------|----------|---------------|
+| 文件读取 | ~5-15ms (HTTP) | ~0.5ms (`fs` 直读) |
+| 终端输入 | ~3-8ms (SSE+REST) | ~0.1ms (IPC) |
+| 内存占用 | ~800MB (3 进程) | ~400MB |
 
 ## 5. 首次使用
 

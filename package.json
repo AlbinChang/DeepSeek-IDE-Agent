@@ -3,6 +3,12 @@
     "build": "npm run build --prefix server && npm run build --prefix terminal-server && npm run build --prefix client",
     "dev": "node scripts/start-services.mjs dev",
     "start": "node scripts/start-services.mjs start",
-    "check:conf": "node scripts/start-services.mjs check"
+    "check:conf": "node scripts/start-services.mjs check",
+    "electron:dev": "node electron/scripts/dev.mjs",
+    "electron:build": "npm run electron:build:preload && npm run electron:build:main && npm run build --prefix client",
+    "electron:build:preload": "cd electron && npx esbuild src/main/preload.ts --bundle --platform=node --target=node20 --outfile=dist/preload.cjs --format=cjs --external:electron",
+    "electron:build:main": "cd electron && npx esbuild src/main/index.ts --bundle --platform=node --target=node20 --outfile=dist/main/index.js --format=esm --alias:@=../server/src --external:electron --external:node-pty --external:simple-git --external:iconv-lite --external:jschardet --external:mathjs --external:js-yaml --external:openai --external:dotenv --external:@modelcontextprotocol/* --external:@playwright/* --external:@fastify/*",
+    "electron:dist": "cd electron && npm run dist",
+    "electron:pack": "cd electron && npm run pack"
   }
 }

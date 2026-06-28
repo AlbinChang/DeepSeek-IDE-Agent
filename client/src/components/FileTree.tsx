@@ -8,6 +8,7 @@ import axios from 'axios';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
 import { useAgentContext } from '@/providers/AgentContext';
 import { API_BASE, GATEWAY_EVENT } from '@/config';
+import { electronBridge } from '@/services/electron-bridge';
 
 interface FileNode {
   name: string;
@@ -73,11 +74,16 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     setIsDeleting(true);
     setDeleteError(null);
     try {
-      await axios.post(`${API_BASE}/api/files/delete`, {
-        path: node.path,
-        root: workspaceRoot,
-        recursive: node.isDirectory,
-      });
+      if (electronBridge.isElectron) {
+        const result = await electronBridge.deleteFile({ filePath: node.path, root: workspaceRoot });
+        if (!result.success) throw new Error(result.error || 'Delete failed');
+      } else {
+        await axios.post(`${API_BASE}/api/files/delete`, {
+          path: node.path,
+          root: workspaceRoot,
+          recursive: node.isDirectory,
+        });
+      }
       setDeleteConfirm(null);
       // 如果删除的是当前激活文件，通知父组件清空编辑器
       if (!node.isDirectory && activeFile === node.path) {
@@ -104,14 +110,23 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     setIsRenaming(true);
     setRenameError(null);
     try {
-      const res = await axios.post(`${API_BASE}/api/files/rename`, {
-        path: renameTarget.path,
-        newName: trimmedName,
-        root: workspaceRoot,
-      });
-      // 如果重命名的是当前激活文件，更新 activeFile 引用
+      let newPath: string;
+      if (electronBridge.isElectron) {
+        const parentDir = renameTarget.path.replace(/[/\\][^/\\]*$/, '');
+        const fullNewPath = parentDir + '/' + trimmedName;
+        const result = await electronBridge.renameFile({ oldPath: renameTarget.path, newPath: fullNewPath, root: workspaceRoot });
+        if (!result.success) throw new Error(result.error || 'Rename failed');
+        newPath = result.newPath || fullNewPath;
+      } else {
+        const res = await axios.post(`${API_BASE}/api/files/rename`, {
+          path: renameTarget.path,
+          newName: trimmedName,
+          root: workspaceRoot,
+        });
+        newPath = res.data.newPath;
+      }
       if (activeFile === renameTarget.path) {
-        onFileSelect(res.data.newPath);
+        onFileSelect(newPath);
       }
       setRenameTarget(null);
       setRenameInput('');
@@ -194,8 +209,18 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             // 异步并发去获取更新
         Promise.all(pathsToRefresh.slice(0, MAX_AUTO_REFRESH_PATHS).map(async p => {
                 try {
-            const response = await axios.get(`${API_BASE}/api/files?path=${encodeURIComponent(p)}&root=${encodeURIComponent(workspaceRoot!)}`, { signal: controller.signal });
-                    return { path: p, children: response.data };
+                    let children: any[];
+                    if (electronBridge.isElectron) {
+                        const result = await electronBridge.listFiles({ dirPath: p, depth: 1, root: workspaceRoot! });
+                        children = result.success ? (result.files || []).map((f: any) => ({
+                            name: f.name, path: f.path,
+                            isDirectory: f.isDirectory || f.type === 'directory',
+                        })) : [];
+                    } else {
+                        const response = await axios.get(`${API_BASE}/api/files?path=${encodeURIComponent(p)}&root=${encodeURIComponent(workspaceRoot!)}`, { signal: controller.signal });
+                        children = response.data;
+                    }
+                    return { path: p, children };
                 } catch {
                     return null;
                 }
@@ -276,7 +301,11 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         
         // [对齐 43.1 节]: 针对 Network Error 提供明确的系统级诊断
         if (e.message === 'Network Error') {
-          errorMsg = `无法连接至后端服务 (${API_BASE})。请确认 Node.js 后端程序已启动且网络通畅。`;
+          if (electronBridge.isElectron) {
+            errorMsg = `工作区初始化失败：${e.message}。请确认工作区路径有效且可访问。`;
+          } else {
+            errorMsg = `无法连接至后端服务 (${API_BASE})。请确认 Node.js 后端程序已启动且网络通畅。`;
+          }
         }
         
         setInitError(errorMsg);
@@ -291,17 +320,28 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     if (!silent && parentPath === '.') setIsLoading(true);
     try {
       // 2026.03 解耦重构: 显式传递 root 路径，不再经过 AgentSession 校验 (绕过 412 错误)
-      const response = await axios.get(`${API_BASE}/api/files?path=${encodeURIComponent(parentPath)}&root=${encodeURIComponent(workspaceRoot)}`);
-      
+      let filesData: any[];
+      if (electronBridge.isElectron) {
+        const result = await electronBridge.listFiles({ dirPath: parentPath, depth: 1, root: workspaceRoot });
+        if (!result.success) throw new Error(result.error || 'List files failed');
+        filesData = (result.files || []).map((f: any) => ({
+          name: f.name,
+          path: f.path,
+          isDirectory: f.isDirectory || f.type === 'directory',
+        }));
+      } else {
+        const response = await axios.get(`${API_BASE}/api/files?path=${encodeURIComponent(parentPath)}&root=${encodeURIComponent(workspaceRoot)}`);
+        filesData = response.data;
+      }
+
       setNodes(prev => {
         const next = [...prev];
         if (parentPath === '.') {
-          return mergeNodes(prev, response.data);
+          return mergeNodes(prev, filesData);
         } else {
-          // 对齐 3.2 节：级联更新子树
           const target = findNodeInMutableTree(next, parentPath);
           if (target) {
-            target.children = response.data;
+            target.children = filesData;
           }
           return next;
         }
@@ -377,15 +417,26 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         if (!workspaceRoot) {
           return;
         }
-        const res = await axios.get(
-          `${API_BASE}/api/files?path=${encodeURIComponent(node.path)}&root=${encodeURIComponent(workspaceRoot)}`
-        );
+        let childData: any[];
+        if (electronBridge.isElectron) {
+          const result = await electronBridge.listFiles({ dirPath: node.path, depth: 1, root: workspaceRoot });
+          if (!result.success) throw new Error(result.error || 'Toggle failed');
+          childData = (result.files || []).map((f: any) => ({
+            name: f.name, path: f.path,
+            isDirectory: f.isDirectory || f.type === 'directory',
+          }));
+        } else {
+          const res = await axios.get(
+            `${API_BASE}/api/files?path=${encodeURIComponent(node.path)}&root=${encodeURIComponent(workspaceRoot)}`
+          );
+          childData = res.data;
+        }
         
         setNodes(currentNodes => {
           const updateChildren = (nodes: FileNode[]): FileNode[] => {
             return nodes.map(n => {
               if (n.path === node.path) {
-                return { ...n, children: res.data };
+                return { ...n, children: childData };
               }
               if (n.children) {
                 return { ...n, children: updateChildren(n.children) };

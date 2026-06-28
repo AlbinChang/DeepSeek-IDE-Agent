@@ -9,6 +9,10 @@ const __dirname = dirname(__filename);
 
 // 对齐 31.0 节：多环境路径自适应 (src vs dist)
 function findServerRoot(startDir: string): string {
+    // Electron 主进程覆写：通过环境变量注入正确的路径（避免在 Electron 目录中误判 package.json）
+    if (process.env.SERVER_ROOT && fs.existsSync(process.env.SERVER_ROOT)) {
+        return process.env.SERVER_ROOT;
+    }
     let current = startDir;
     // 向上递归寻找 package.json，它是 server 目录的识别标志
     while (current !== path.parse(current).root) {
@@ -22,13 +26,22 @@ function findServerRoot(startDir: string): string {
 }
 
 export const SERVER_ROOT = findServerRoot(__dirname);
-export const PROJECT_ROOT = path.resolve(SERVER_ROOT, '..');
+// PROJECT_ROOT 同样支持环境变量覆写（Electron 场景）
+const envProjectRoot = process.env.PROJECT_ROOT;
+export const PROJECT_ROOT = (envProjectRoot && fs.existsSync(envProjectRoot))
+    ? envProjectRoot
+    : path.resolve(SERVER_ROOT, '..');
 
 /**
  * 资源目录自适应定位 (Section 31.2)
  * 解决开发环境 (src/config) 与生产环境 (dist/config 或 server/config) 的路径差异
+ * 支持 CONFIG_ROOT 环境变量覆写（Electron 场景）
  */
 export const CONFIG_ROOT = (() => {
+    // Electron 主进程覆写
+    if (process.env.CONFIG_ROOT && fs.existsSync(process.env.CONFIG_ROOT)) {
+        return process.env.CONFIG_ROOT;
+    }
     // 方案 1: 通过相对路径寻找，最靠谱（不受 SERVER_ROOT 层级影响）
     const relativeConfig = path.resolve(__dirname, '..', 'config');
     if (fs.existsSync(relativeConfig)) return relativeConfig;

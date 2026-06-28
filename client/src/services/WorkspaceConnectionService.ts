@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { WorkerManager } from '@/services/WorkerManager';
 import { API_BASE, USER_ID } from '@/config';
+import { electronBridge } from '@/services/electron-bridge';
 
 interface DisconnectPayload {
     reason?: string;
@@ -12,6 +13,10 @@ interface DisconnectResult {
 }
 
 async function postDisconnect(reason: string, previousWorkspaceRoot: string | null, timeoutMs: number) {
+    // Electron 模式下无需 HTTP 断开连接（没有 WebSocket 连接）
+    if (electronBridge.isElectron) {
+        return { data: { acknowledged: true } };
+    }
     return axios.post(
         `${API_BASE}/api/workspace/disconnect`,
         {
