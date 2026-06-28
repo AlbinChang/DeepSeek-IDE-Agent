@@ -1,5 +1,0 @@
-{
-  "port": 3003,
-  "portRetryLimit": 20,
-  "host": "0.0.0.0"
-}
