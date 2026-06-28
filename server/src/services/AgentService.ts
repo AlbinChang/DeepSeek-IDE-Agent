@@ -161,11 +161,11 @@ export class AgentService extends EventEmitter {
         // 注册文件核心工具 (原子化 IO)
         this.toolManager.registerTool({
             name: 'read_file',
-            description: `读取文件内容。采用【行级索引】模式，单次读取上限 ${globalConfig.readFile.maxLines} 行，总内容上限约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB。若文件过大，请配合 startLine/lineCount 分段读取；若单行超过 ${globalConfig.readFile.longLineThreshold} 字符导致截断，请改用 read_file_by_byte。`,
+            description: `⚠️ path 为必填参数，不可省略！读取文件内容。采用【行级索引】模式，单次读取上限 ${globalConfig.readFile.maxLines} 行，总内容上限约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB。若文件过大，请配合 startLine/lineCount 分段读取；若单行超过 ${globalConfig.readFile.longLineThreshold} 字符导致截断，请改用 read_file_by_byte。`,
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '文件相对路径' },
+                    path: { type: 'string', description: '文件相对路径（必填）' },
                     startLine: { type: 'number', description: '起始行号（从 1 开始）。默认为 1。' },
                     lineCount: { type: 'number', description: `要读取的行数。单次上限 ${globalConfig.readFile.maxLines} 行。` }
                 },
@@ -185,11 +185,11 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering read_file_by_byte...');
         this.toolManager.registerTool({
             name: 'read_file_by_byte',
-            description: '【特殊情况专用】按字节范围读取文件。仅在 read_file 因为单行超长被截断、或处理二进制/混淆后的单行代码时使用。不支持行号索引。',
+            description: '⚠️ path 为必填参数，不可省略！【特殊情况专用】按字节范围读取文件。仅在 read_file 因为单行超长被截断、或处理二进制/混淆后的单行代码时使用。不支持行号索引。',
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '文件相对路径' },
+                    path: { type: 'string', description: '文件相对路径（必填）' },
                     offset: { type: 'number', description: '字节偏移量（从 0 开始）' },
                     length: { type: 'number', description: '读取字节长度（单次上限 2.5KB）' }
                 },
@@ -264,11 +264,11 @@ export class AgentService extends EventEmitter {
         // 补全文件系统工具：listFiles, searchFiles, deletePath
         this.toolManager.registerTool({
             name: 'list_files',
-            description: '获取目录结构（受控递归）。必须提供 depth（递归深度，1-10），用于限制遍历范围、防止信息爆炸。返回结果中每一项都会明确标注是文件还是目录。',
+            description: `⚠️ depth 为必填参数，不可省略！获取目录结构（受控递归）。depth 是递归深度（1-10），必须显式传入，例如 {"depth": 2}。1 表示仅当前目录下一层。path 为可选参数，默认为 "."。返回结果中每一项都会明确标注是文件还是目录。`,
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '目录相对路径，默认为 "."' },
+                    path: { type: 'string', description: '目录相对路径，默认为 "."（可选）' },
                     depth: { type: 'number', description: '必填：递归深度（整数，范围 1-10）。1 表示仅当前目录下一层。' }
                 },
                 required: ['depth']
@@ -283,7 +283,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering delete_path...');
         this.toolManager.registerTool({
             name: 'delete_path',
-            description: '删除文件或目录。\n\n【⛔ 严禁误用】禁止将 delete_path + file_write 组合作为"修复文件内容错误"的手段。\n修改文件内容（无论是修一行还是重写某段）请使用 file_edit。\ndelete_path 仅用于真正需要物理删除文件/目录的场景（如清理生成产物、移除不再需要的文件）。',
+            description: '⚠️ path 为必填参数，不可省略！删除文件或目录。\n\n【⛔ 严禁误用】禁止将 delete_path + file_write 组合作为"修复文件内容错误"的手段。\n修改文件内容（无论是修一行还是重写某段）请使用 file_edit。\ndelete_path 仅用于真正需要物理删除文件/目录的场景（如清理生成产物、移除不再需要的文件）。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -416,7 +416,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_powershell_command...');
         this.toolManager.registerTool({
             name: 'run_powershell_command',
-            description: '在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。PowerShell 字符串引号规则见系统提示词中的 powershell_quoting_contract。',
+            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。PowerShell 字符串引号规则见系统提示词中的 powershell_quoting_contract。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -436,7 +436,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_cmd_command...');
         this.toolManager.registerTool({
             name: 'run_cmd_command',
-            description: '在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。适合纯文本处理（findstr、dir、type）和简单文件操作。',
+            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。适合纯文本处理（findstr、dir、type）和简单文件操作。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1244,13 +1244,16 @@ export class AgentService extends EventEmitter {
         return this.toolManager;
     }
 
-    public getSharedToolsMetadata(): Array<{ type: 'function'; function: { name: string; description: string; parameters: any } }> {
+    public getSharedToolsMetadata(): Array<{ type: 'function'; function: { name: string; description: string; parameters: any; strict?: boolean } }> {
         return this.toolManager.getAllTools().map((t) => ({
             type: 'function' as const,
             function: {
                 name: t.name,
                 description: t.description,
                 parameters: t.parameters,
+                // strict: true 强制模型遵守 JSON Schema 的 required 字段，
+                // 配合 /beta 端点使用，防止模型依赖预训练记忆忽略必填参数
+                strict: true,
             },
         }));
     }

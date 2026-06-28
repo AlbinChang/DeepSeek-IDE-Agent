@@ -79,9 +79,16 @@ export const electronBridge = {
     ): Promise<void> {
         return new Promise((resolve, reject) => {
             const ipcApi = getIpcApi();
+            let streamId: string | null = null;
+
             const cleanup = ipcApi.onAgentEvent((event: any) => {
+                // 首次事件中捕获 streamId（用于 abort 时发送取消信号）
+                if (!streamId && event.streamId) {
+                    streamId = event.streamId;
+                }
+
                 if (abortSignal?.aborted) {
-                    ipcApi.cancelAgentChat(event.streamId);
+                    if (streamId) ipcApi.cancelAgentChat(streamId);
                     cleanup();
                     resolve();
                     return;
@@ -118,13 +125,23 @@ export const electronBridge = {
                 }
             });
 
-            callIpc('startAgentChat', [params]).catch((err: any) => {
+            // 启动对话并捕获 streamId
+            callIpc('startAgentChat', [params]).then((sid: string) => {
+                if (sid && !streamId) streamId = sid;
+            }).catch((err: any) => {
                 cleanup();
                 reject(err);
             });
 
             if (abortSignal) {
-                abortSignal.addEventListener('abort', () => { cleanup(); resolve(); });
+                abortSignal.addEventListener('abort', () => {
+                    // 通知主进程取消会话
+                    if (streamId) {
+                        ipcApi.cancelAgentChat(streamId);
+                    }
+                    cleanup();
+                    resolve();
+                });
             }
         });
     },

@@ -4,7 +4,7 @@
  * 将原来的三进程架构 (client ↔ server ↔ terminal-server) 合并为单进程 Electron 应用。
  * Main Process 直接运行 Agent 引擎、node-pty、文件系统操作，通过 IPC 与 Renderer 通信。
  */
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -134,6 +134,9 @@ function createMainWindow(): BrowserWindow {
 // ── 应用生命周期 ──
 app.whenReady().then(async () => {
     console.log('[Electron] App ready, creating main window...');
+
+    // 隐藏默认菜单栏（File/Edit/View 等对 IDE 无意义）
+    Menu.setApplicationMenu(null);
     
     mainWindow = createMainWindow();
     
