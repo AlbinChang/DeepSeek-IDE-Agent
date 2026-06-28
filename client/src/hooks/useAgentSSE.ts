@@ -197,7 +197,7 @@ const sanitizeValueForClient = (value: any, meta: RedactionMeta, depth = 0): any
 const sanitizeWriteToolArgs = (toolName: string, args: any, meta: RedactionMeta): any | null => {
     if (!args || typeof args !== 'object') return null;
 
-    if (toolName === 'single_file_write') {
+    if (toolName === 'file_write') {
         const contentChars = typeof args.content === 'string' ? args.content.length : Number(args.content?.chars) || 0;
         meta.redacted = true;
         meta.redactedStringChars += contentChars;
@@ -206,30 +206,6 @@ const sanitizeWriteToolArgs = (toolName: string, args: any, meta: RedactionMeta)
             ...args,
             content: hiddenTextSummary(contentChars, 'file_content'),
         }, meta);
-    }
-
-    if (toolName === 'multi_file_write') {
-        const files = Array.isArray(args.files) ? args.files : [];
-        let totalContentChars = 0;
-        const summarizedFiles = files.slice(0, MAX_ARRAY_ITEMS).map((file: any) => {
-            const contentChars = typeof file?.content === 'string' ? file.content.length : Number(file?.content?.chars) || 0;
-            totalContentChars += contentChars;
-            return sanitizeValueForClient({
-                ...file,
-                content: hiddenTextSummary(contentChars, 'file_content'),
-            }, meta);
-        });
-
-        if (files.length > MAX_ARRAY_ITEMS) {
-            meta.truncatedItems += files.length - MAX_ARRAY_ITEMS;
-            summarizedFiles.push({ hidden: true, omittedItems: files.length - MAX_ARRAY_ITEMS, reason: 'too_many_files' });
-        }
-
-        meta.redacted = true;
-        meta.redactedStringChars += totalContentChars;
-        meta.totalContentChars = totalContentChars;
-        meta.fileCount = files.length;
-        return sanitizeValueForClient({ ...args, files: summarizedFiles, fileCount: files.length, totalContentChars }, meta);
     }
 
     return null;

@@ -42,22 +42,9 @@ const sanitizePersistedValue = (value: any, depth = 0): any => {
 
 const sanitizePersistedWriteArgs = (toolName: string, args: any) => {
   if (!args || typeof args !== 'object') return args;
-  if (toolName === 'single_file_write') {
+  if (toolName === 'file_write') {
     const contentChars = typeof args.content === 'string' ? args.content.length : Number(args.content?.chars) || 0;
     return sanitizePersistedValue({ ...args, content: hiddenTextSummary(contentChars, 'file_content') });
-  }
-  if (toolName === 'multi_file_write') {
-    const files = Array.isArray(args.files) ? args.files : [];
-    let totalContentChars = 0;
-    const summarizedFiles = files.slice(0, DB_MAX_ARRAY_ITEMS).map((file: any) => {
-      const contentChars = typeof file?.content === 'string' ? file.content.length : Number(file?.content?.chars) || 0;
-      totalContentChars += contentChars;
-      return sanitizePersistedValue({ ...file, content: hiddenTextSummary(contentChars, 'file_content') });
-    });
-    if (files.length > DB_MAX_ARRAY_ITEMS) {
-      summarizedFiles.push({ hidden: true, omittedItems: files.length - DB_MAX_ARRAY_ITEMS, reason: 'too_many_files' });
-    }
-    return sanitizePersistedValue({ ...args, files: summarizedFiles, fileCount: files.length, totalContentChars });
   }
   return sanitizePersistedValue(args);
 };

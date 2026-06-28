@@ -109,7 +109,7 @@ function sanitizeValueForClient(value: any, meta: ClientRedactionMeta, depth: nu
 function sanitizeWriteToolArgsForClient(toolName: string, args: any, meta: ClientRedactionMeta): any | null {
     if (!args || typeof args !== "object") return null;
 
-    if (toolName === "single_file_write") {
+    if (toolName === "file_write") {
         const contentChars = typeof args.content === "string" ? args.content.length : 0;
         if (contentChars > 0) {
             meta.redacted = true;
@@ -123,7 +123,7 @@ function sanitizeWriteToolArgsForClient(toolName: string, args: any, meta: Clien
         }, meta);
     }
 
-    if (toolName === "single_file_edit") {
+    if (toolName === "file_edit") {
         const oldTextChars = typeof args.oldText === "string" ? args.oldText.length : 0;
         const newTextChars = typeof args.newText === "string" ? args.newText.length : 0;
         const totalContentChars = oldTextChars + newTextChars;
@@ -141,39 +141,7 @@ function sanitizeWriteToolArgsForClient(toolName: string, args: any, meta: Clien
         }, meta);
     }
 
-    if (toolName === "multi_file_write") {
-        const files = Array.isArray(args.files) ? args.files : [];
-        let totalContentChars = 0;
-        const summarizedFiles = files.slice(0, CLIENT_MAX_ARRAY_ITEMS).map((file: any) => {
-            const contentChars = typeof file?.content === "string" ? file.content.length : 0;
-            totalContentChars += contentChars;
-            return sanitizeValueForClient({
-                ...file,
-                content: hiddenTextSummary(contentChars, "file_content"),
-            }, meta);
-        });
 
-        if (files.length > CLIENT_MAX_ARRAY_ITEMS) {
-            for (const file of files.slice(CLIENT_MAX_ARRAY_ITEMS)) {
-                if (typeof file?.content === "string") totalContentChars += file.content.length;
-            }
-            meta.redacted = true;
-            meta.truncatedItems += files.length - CLIENT_MAX_ARRAY_ITEMS;
-            summarizedFiles.push({ hidden: true, omittedItems: files.length - CLIENT_MAX_ARRAY_ITEMS, reason: "too_many_files" });
-        }
-
-        meta.redacted = true;
-        meta.redactedStringChars += totalContentChars;
-        meta.totalContentChars = totalContentChars;
-        meta.fileCount = files.length;
-
-        return sanitizeValueForClient({
-            ...args,
-            files: summarizedFiles,
-            fileCount: files.length,
-            totalContentChars,
-        }, meta);
-    }
 
     return null;
 }

@@ -125,7 +125,7 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                                 const res = part.params?.result;
                                 const isErr = !!part.params?.error || res?.status === 'error';
                                 const toolName = part.params?.toolName;
-                                const withPhaseTag = toolName === 'single_file_write' || toolName === 'multi_file_write';
+                                const withPhaseTag = toolName === 'file_write';
                                 const rawErrorPhase = String(res?.errorPhase || '').toLowerCase();
                                 const singleWritePhaseLabel = withPhaseTag && isErr
                                     ? (rawErrorPhase === 'syntax_check' ? '语法检查失败' : '写入失败')
@@ -535,7 +535,7 @@ export const AgentChat: React.FC = () => {
                         : (part.params?.result ?? part.content);
                     const resultPayload = part.params?.result || {};
                     const errorPhase = String(resultPayload?.errorPhase || '').toLowerCase();
-                    const withPhaseTag = toolName === 'single_file_write' || toolName === 'multi_file_write';
+                    const withPhaseTag = toolName === 'file_write';
                     const phaseLabel = withPhaseTag && statusText === 'ERROR'
                         ? (errorPhase === 'syntax_check' ? '[语法检查失败]' : '[写入失败]')
                         : '';

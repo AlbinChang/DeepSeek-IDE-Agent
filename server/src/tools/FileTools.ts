@@ -401,7 +401,7 @@ export class FileTools {
     }
 
     /**
-    * Agent 全量文件写入 - 用于 multi_file_write
+    * Agent 全量文件写入 - 用于 file_write
      */
     static async writeFile(workspaceRoot: string, unsafePath: string, content: string, encodingOverride?: string) {
         let fullPath: string;
@@ -490,7 +490,7 @@ export class FileTools {
     }
 
     /**
-    * Agent 行级精修写入 - 底层引擎（供 single_file_edit insert 操作复用）
+    * Agent 行级精修写入 - 底层引擎（供 file_edit insert 操作复用）
      * 支持在特定行插入、替换或删除代码的极高稳健性操作
      */
     static async patchFileByLines(workspaceRoot: string, unsafePath: string, content: string, startLine: number, lineCount: number = 0, encodingOverride?: string) {
@@ -678,7 +678,7 @@ export class FileTools {
     }
 
     /**
-     * Agent 文本级精准替换 - 用于 single_file_edit replace 操作
+     * Agent 文本级精准替换 - 用于 file_edit replace 操作
      *
      * 行业最佳实践：基于 oldText 全文精准匹配后替换，消除行号/行范围幻觉风险。
      * - oldText 必须与文件中的原文完全一致（含空白、缩进、换行）
@@ -703,7 +703,7 @@ export class FileTools {
                     mode: 'text_replace',
                     path: fullPath,
                     error: 'FILE_NOT_FOUND',
-                    message: `文件不存在，无法执行替换操作。新建文件请使用 single_file_write。`
+                    message: `文件不存在，无法执行替换操作。新建文件请使用 file_write。`
                 };
             }
 
@@ -850,7 +850,7 @@ export class FileTools {
     }
 
     /**
-     * Agent 行级精准插入 - 用于 single_file_edit insert 操作
+     * Agent 行级精准插入 - 用于 file_edit insert 操作
      * 在指定行号 startLine 前插入 newText。
      * 复用 patchFileByLines 的编码检测、EOL 风格保持、越界守卫等底层逻辑，lineCount 固定为 0。
      */

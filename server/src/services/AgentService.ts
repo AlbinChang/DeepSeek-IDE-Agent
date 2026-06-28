@@ -202,92 +202,10 @@ export class AgentService extends EventEmitter {
             }
         });
 
-        console.log('[AgentService] Registering multi_file_write...');
+        console.log('[AgentService] Registering file_write...');
         this.toolManager.registerTool({
-            name: 'multi_file_write',
-            description: '一次性创建或全量覆盖多个文件（≥2个），保证原子性和事务一致性。必须传 files 数组，每项包含 path 和 content。单文件写入必须用 single_file_write。返回 syntaxCheck 结果。',
-            parameters: {
-                type: 'object',
-                properties: {
-                    files: {
-                        type: 'array',
-                        minItems: 2,
-                        description: '必填，至少 2 项；每项必须包含 path 和 content。单文件目标请改用 single_file_write。',
-                        items: {
-                            type: 'object',
-                            properties: {
-                                path: { type: 'string', description: '文件相对路径' },
-                                content: { type: 'string', description: '该文件在本次多文件全量写入中的完整内容，禁止摘要、截断或占位。' },
-                                encoding: { type: 'string', description: '可选：指定写入编码（如 GBK、UTF-8）。仅对新建文件生效；已有文件自动沿用原编码。' }
-                            },
-                            required: ['path', 'content']
-                        }
-                    }
-                },
-                required: ['files']
-            },
-            execute: async (params, context) => {
-                const root = this.resolveWorkspaceRootFromContext(context);
-                if (!root) throw new Error('Workspace not initialized');
-                if (!params || !Array.isArray(params.files) || params.files.length < 2) {
-                    throw new Error('INVALID_PARAMS: multi_file_write 只能用于一次性写入两个及以上文件，必须传入 files.length >= 2 的数组。单文件创建或全量覆盖请使用 single_file_write；单文件局部修改请使用 single_file_edit。');
-                }
-                const results: any[] = [];
-                const changedPaths: string[] = [];
-                for (const f of params.files) {
-                    const writeResult = await FileTools.writeFile(root, f.path, f.content, f.encoding);
-                    if (writeResult && writeResult.status === 'error') {
-                        results.push({ ...writeResult, errorPhase: 'write' });
-                    } else {
-                        results.push(writeResult);
-                    }
-                    if (writeResult && writeResult.status === 'success' && typeof f.path === 'string') {
-                        changedPaths.push(f.path);
-                    }
-                }
-
-                const syntaxChecks = await SyntaxCheckService.checkFiles(root, changedPaths);
-                const syntaxByPath = new Map(syntaxChecks.map((c) => [c.path, c]));
-
-                const enriched = results.map((r: any) => {
-                    if (!r || r.status !== 'success' || typeof r.path !== 'string') return r;
-                    const syntaxCheck = syntaxByPath.get(r.path);
-                    const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
-                    return {
-                        ...r,
-                        syntaxCheck,
-                        syntaxFeedback: {
-                            phase: 'post_write',
-                            mode: 'feedback_only',
-                            pass: gatePass,
-                            message: gatePass
-                                ? '语法检查通过。'
-                                : `语法检查未通过（仅反馈，不影响写入结果）：${syntaxCheck?.message || '未知错误'}`
-                        }
-                    };
-                });
-
-                const failedChecks = syntaxChecks.filter((c) => c.status === 'error');
-                const blockedChecks = syntaxChecks.filter((c) => !SyntaxCheckService.isGatePass(c));
-                enriched.push({
-                    status: 'info',
-                    type: 'syntax_gate_summary',
-                    required: true,
-                    checkedFiles: syntaxChecks.length,
-                    syntaxErrors: failedChecks.length,
-                    syntaxBlocked: blockedChecks.length,
-                    pass: blockedChecks.length === 0,
-                    failedFiles: blockedChecks.map((c) => ({ path: c.path, message: c.message, status: c.status }))
-                });
-
-                return enriched;
-            }
-        });
-
-        console.log('[AgentService] Registering single_file_write...');
-        this.toolManager.registerTool({
-            name: 'single_file_write',
-            description: '创建新文件或全量覆盖已有文件。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 single_file_edit。返回 syntaxCheck 结果。',
+            name: 'file_write',
+            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_edit。返回 syntaxCheck 结果。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -365,7 +283,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering delete_path...');
         this.toolManager.registerTool({
             name: 'delete_path',
-            description: '删除文件或目录。\n\n【⛔ 严禁误用】禁止将 delete_path + multi_file_write 组合作为"修复文件内容错误"的手段。\n修改文件内容（无论是修一行还是重写某段）请使用 single_file_edit。\ndelete_path 仅用于真正需要物理删除文件/目录的场景（如清理生成产物、移除不再需要的文件）。',
+            description: '删除文件或目录。\n\n【⛔ 严禁误用】禁止将 delete_path + file_write 组合作为"修复文件内容错误"的手段。\n修改文件内容（无论是修一行还是重写某段）请使用 file_edit。\ndelete_path 仅用于真正需要物理删除文件/目录的场景（如清理生成产物、移除不再需要的文件）。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -383,10 +301,10 @@ export class AgentService extends EventEmitter {
             }
         });
 
-        console.log('[AgentService] Registering single_file_edit...');
+        console.log('[AgentService] Registering file_edit...');
         this.toolManager.registerTool({
-            name: 'single_file_edit',
-            description: '文件行级精修工具（行业最佳实践）。支持两种精准操作：\n- **replace**：基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险\n- **insert**：在指定行号 startLine 前插入 newText\n\n【replace 操作】必须传入 action: "replace"、oldText、newText。oldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n【insert 操作】必须传入 action: "insert"、startLine（>=1）、newText。startLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n返回 syntaxCheck/contextSnapshot/newTotalLines。',
+            name: 'file_edit',
+            description: '文件行级精修工具（行业最佳实践）。支持两种精准操作：\n- **replace**：基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险\n- **insert**：在指定行号 startLine 前插入 newText\n\n【replace 操作】必须传入 action: "replace"、oldText、newText。oldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n【insert 操作】必须传入 action: "insert"、startLine（>=1）、newText。startLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 syntaxCheck/contextSnapshot/newTotalLines。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -979,7 +897,7 @@ export class AgentService extends EventEmitter {
                 '- 所有 Git 操作必须分步透明：每执行一条命令，都要先观察输出再决定下一步，禁止一次拼接长命令链隐藏中间状态。',
                 '- 建议顺序：`git --version` -> `git rev-parse --is-inside-work-tree` -> (需要时) `git init` -> `git status --short --branch` -> `git add` / `git commit` / `git log` / `git diff`。',
                 '- **提交前强制门禁（MANDATORY PRE-COMMIT IGNORE HYGIENE）**：在执行 `git commit` 之前，必须先检查并补全 `.gitignore`，确保无必要文件/目录不会进入版本库。',
-                '- **强制步骤**：1) `git status --short --branch` 识别未跟踪项；2) 判断是否存在无必要文件/目录（构建产物、依赖目录、日志、缓存、临时文件、IDE 元数据、本地密钥）；3) 用 `read_file` 读取 `.gitignore`，若缺规则用 `single_file_edit`（insert 追加）或 `single_file_write`（首次创建）补齐并去重；4) 再次执行 `git status --short` 验证噪声项已被忽略；5) 仅在复检通过后再 `git add` / `git commit`。',
+                '- **强制步骤**：1) `git status --short --branch` 识别未跟踪项；2) 判断是否存在无必要文件/目录（构建产物、依赖目录、日志、缓存、临时文件、IDE 元数据、本地密钥）；3) 用 `read_file` 读取 `.gitignore`，若缺规则用 `file_edit`（insert 追加）或 `file_write`（首次创建）补齐并去重；4) 再次执行 `git status --short` 验证噪声项已被忽略；5) 仅在复检通过后再 `git add` / `git commit`。',
                 '- 如果发现不确定是否应忽略的文件，先向用户确认，再提交。禁止在未完成忽略体检时直接提交。',
                 '- 任何会改变版本库状态的命令执行前，都应在回复中说明目的；提交完成后必须反馈 commit hash、提交信息和影响范围。',
                 '- 若用户未要求版本管理，不要擅自提交；若用户明确要求 Git 操作，优先用终端工具完成，保持全程可见、可追溯。'
@@ -1135,7 +1053,7 @@ export class AgentService extends EventEmitter {
                 `- **CMD 可用性**: ${envInfo.cmdAvailable ? `可用 (${envInfo.cmdVersion})` : '不可用 (Not Found)'}`,
                 `- **Git 命令可用性**: ${envInfo.gitAvailable ? `可用 (${envInfo.gitVersion})` : `不可用 (${envInfo.gitVersion || 'Not Found'})`}`,
                 projectJavaVersion ? `- **Java 编译目标版本**: ${projectJavaVersion}\n  ⚠️ 编写 Java 代码时必须严格遵守此版本，禁止使用高版本语言特性（如 var/record/sealed/text block 等需 Java 11+/16+/17+）。` : null,
-                projectSourceEncoding ? `- **Maven 项目源文件编码**: ${projectSourceEncoding}\n  ⚠️ 创建或覆写 Java/XML/Properties 文件时，必须将 \`encoding\` 参数显式传入 multi_file_write / single_file_write 工具（如 \`encoding: "${projectSourceEncoding}"\`），防止新建文件默认 UTF-8 与项目编码不一致造成乱码。局部编辑（single_file_edit）会自动沿用文件原编码无需显式传 encoding。` : null,
+                projectSourceEncoding ? `- **Maven 项目源文件编码**: ${projectSourceEncoding}\n  ⚠️ 创建或覆写 Java/XML/Properties 文件时，必须将 \`encoding\` 参数显式传入 file_write 工具（如 \`encoding: "${projectSourceEncoding}"\`），防止新建文件默认 UTF-8 与项目编码不一致造成乱码。局部编辑（file_edit）会自动沿用文件原编码无需显式传 encoding。` : null,
                 projectPythonVersion ? `- **Python 版本约束**: ${projectPythonVersion}\n  ⚠️ 编写 Python 代码时必须严格遵守此版本，禁止使用高版本语言特性。` : null,
                 projectGoVersion ? `- **Go 版本**: ${projectGoVersion}` : null,
             ].filter(Boolean).join('\n'),
