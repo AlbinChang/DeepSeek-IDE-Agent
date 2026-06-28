@@ -561,12 +561,19 @@ export class AgentTurnEngine {
                             `${getTS()} [AgentTurnEngine] Tool execution error (${tc.function.name}):`,
                             toolErr
                         );
-                        // 2026.03 [LOG_UPGRADE] 将具体错误信息透传给前端，防止显示模糊的 "An internal error occurred"
-                        emit({ type: "error", content: `Tool Error [${tc.function.name}]: ${toolErr.message}` });
+                        // 工具执行错误属于可恢复错误，不应以 type:"error" 发送，
+                        // 否则前端/Electron bridge 会将其视为致命错误终止整个会话。
+                        // 改用 annotation 事件，模型可在下一轮根据错误信息修正参数重试。
+                        const errMessage = String(toolErr?.message || toolErr || 'Unknown tool error');
+                        emit({
+                            type: "annotation",
+                            method: "tool/error",
+                            params: { toolCallId: tc.id, toolName: tc.function.name, error: errMessage },
+                        });
                         activeHistory.push({
                             role: "tool",
                             tool_call_id: tc.id,
-                            content: `Error: ${toolErr.message}`,
+                            content: `Error: ${errMessage}`,
                         });
                     }
                 }

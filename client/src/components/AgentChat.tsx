@@ -122,7 +122,7 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                                     </div>
                                 </div>
                             )}
-                            {part.type === 'annotation' && part.method === 'tool/result' && (() => {
+                            {part.type === 'annotation' && (part.method === 'tool/result' || part.method === 'tool/error') && (() => {
                                 const res = part.params?.result;
                                 const isErr = !!part.params?.error || res?.status === 'error';
                                 const toolName = part.params?.toolName;
@@ -581,6 +581,9 @@ export const AgentChat: React.FC = () => {
                         ? (errorPhase === 'syntax_check' ? '[语法检查失败]' : '[写入失败]')
                         : '';
                     return `[TOOL_RESULT:${statusText}] ${toolName}${phaseLabel ? ` ${phaseLabel}` : ''}\n${stringifyPayload(payload)}`;
+                }
+                if (part.method === 'tool/error') {
+                    return `[TOOL_RESULT:ERROR] ${toolName}\n${stringifyPayload(part.params?.error || part.content)}`;
                 }
                 return `[ANNOTATION:${part.method || 'unknown'}]\n${stringifyPayload(part.params ?? part.content)}`;
             }
