@@ -1,7 +1,7 @@
 ﻿import { useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react';
 import { 
   Files, Box, Cpu, HardDrive, Terminal as TerminalIcon, 
-  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo
+  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2
 } from 'lucide-react';
 import { 
   Panel, 
@@ -57,6 +57,10 @@ function App() {
   const { workspaceRoot, setWorkspaceRoot } = useAgentContext();
   const workspaceRootRef = useRef<string | null>(workspaceRoot);
   const [isSwitchingWorkspace, setIsSwitchingWorkspace] = useState(false);
+  const [workspaceSwitchModal, setWorkspaceSwitchModal] = useState<'hidden' | 'confirm' | 'input' | 'switching'>('hidden');
+  const [workspaceSwitchInput, setWorkspaceSwitchInput] = useState('');
+  const [workspaceSwitchError, setWorkspaceSwitchError] = useState<string | null>(null);
+  const workspaceSwitchInputRef = useRef<HTMLInputElement>(null);
 
   // 处理文件切换并记录历史 (对齐 3.1 节)
   const navigateToFile = useCallback((file: string, updateHistory = true) => {
@@ -156,6 +160,14 @@ function App() {
     const timer = window.setTimeout(preloadHeavyPanels, 1200);
     return () => clearTimeout(timer);
   }, []);
+
+  // 工作区切换弹窗：自动聚焦输入框
+  useEffect(() => {
+    if (workspaceSwitchModal === 'input') {
+      const timer = setTimeout(() => workspaceSwitchInputRef.current?.focus(), 50);
+      return () => clearTimeout(timer);
+    }
+  }, [workspaceSwitchModal]);
 
   // 初始同步：状态监控与事件总线 (对齐 15.0 Hot Reattach)
   useEffect(() => {
@@ -293,25 +305,10 @@ function App() {
                 <div className="ml-auto flex items-center gap-1">
                   {workspaceRoot && (
                     <button 
-                      onClick={async () => {
+                      onClick={() => {
                         if (isSwitchingWorkspace) return;
-                          if (confirm('确定要切换工作区吗？当前所有编辑器上下文将被重置。')) {
-                              const newPath = prompt('请输入新的工作区物理路径 (留空将重置并返回引导页):');
-                              if (newPath !== null) {
-                                  try {
-                              setIsSwitchingWorkspace(true);
-                                      const result = await switchWorkspace(newPath, workspaceRootRef.current);
-                                      setWorkspaceRoot(result.workspaceRoot);
-                                      setActiveFile('');
-                                  } catch (e) {
-                                      console.error('Failed to change workspace:', e);
-                                      alert('切换工作区失败，系统将回退至锁定状态');
-                                      setWorkspaceRoot(null);
-                            } finally {
-                              setIsSwitchingWorkspace(false);
-                                  }
-                              }
-                          }
+                        setWorkspaceSwitchError(null);
+                        setWorkspaceSwitchModal('confirm');
                       }}
                       disabled={isSwitchingWorkspace}
                       className="p-1 hover:bg-white/10 rounded-sm transition-colors text-white opacity-80 hover:opacity-100 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -421,6 +418,113 @@ function App() {
       <div className="h-[24px] shrink-0 z-30 bg-[#080808] border-t border-white/20 flex items-center">
         <StatusBar />
       </div>
+
+      {/* 工作区切换弹窗（替代被 Electron 禁用的 window.prompt） */}
+      {workspaceSwitchModal !== 'hidden' && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-[#1a1a1a] border border-white/20 rounded-lg shadow-2xl w-[480px] max-w-[90vw] overflow-hidden">
+            {/* 标题栏 */}
+            <div className="h-8 px-4 flex items-center border-b border-white/10 bg-[#111]">
+              <FolderSync size={14} className={`${workspaceSwitchModal === 'switching' ? 'animate-spin' : ''} text-white/70 mr-2`} />
+              <span className="text-xs font-semibold text-white/80">
+                {workspaceSwitchModal === 'switching' ? '正在切换工作区…' : '切换工作区'}
+              </span>
+            </div>
+
+            {workspaceSwitchModal === 'confirm' ? (
+              <>
+                <div className="p-5 text-sm text-white/80 leading-relaxed">
+                  确定要切换工作区吗？<br />
+                  <span className="text-white/50 text-xs">当前所有编辑器上下文将被重置。</span>
+                </div>
+                <div className="flex justify-end gap-2 px-5 pb-4">
+                  <button
+                    onClick={() => { setWorkspaceSwitchModal('hidden'); setWorkspaceSwitchError(null); }}
+                    className="px-4 py-1.5 text-xs rounded bg-white/10 hover:bg-white/20 text-white/70 transition-colors"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={() => { setWorkspaceSwitchModal('input'); setWorkspaceSwitchInput(''); setWorkspaceSwitchError(null); }}
+                    className="px-4 py-1.5 text-xs rounded bg-white/20 hover:bg-white/30 text-white transition-colors"
+                  >
+                    确定
+                  </button>
+                </div>
+              </>
+            ) : workspaceSwitchModal === 'switching' ? (
+              <div className="p-8 flex flex-col items-center gap-4">
+                <Loader2 size={32} className="animate-spin text-white/60" />
+                <p className="text-sm text-white/60">正在初始化新工作区，请稍候…</p>
+              </div>
+            ) : (
+              <>
+                <div className="p-5">
+                  <label className="block text-xs text-white/60 mb-2">
+                    请输入新的工作区物理路径（留空将重置并返回引导页）:
+                  </label>
+                  <input
+                    ref={workspaceSwitchInputRef}
+                    type="text"
+                    value={workspaceSwitchInput}
+                    onChange={(e) => { setWorkspaceSwitchInput(e.target.value); setWorkspaceSwitchError(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') document.getElementById('ws-switch-ok-btn')?.click(); }}
+                    disabled={isSwitchingWorkspace}
+                    className="w-full px-3 py-2 text-sm bg-black border border-white/20 rounded text-white placeholder-white/30 focus:outline-none focus:border-white/50 transition-colors disabled:opacity-40"
+                    placeholder="例如: D:\my-project"
+                  />
+                  {workspaceSwitchError && (
+                    <p className="mt-2 text-xs text-red-400">{workspaceSwitchError}</p>
+                  )}
+                </div>
+                <div className="flex justify-end gap-2 px-5 pb-4">
+                  <button
+                    onClick={() => { setWorkspaceSwitchModal('hidden'); setWorkspaceSwitchError(null); }}
+                    disabled={isSwitchingWorkspace}
+                    className="px-4 py-1.5 text-xs rounded bg-white/10 hover:bg-white/20 text-white/70 transition-colors disabled:opacity-30"
+                  >
+                    取消
+                  </button>
+                  <button
+                    id="ws-switch-ok-btn"
+                    disabled={isSwitchingWorkspace}
+                    onClick={() => {
+                      const newPath = workspaceSwitchInput.trim();
+                      setWorkspaceSwitchError(null);
+                      setWorkspaceSwitchModal('switching');
+                      setIsSwitchingWorkspace(true);
+
+                      void (async () => {
+                        try {
+                          const result = await switchWorkspace(newPath, workspaceRootRef.current);
+                          // 防御：确保返回了有效的 workspaceRoot
+                          if (!result || result.status !== 'success') {
+                            throw new Error('工作区切换未返回有效结果');
+                          }
+                          setWorkspaceSwitchModal('hidden');
+                          setWorkspaceRoot(result.workspaceRoot);
+                          setActiveFile('');
+                        } catch (e: any) {
+                          const errMsg = e?.message || String(e || '未知错误');
+                          console.error('[WorkspaceSwitch] 切换失败:', errMsg);
+                          // 回到输入步骤，显示错误，不把 workspaceRoot 置 null
+                          setWorkspaceSwitchModal('input');
+                          setWorkspaceSwitchError(`切换失败: ${errMsg}`);
+                        } finally {
+                          setIsSwitchingWorkspace(false);
+                        }
+                      })();
+                    }}
+                    className="px-4 py-1.5 text-xs rounded bg-white/20 hover:bg-white/30 text-white transition-colors disabled:opacity-30"
+                  >
+                    确定
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

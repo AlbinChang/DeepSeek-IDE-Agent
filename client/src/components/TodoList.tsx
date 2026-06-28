@@ -30,8 +30,16 @@ export const TodoList: React.FC = () => {
         fetchTodos();
 
         const handleSync = (e: any) => {
-            if (e.detail?.payload) {
-                setContextTodos(e.detail.payload);
+            // 仅处理 todo/update 类型的推送，防止其他 GATEWAY_EVENT 污染 todos 状态
+            const detail = e?.detail;
+            if (!detail) return;
+            // 兼容 SSE annotation 格式: { method: 'todo/update', params: { todos: [...] } }
+            if (detail.method === 'todo/update' && Array.isArray(detail.params?.todos)) {
+                setContextTodos(detail.params.todos);
+            }
+            // 兼容旧格式: payload 直接是数组
+            else if (Array.isArray(detail.payload)) {
+                setContextTodos(detail.payload);
             }
         };
 
@@ -39,7 +47,8 @@ export const TodoList: React.FC = () => {
         return () => window.removeEventListener(GATEWAY_EVENT, handleSync);
     }, [workspaceRoot]);
 
-    if (!contextTodos || contextTodos.length === 0) return null;
+    // 防御：确保 contextTodos 是数组
+    if (!Array.isArray(contextTodos) || contextTodos.length === 0) return null;
 
     // 2026.03 视窗高度优化：锁定 5 个任务的可视区域
     // 计算公式：Header(26px) + 5 * Task(15px) + Padding(8px) ≈ 109px

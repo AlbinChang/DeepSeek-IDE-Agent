@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import '@/index.css'
 import App from '@/App.tsx'
 import { AgentProvider } from '@/providers/AgentContext.tsx'
+import { ErrorBoundary } from '@/components/ErrorBoundary.tsx'
 import { USER_ID } from '@/config'
 
 /**
@@ -17,8 +18,10 @@ import { USER_ID } from '@/config'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AgentProvider>
-      <App />
-    </AgentProvider>
+    <ErrorBoundary>
+      <AgentProvider>
+        <App />
+      </AgentProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )

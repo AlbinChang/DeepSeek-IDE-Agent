@@ -5,15 +5,15 @@
         "id": "deepseek",
         "name": "DeepSeek",
         "type": "openai-compatible",
-        "modelId": "deepseek-reasoner",
+        "modelId": "deepseek-v4-flash",
         "apiKey": "sk-39bb86081d414d378e06e91faf9bef63",
         "baseURL": "https://api.deepseek.com",
         "enableThinking": true,
-        "defaultReasoningEffort": "high"
+        "defaultReasoningEffort": "max"
       }
     ],
     "activeProvider": "deepseek",
-    "activeModel": "deepseek-reasoner",
+    "activeModel": "deepseek-v4-flash",
     "locale": "zh-CN"
   }
 }
