@@ -111,6 +111,8 @@ export class HistoryOptimizerService {
         const thinkingOptions = AIProviderFactory.buildThinkingOptions(
             selected.providerConfig,
             selected.providerConfig.defaultReasoningEffort,
+            'history-optimizer',
+            root,
         );
         const response = await client.chat.completions.create({
             model: modelId,

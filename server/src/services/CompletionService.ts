@@ -39,6 +39,8 @@ export class CompletionService {
         const thinkingOptions = AIProviderFactory.buildThinkingOptions(
             selected.providerConfig,
             selected.providerConfig.defaultReasoningEffort,
+            'completion',
+            params.workspaceRoot,
         );
         
         // 统一使用简化补全提示，兼容不同 OpenAI-Compatible 模型
@@ -73,6 +75,8 @@ export class CompletionService {
         const thinkingOptions = AIProviderFactory.buildThinkingOptions(
             selected.providerConfig,
             selected.providerConfig.defaultReasoningEffort,
+            'completion',
+            params.workspaceRoot,
         );
         // 统一使用简化补全提示，兼容不同 OpenAI-Compatible 模型
         const prompt = `Complete the following code:\n\n${params.prefix}[CURSOR]${params.suffix}`;

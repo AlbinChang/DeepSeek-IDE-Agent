@@ -209,7 +209,7 @@ export class AgentChatComponent {
             const toolsMetadata = agentService.getSharedToolsMetadata();
 
             const client = AIProviderFactory.getClient(resolvedProvider);
-            const thinkingOptions = AIProviderFactory.buildThinkingOptions(resolvedProvider, effectiveReasoningEffort);
+            const thinkingOptions = AIProviderFactory.buildThinkingOptions(resolvedProvider, effectiveReasoningEffort, 'main-agent', root);
            
             const MAX_TURNS = globalConfig.agent.maxTurns;
 
@@ -328,7 +328,7 @@ export class AgentChatComponent {
                         emit,
                         providerConfig: resolvedProvider,
                         modelId: finalModelId,
-                        thinkingOptions,
+                        thinkingOptions: AIProviderFactory.buildThinkingOptions(resolvedProvider, effectiveReasoningEffort, 'evaluator-agent', root),
                         userInstruction: String(lastUserMsgRecord?.content || ""),
                         mainAgentFinalReply,
                     });

@@ -95,19 +95,43 @@ export class AIProviderFactory {
         return client;
     }
 
-    static buildThinkingOptions(providerInput?: Partial<ModelProviderConfig>, reasoningEffort?: 'high' | 'max'): Record<string, any> {
+    /**
+     * 构建 user_id 用于流量隔离与 KV Cache 复用。
+     * 规则：agentName + workspace，仅保留 [a-zA-Z0-9\-_]，最大 512 字符。
+     */
+    static buildUserId(agentName: string, workspace: string): string {
+        const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9\-_]/g, '_');
+        const raw = `${sanitize(agentName)}__${sanitize(workspace)}`;
+        return raw.length <= 512 ? raw : raw.slice(0, 512);
+    }
+
+    static buildThinkingOptions(
+        providerInput?: Partial<ModelProviderConfig>,
+        reasoningEffort?: 'high' | 'max',
+        agentName?: string,
+        workspace?: string,
+    ): Record<string, any> {
         const provider = this.normalizeProvider(providerInput);
         if (provider.enableThinking === false) {
-            return {};
+            const opts: Record<string, any> = {};
+            if (agentName && workspace) {
+                opts.extra_body = { user_id: this.buildUserId(agentName, workspace) };
+            }
+            return opts;
         }
 
         const effort = reasoningEffort === 'max'
             ? 'max'
             : (provider.defaultReasoningEffort === 'max' ? 'max' : 'high');
 
+        const extra_body: Record<string, any> = { thinking: { type: 'enabled' } };
+        if (agentName && workspace) {
+            extra_body.user_id = this.buildUserId(agentName, workspace);
+        }
+
         return {
             reasoning_effort: effort,
-            extra_body: { thinking: { type: 'enabled' } }
+            extra_body,
         };
     }
 
