@@ -3,8 +3,7 @@ import { createRoot } from 'react-dom/client'
 import '@/index.css'
 import App from '@/App.tsx'
 import { AgentProvider } from '@/providers/AgentContext.tsx'
-import { WorkerManager } from '@/services/WorkerManager.ts'
-import { USER_ID, WS_BASE } from '@/config'
+import { USER_ID } from '@/config'
 
 /**
  * ⚠️ 已移除手动 MonacoEnvironment 配置
@@ -14,9 +13,7 @@ import { USER_ID, WS_BASE } from '@/config'
  * 从而产生 "Strict MIME type checking" 报错。
  */
 
-(window as any).WorkerManager = WorkerManager;
 (window as any).USER_ID = USER_ID;
-(window as any).WS_BASE = WS_BASE;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

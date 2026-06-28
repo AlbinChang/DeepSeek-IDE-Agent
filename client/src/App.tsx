@@ -11,10 +11,9 @@ import {
 import { FileTree } from '@/components/FileTree';
 import { Header } from '@/components/Header';
 import { StatusBar } from '@/components/StatusBar';
-import { WorkerManager } from '@/services/WorkerManager';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
 import { useAgentContext } from '@/providers/AgentContext';
-import { USER_ID, WS_BASE, GATEWAY_EVENT, LEGACY_WS_EVENT } from '@/config';
+import { USER_ID, GATEWAY_EVENT, LEGACY_WS_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 
 // 拖拽分割线组件 (对齐 工业级交互规范)
@@ -170,82 +169,38 @@ function App() {
     let isDisposed = false;
     const connectTimer = window.setTimeout(() => {
       if (isDisposed) return;
-      // Electron 模式：不使用 WebSocket，改用 IPC 事件（通过 electronBridge.onSystemEvent）
-      if (electronBridge.isElectron) {
-        // 订阅 IPC 系统事件替代 WebSocket
-        const sysCleanup = electronBridge.onSystemEvent((event) => {
-          if (!event) return;
-          window.dispatchEvent(new CustomEvent(GATEWAY_EVENT, { detail: event }));
-          window.dispatchEvent(new CustomEvent(LEGACY_WS_EVENT, { detail: event }));
-          const payload = (event as any).payload || {};
-          switch (event.type) {
-            case 'system:ready':
-              if (payload && payload.initialized && payload.workspaceRoot) {
-                if (payload.workspaceRoot !== workspaceRootRef.current) {
-                  setWorkspaceRoot(payload.workspaceRoot);
-                }
+      // 通过 IPC 订阅系统事件
+      const sysCleanup = electronBridge.onSystemEvent((event) => {
+        if (!event) return;
+        window.dispatchEvent(new CustomEvent(GATEWAY_EVENT, { detail: event }));
+        window.dispatchEvent(new CustomEvent(LEGACY_WS_EVENT, { detail: event }));
+        const payload = (event as any).payload || {};
+        switch (event.type) {
+          case 'system:ready':
+            if (payload && payload.initialized && payload.workspaceRoot) {
+              if (payload.workspaceRoot !== workspaceRootRef.current) {
+                setWorkspaceRoot(payload.workspaceRoot);
               }
-              break;
-            case 'system:standby':
-              break;
-            case 'editor:lock':
-              setLockedFiles(prev => ({ ...prev, [payload.path]: payload.toolCallId }));
-              break;
-            case 'editor:unlock':
-              setLockedFiles(prev => {
-                const next = { ...prev };
-                delete next[payload.path];
-                return next;
-              });
-              break;
-            case 'terminal:data':
-              window.dispatchEvent(new CustomEvent('ui:terminal:data', { detail: payload }));
-              break;
-          }
-        });
-        // 在 cleanup 中取消订阅
-        const origCleanup = () => { sysCleanup(); };
-        (window as any).__electronSysCleanup = origCleanup;
-        return;
-      }
-      WorkerManager.connect('system-events', `${WS_BASE}/ws/events?userId=${USER_ID}${urlSuffix}`, (msg) => {
-          if (!msg) return;
-        const normalized = (msg?.jsonrpc === '2.0' && msg?.method === 'event/push' && msg?.params)
-          ? { type: msg.params.type, payload: msg.params.payload }
-          : msg;
-
-        window.dispatchEvent(new CustomEvent(GATEWAY_EVENT, { detail: normalized }));
-        // 兼容历史监听器，后续可移除。
-        window.dispatchEvent(new CustomEvent(LEGACY_WS_EVENT, { detail: normalized }));
-        const payload = normalized.payload || {};
-        switch (normalized.type) {
-            case 'system:ready':
-              // Ready is authoritative: adopt backend root when available.
-              if (payload && payload.initialized && payload.workspaceRoot) {
-                if (payload.workspaceRoot !== workspaceRootRef.current) {
-                  setWorkspaceRoot(payload.workspaceRoot);
-                }
-              }
-              break;
-            case 'system:standby':
-              // Standby can be emitted by stale/old channels during workspace switch.
-              // Do not clear workspaceRoot here; explicit reset/switch flows own root state transitions.
-              break;
-              case 'editor:lock':
-                  setLockedFiles(prev => ({ ...prev, [payload.path]: payload.toolCallId }));
-                  break;
-              case 'editor:unlock':
-                  setLockedFiles(prev => {
-                      const next = { ...prev };
-                      delete next[payload.path];
-                      return next;
-                  });
-                  break;
-              case 'terminal:data':
-                  window.dispatchEvent(new CustomEvent('ui:terminal:data', { detail: payload }));
-                  break;
-          }
+            }
+            break;
+          case 'system:standby':
+            break;
+          case 'editor:lock':
+            setLockedFiles(prev => ({ ...prev, [payload.path]: payload.toolCallId }));
+            break;
+          case 'editor:unlock':
+            setLockedFiles(prev => {
+              const next = { ...prev };
+              delete next[payload.path];
+              return next;
+            });
+            break;
+          case 'terminal:data':
+            window.dispatchEvent(new CustomEvent('ui:terminal:data', { detail: payload }));
+            break;
+        }
       });
+      (window as any).__electronSysCleanup = sysCleanup;
     }, 0);
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -274,14 +229,10 @@ function App() {
     return () => {
       isDisposed = true;
       clearTimeout(connectTimer);
-      if (electronBridge.isElectron) {
-        // 清理 IPC 系统事件订阅
-        const sysCleanup = (window as any).__electronSysCleanup;
-        if (typeof sysCleanup === 'function') sysCleanup();
-        delete (window as any).__electronSysCleanup;
-      } else {
-        WorkerManager.close('system-events');
-      }
+      // 清理 IPC 系统事件订阅
+      const sysCleanup = (window as any).__electronSysCleanup;
+      if (typeof sysCleanup === 'function') sysCleanup();
+      delete (window as any).__electronSysCleanup;
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('ui:file:select', onFileSelectRequest);
     };

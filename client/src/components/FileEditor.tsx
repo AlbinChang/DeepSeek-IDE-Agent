@@ -3,15 +3,13 @@ import { Editor, DiffEditor, loader } from '@monaco-editor/react';
 import type { OnMount } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 
-// 对齐 3.1 节：配置内部 Monaco 加载器使用本地实例以隔离网络环境 (E2E 稳定性关键)
+// 配置内部 Monaco 加载器使用本地实例
 loader.config({ monaco });
 (window as any).monaco = monaco;
 
-import axios from 'axios';
 import { Lock, FileCode, Eye, Code, X } from 'lucide-react';
-import { WorkerManager } from '@/services/WorkerManager';
 import { useInlineCompletions } from '@/hooks/useInlineCompletions';
-import { USER_ID, API_BASE, WS_BASE, GATEWAY_EVENT } from '@/config';
+import { USER_ID, GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { electronBridge } from '@/services/electron-bridge';
@@ -272,94 +270,42 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           
           const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
           if (!effectiveRoot) return;
-          const rootParam = `&root=${encodeURIComponent(effectiveRoot)}`;
 
-          // Electron 模式：通过 IPC 直接读取本地文件
-          if (electronBridge.isElectron) {
-            const result = await electronBridge.readFile({
-              filePath: activeFile,
-              root: effectiveRoot,
-            });
+          // 通过 IPC 直接读取本地文件
+          const result = await electronBridge.readFile({
+            filePath: activeFile,
+            root: effectiveRoot,
+          });
 
-            if (signal.aborted || activeFileRef.current !== activeFile) {
-              console.log(`[Editor] Fetching aborted or stale for ${activeFile}`);
-              return;
-            }
-
-            if (!result || !result.content) {
-              throw new Error(`[IO_FAILURE] 文件读取失败 (IPC): ${result?.error || '无内容'}`);
-            }
-
-            console.log(`[Editor] Content fetched (IPC) for ${activeFile}, length: ${result.content.length}`);
-            setFileEncoding(result.encoding || 'utf8');
-            setSavedContent(result.content || '');
-            setIsDirty(false);
-            setFileContent(result.content || '');
-
-            // Diff 模式：通过 IPC 获取 Git 原始版本
-            if (viewMode === 'diff') {
-              try {
-                const gitResult = await electronBridge.gitDiff({
-                  root: effectiveRoot,
-                  file: activeFile,
-                });
-                setOriginalContent(gitResult?.content || '');
-              } catch {
-                console.warn('[Editor] Git diff failed (likely Untracked), rendering as whole-file addition.');
-                setOriginalContent('');
-              }
-            }
-            return;
-          }
-
-          // Web 模式：HTTP 请求
-          // 并发执行：拉取服务器内容，注入 signal 确保请求可随时中止
-          const requests: Promise<any>[] = [
-            axios.get(`${API_BASE}/api/files/content?path=${encodeURIComponent(activeFile)}${rootParam}`, { signal })
-              .catch(e => axios.isCancel(e) ? { data: { content: '[ABORTED]' } } : { data: { content: null, error: e } })
-          ];
-
-          if (viewMode === 'diff') {
-            requests.push(axios.get(`${API_BASE}/api/git/show?path=${encodeURIComponent(activeFile)}${rootParam}`, { signal })
-              .catch(e => axios.isCancel(e) ? { data: { content: '[ABORTED]' } } : { data: { content: '', error: e } }));
-          }
-
-          const [serverRes, gitRes] = await Promise.all(requests);
-
-          // 屏障校验：如果请求已被后续操作中止，或者已经切到别的文件，立即退避
-          if (signal.aborted || serverRes.data.content === '[ABORTED]' || activeFileRef.current !== activeFile) {
+          if (signal.aborted || activeFileRef.current !== activeFile) {
             console.log(`[Editor] Fetching aborted or stale for ${activeFile}`);
             return;
           }
 
-          const serverContent = serverRes.data.content;
-          const serverEncoding = serverRes.data.encoding;
-          console.log(`[Editor] Content fetched for ${activeFile}, length: ${serverContent?.length}`);
-          
-          if (serverContent === null) {
-              const err = serverRes.data.error;
-              const status = err?.response?.status;
-              const errorMsg = err?.response?.data?.error || err?.message || '文件读取流中断';
-              throw new Error(`[IO_FAILURE] ${errorMsg} (STATUS: ${status})`);
+          if (!result || !result.content) {
+            throw new Error(`[IO_FAILURE] 文件读取失败 (IPC): ${result?.error || '无内容'}`);
           }
 
-          // 处理 Git Show 结果
-          if (viewMode === 'diff' && gitRes) {
-            if (gitRes.data.error) {
-              console.warn('[Editor] Git show failed (likely Untracked), rendering as whole-file addition.');
-              setOriginalContent(''); 
-            } else {
-              setOriginalContent(gitRes.data.content || '');
+          console.log(`[Editor] Content fetched (IPC) for ${activeFile}, length: ${result.content.length}`);
+          setFileEncoding(result.encoding || 'utf8');
+          setSavedContent(result.content || '');
+          setIsDirty(false);
+          setFileContent(result.content || '');
+
+          // Diff 模式：通过 IPC 获取 Git 原始版本
+          if (viewMode === 'diff') {
+            try {
+              const gitResult = await electronBridge.gitDiff({
+                root: effectiveRoot,
+                file: activeFile,
+              });
+              setOriginalContent(gitResult?.content || '');
+            } catch {
+              console.warn('[Editor] Git diff failed (likely Untracked), rendering as whole-file addition.');
+              setOriginalContent('');
             }
           }
-
-          console.log(`[Editor] Setting fileContent for ${activeFile}`);
-          setFileEncoding(typeof serverEncoding === 'string' && serverEncoding ? serverEncoding : 'utf8');
-          setSavedContent(serverContent || '');
-          setIsDirty(false);
-          setFileContent(serverContent || '');
       } catch (err: any) {
-          if (axios.isCancel(err)) return;
           console.error('[Editor] Initial load failed:', err);
           if (activeFileRef.current !== activeFile) return;
 
@@ -422,15 +368,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
             e.preventDefault();
             const pos = editorRef.current?.getPosition();
             if (pos) {
-                console.log(`[Action] Tracing call hierarchy at ${activeFileRef.current}:${pos.lineNumber}`);
-                WorkerManager.send('context', {
-                    jsonrpc: '2.0',
-                    method: 'context/action',
-                    params: {
-                        userId: USER_ID,
-                        data: { action: 'trace_call_chain', path: activeFileRef.current, line: pos.lineNumber, char: pos.column, direction: 'incoming' }
-                    }
-                });
+                console.log(`[Action] Call hierarchy at ${activeFileRef.current}:${pos.lineNumber}`);
             }
         }
 
@@ -467,43 +405,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     window.addEventListener('keydown', handleKeyDown, true);
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [handleSaveFile, isLocked, savedContent, viewMode, isSaving, fileContent, activeFile, workspaceRoot, fileEncoding]);
-
-  // 3.1 编辑器上下文与补全通道生命周期 (对齐工作区切换强制重连协议)
-  useEffect(() => {
-    if (!editorReady || !workspaceRoot) {
-      WorkerManager.close('completion-shared');
-      WorkerManager.close('context');
-      return;
-    }
-
-    // Electron 模式：跳过 WebSocket 连接（补全/上下文由 IPC 替代）
-    if (electronBridge.isElectron) return;
-
-    const urlSuffix = `userId=${USER_ID}&root=${encodeURIComponent(workspaceRoot)}`;
-
-    WorkerManager.connect('completion-shared', `${WS_BASE}/ws/completion?${urlSuffix}`, (msg) => {
-      if (msg.jsonrpc === '2.0' && msg.method === 'completion/stream' && msg.params) {
-        if (msg.params.type === 'delta') {
-          window.dispatchEvent(new CustomEvent('ai:completion:delta', { detail: { id: msg.params.streamId, text: msg.params.text } }));
-        } else if (msg.params.type === 'done') {
-          window.dispatchEvent(new CustomEvent('ai:completion:done', { detail: { id: msg.params.streamId } }));
-        }
-      }
-    });
-
-    WorkerManager.connect('context', `${WS_BASE}/ws/context?${urlSuffix}`, (msg) => {
-      if (msg.jsonrpc === '2.0' && msg.error) {
-        console.error('[Context] Handshake failed:', msg.error.message);
-      } else if (msg.type === 'error') {
-        console.error('[Context] Handshake failed:', msg.message);
-      }
-    });
-
-    return () => {
-      WorkerManager.close('completion-shared');
-      WorkerManager.close('context');
-    };
-  }, [editorReady, workspaceRoot]);
 
   // 4. 实时补全集成 (对齐 4.5 节)
   useInlineCompletions({
@@ -658,19 +559,8 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         console.error('[Editor] _codeEditorService not found on editor instance');
     }
     
-    // 监听选择与点击 (对齐 3.1 实时上下文采集)
+    // 监听选择变更
     editor.onDidChangeCursorSelection((e) => {
-      WorkerManager.send('context', {
-        jsonrpc: '2.0',
-        method: 'context/selection',
-        params: {
-          userId: USER_ID,
-          data: {
-            path: activeFileRef.current, cursor: e.selection,
-            text: editor.getModel()?.getValueInRange(e.selection)
-          }
-        }
-      });
 
       // 判断是否有实际的文本选中（非零宽光标）
       const sel = e.selection;
@@ -693,11 +583,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     });
 
     editor.onDidFocusEditorText(() => {
-      WorkerManager.send('context', {
-        jsonrpc: '2.0',
-        method: 'context/focus',
-        params: { userId: USER_ID, data: { path: activeFileRef.current, focused: true } }
-      });
+      // 编辑器聚焦（桌面应用模式无需推送上下文）
     });
 
     editor.onDidChangeModelContent(() => {

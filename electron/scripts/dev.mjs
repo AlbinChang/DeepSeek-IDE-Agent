@@ -100,9 +100,29 @@ function buildMainProcess() {
     }
 }
 
+// ── 端口清理：杀掉占用目标端口的进程 ──
+function killPortProcess(port) {
+    try {
+        if (process.platform === 'win32') {
+            execSync(
+                `Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }`,
+                { shell: 'powershell.exe', stdio: 'pipe', timeout: 5000 }
+            );
+        } else {
+            execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, { stdio: 'pipe', timeout: 3000 });
+        }
+        log('DEV', colors.cyan, `Port ${port} cleaned`);
+    } catch {
+        // 端口空闲或清理失败都是预期内，静默继续
+    }
+}
+
 // ── 步骤 3: 启动 Vite Dev Server ──
 function startViteDevServer() {
     return new Promise((resolve) => {
+        // 先清理端口
+        killPortProcess(VITE_PORT);
+
         log('VITE', colors.yellow, `Starting Vite dev server on port ${VITE_PORT}...`);
 
         const vite = spawn('npx', ['vite', '--host', '0.0.0.0', '--port', VITE_PORT, '--strictPort'], {
@@ -113,12 +133,15 @@ function startViteDevServer() {
         });
 
         let started = false;
+        let accumulated = '';
 
         vite.stdout.on('data', (data) => {
             const text = data.toString();
             process.stdout.write(`${colors.cyan}[VITE]${colors.reset} ${text}`);
+            accumulated += text;
 
-            if (!started && text.includes('Local:')) {
+            // 累积检测：避免 "Local:" 跨 chunk 分割导致漏检
+            if (!started && (accumulated.includes('Local:') || accumulated.includes('ready in'))) {
                 started = true;
                 log('VITE', colors.green, `Dev server ready at http://localhost:${VITE_PORT}`);
                 resolve(vite);
@@ -136,12 +159,17 @@ function startViteDevServer() {
             }
         });
 
-        // 超时回退
+        // 超时回退（端口占用的 fallback）
         setTimeout(() => {
             if (!started) {
-                log('VITE', colors.yellow, 'Timeout waiting for Vite, proceeding anyway...');
-                started = true;
-                resolve(vite);
+                log('VITE', colors.yellow, 'Timeout waiting for Vite, retrying with port cleanup...');
+                vite.kill();
+                // 二次清理后重试
+                setTimeout(() => {
+                    killPortProcess(VITE_PORT);
+                    log('VITE', colors.yellow, 'Please restart manually if port is still occupied');
+                    process.exit(1);
+                }, 2000);
             }
         }, 15000);
     });
@@ -203,6 +231,7 @@ async function main() {
         log('DEV', colors.yellow, 'Shutting down...');
         viteProcess.kill();
         electronProcess.kill();
+        killPortProcess(VITE_PORT);
         process.exit(0);
     };
 
