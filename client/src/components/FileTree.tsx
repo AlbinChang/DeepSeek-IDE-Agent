@@ -552,6 +552,28 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
             onClick={(e) => {
               e.stopPropagation();
+              const targetPath = contextMenu.node.path;
+              console.log(`[FileTree] revealInExplorer: path="${targetPath}"`);
+              if (electronBridge.isElectron) {
+                electronBridge.revealInExplorer(targetPath).then(result => {
+                  console.log(`[FileTree] revealInExplorer result:`, result);
+                  if (!result.success) {
+                    console.error(`[FileTree] revealInExplorer failed: ${result.error}`);
+                  }
+                }).catch(err => {
+                  console.error(`[FileTree] revealInExplorer error:`, err);
+                });
+              }
+              setContextMenu(null);
+            }}
+          >
+            <Folder size={12} className="opacity-50" />
+            <span>在文件资源管理器中显示</span>
+          </div>
+          <div 
+            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
               setRenameTarget(contextMenu.node);
               setRenameInput(contextMenu.node.name);
               setRenameError(null);

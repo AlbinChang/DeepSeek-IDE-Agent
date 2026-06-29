@@ -865,6 +865,171 @@ export class FileTools {
     }
 
     /**
+     * Agent 全局关键词替换 — 将文件中所有出现的 oldText 替换为 newText。
+     * 与 editFileByReplace（仅替换首次出现）不同，本方法替换全部匹配项。
+     * 用于文档批量关键词替换场景（如重命名变量、修正术语、统一格式）。
+     */
+    static async replaceAllInFile(
+        workspaceRoot: string,
+        unsafePath: string,
+        oldText: string,
+        newText: string
+    ) {
+        const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
+
+        try {
+            // 文件必须存在
+            try {
+                await fs.access(fullPath);
+            } catch {
+                return {
+                    status: 'error',
+                    mode: 'replace_all',
+                    path: fullPath,
+                    error: 'FILE_NOT_FOUND',
+                    message: `文件不存在，无法执行全局替换。新建文件请使用 file_write。`
+                };
+            }
+
+            const stats = await fs.stat(fullPath);
+            const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+            if (stats.size > MAX_SIZE) {
+                return {
+                    status: 'error',
+                    mode: 'replace_all',
+                    path: fullPath,
+                    error: 'FILE_TOO_LARGE',
+                    message: `文件大小超限 (${(stats.size / 1024 / 1024).toFixed(1)}MB > 5MB)，拒绝编辑。`
+                };
+            }
+
+            const rawBuffer = await fs.readFile(fullPath);
+
+            try {
+                FileIO.checkBinaryHeader(rawBuffer);
+            } catch {
+                return {
+                    status: 'error',
+                    mode: 'replace_all',
+                    path: fullPath,
+                    error: 'BINARY_FILE_DETECTED',
+                    message: '拒绝执行：检测到目标文件可能是二进制文件。'
+                };
+            }
+
+            // null 字节守卫
+            if (oldText.includes('\u0000') || newText.includes('\u0000')) {
+                return {
+                    status: 'error',
+                    mode: 'replace_all',
+                    path: fullPath,
+                    error: 'NULL_BYTE_IN_CONTENT',
+                    message: 'oldText 或 newText 含 null 字节（\\u0000），操作已拒绝。'
+                };
+            }
+
+            // oldText 不能为空
+            if (!oldText) {
+                return {
+                    status: 'error',
+                    mode: 'replace_all',
+                    path: fullPath,
+                    error: 'OLD_TEXT_EMPTY',
+                    message: 'oldText 不能为空。若要插入内容请使用 file_edit action: "insert"。'
+                };
+            }
+
+            const { content: rawContent, encoding: detectedEncoding } = FileIO.decodeBuffer(rawBuffer);
+            const encoding = detectedEncoding;
+
+            // 写入体积守卫
+            const MAX_PATCH_CHARS = 5 * 1024 * 1024;
+            if (newText.length > MAX_PATCH_CHARS) {
+                return {
+                    status: 'error',
+                    mode: 'replace_all',
+                    path: fullPath,
+                    error: 'CONTENT_TOO_LARGE',
+                    message: `newText 长度 ${(newText.length / 1024 / 1024).toFixed(1)}M 字符超过 5M 上限。`
+                };
+            }
+
+            // 统计 oldText 出现次数
+            let searchFrom = 0;
+            const occurrences: number[] = [];
+            while (true) {
+                const idx = rawContent.indexOf(oldText, searchFrom);
+                if (idx === -1) break;
+                occurrences.push(idx);
+                searchFrom = idx + 1;
+            }
+
+            if (occurrences.length === 0) {
+                return {
+                    status: 'error',
+                    mode: 'replace_all',
+                    path: fullPath,
+                    error: 'OLD_TEXT_NOT_FOUND',
+                    message: `未在文件中找到 oldText。请使用 read_file 确认文件当前内容，确保 oldText 与原文完全一致（含空白、缩进、换行）。`
+                };
+            }
+
+            // 执行全局替换（从后往前替换，避免位移影响）
+            let newContent = rawContent;
+            // 记录替换位置的行号信息（在替换前计算）
+            const lines = rawContent.split('\n');
+            const replacementLineNumbers: number[] = occurrences.map(offset => {
+                let charCount = 0;
+                for (let i = 0; i < lines.length; i++) {
+                    charCount += lines[i].length + 1; // +1 for \n
+                    if (charCount > offset) return i + 1;
+                }
+                return lines.length;
+            });
+
+            // 从后往前替换，保证前面的位移不受影响
+            for (let i = occurrences.length - 1; i >= 0; i--) {
+                const idx = occurrences[i];
+                newContent = newContent.slice(0, idx) + newText + newContent.slice(idx + oldText.length);
+            }
+
+            // 编码并写入（复用底层原子化写出）
+            const finalBuffer = FileIO.encodeString(newContent, encoding);
+            await FileIO.writeFile(unsafePath, workspaceRoot, finalBuffer);
+
+            // 构建操作后上下文快照（取第一个替换位置附近）
+            const newLines = newContent.split(/\r?\n|\r|\u2028|\u2029/);
+            const firstReplacementLine = replacementLineNumbers[0];
+            const lineNumWidth = String(newLines.length).length;
+            const snapshotStart = Math.max(0, firstReplacementLine - 4);
+            const snapshotEnd = Math.min(newLines.length, firstReplacementLine + Math.max(newText.split('\n').length, oldText.split('\n').length) + 3);
+            const contextSnapshot = newLines
+                .slice(snapshotStart, snapshotEnd)
+                .map((l, i) => `${String(snapshotStart + i + 1).padStart(lineNumWidth)}: ${l}`)
+                .join('\n');
+
+            return {
+                status: 'success',
+                mode: 'replace_all',
+                path: fullPath,
+                encoding,
+                occurrences: occurrences.length,
+                replacedLines: replacementLineNumbers,
+                oldTextLength: oldText.length,
+                newTextLength: newText.length,
+                newTotalLines: newLines.length,
+                contextSnapshot
+            };
+        } catch (err: any) {
+            console.error(`[FileTools] replaceAllInFile Error: ${err.message}`);
+            if (err.message?.startsWith('[ENCODING_LOSS]')) {
+                return { status: 'error', mode: 'replace_all', error: 'ENCODING_LOSS', message: err.message };
+            }
+            return { status: 'error', mode: 'replace_all', message: err.message };
+        }
+    }
+
+    /**
     * Agent 文件删除
      */
     static async deletePath(workspaceRoot: string, unsafePath: string, recursive: boolean = false) {

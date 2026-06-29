@@ -154,3 +154,5 @@ secret/
 .github/
 .claude/
 .rules/
+
+.electron-store/

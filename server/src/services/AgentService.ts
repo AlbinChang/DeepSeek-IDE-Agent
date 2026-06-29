@@ -413,6 +413,73 @@ export class AgentService extends EventEmitter {
             }
         });
 
+        console.log('[AgentService] Registering file_replace_all...');
+        this.toolManager.registerTool({
+            name: 'file_replace_all',
+            description: '文档关键词全局替换工具。将文件中**所有**出现的 oldText 替换为 newText，无需担心遗漏。\n\n与 file_edit（仅替换首次出现/需要唯一匹配）不同，本工具会替换文件中每一个匹配项，适合：\n- 全局重命名变量/函数/类名\n- 修正文档中的术语拼写\n- 统一格式化标记（如将所有制表符替换为空格）\n- 批量更新引用路径\n\n⚠️ 注意事项：\n- oldText 会作为**纯文本**进行精确匹配（含空白、缩进），不是正则表达式\n- 若未找到任何匹配项，返回错误并提示用户确认\n- 返回替换次数、替换行号列表和操作后上下文快照',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string', description: '文件相对路径' },
+                    oldText: { type: 'string', description: '要被替换的原文（纯文本精确匹配，含空白、缩进）。文件中所有出现该文本的地方都会被替换。' },
+                    newText: { type: 'string', description: '替换后的新文本。传空字符串 "" 即删除所有出现的 oldText。' }
+                },
+                required: ['path', 'oldText', 'newText']
+            },
+            execute: async (params, context) => {
+                const root = this.resolveWorkspaceRootFromContext(context);
+                if (!root) throw new Error('Workspace not initialized');
+                if (!params || !params.path || typeof params.path !== 'string') {
+                    return {
+                        status: 'error',
+                        error: 'INVALID_PARAMS',
+                        errorPhase: 'replace_all',
+                        message: 'The "path" parameter is missing or invalid.'
+                    };
+                }
+                if (typeof params.oldText !== 'string' || !params.oldText) {
+                    return {
+                        status: 'error',
+                        error: 'INVALID_PARAMS',
+                        errorPhase: 'replace_all',
+                        message: 'The "oldText" parameter is missing or empty.'
+                    };
+                }
+                if (typeof params.newText !== 'string') {
+                    return {
+                        status: 'error',
+                        error: 'INVALID_PARAMS',
+                        errorPhase: 'replace_all',
+                        message: 'The "newText" parameter is missing or invalid.'
+                    };
+                }
+
+                const replaceResult = await FileTools.replaceAllInFile(root, params.path, params.oldText, params.newText);
+
+                if (!replaceResult || replaceResult.status !== 'success') {
+                    return {
+                        ...(replaceResult || { status: 'error', error: 'REPLACE_ALL_FAILED', message: 'Unknown replace_all failure' }),
+                        errorPhase: 'replace_all'
+                    };
+                }
+
+                const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
+                const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
+                return {
+                    ...replaceResult,
+                    syntaxCheck,
+                    syntaxFeedback: {
+                        phase: 'post_replace_all',
+                        mode: 'feedback_only',
+                        pass: gatePass,
+                        message: gatePass
+                            ? `语法检查通过。全局替换了 ${replaceResult.occurrences} 处。`
+                            : `语法检查未通过（仅反馈，不影响替换结果）：${syntaxCheck?.message || '未知错误'}`
+                    }
+                };
+            }
+        });
+
         console.log('[AgentService] Registering run_powershell_command...');
         this.toolManager.registerTool({
             name: 'run_powershell_command',

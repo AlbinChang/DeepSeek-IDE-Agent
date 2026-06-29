@@ -88,6 +88,30 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
         return { success: true };
     });
 
+    // ── 在文件资源管理器中显示 ──
+    ipcMain.handle('app:revealInExplorer', async (_event, filePath: string) => {
+        try {
+            const { shell } = await import('electron');
+            // normalize 处理跨平台路径分隔符
+            const resolved = path.normalize(filePath);
+            console.log(`[AppIPC] revealInExplorer: filePath="${filePath}" → resolved="${resolved}"`);
+
+            if (!fs.existsSync(resolved)) {
+                console.warn(`[AppIPC] revealInExplorer: 路径不存在: ${resolved}`);
+                return { success: false, error: `路径不存在: ${resolved}` };
+            }
+
+            // 在文件管理器中打开并选中该文件/文件夹
+            shell.showItemInFolder(resolved);
+            console.log(`[AppIPC] revealInExplorer: done`);
+
+            return { success: true };
+        } catch (err: any) {
+            console.error(`[AppIPC] revealInExplorer error:`, err);
+            return { success: false, error: err?.message || String(err) };
+        }
+    });
+
     // ── 显示消息框 ──
     ipcMain.handle('app:showMessage', async (_event, options: {
         type?: 'info' | 'warning' | 'error' | 'question';

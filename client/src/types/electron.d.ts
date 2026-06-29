@@ -249,6 +249,7 @@ interface ElectronAPI {
 
     // App
     getAppInfo: () => Promise<AppInfo>;
+    revealInExplorer: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     onSystemEvent: (callback: (event: SystemEvent) => void) => () => void;
 }
 

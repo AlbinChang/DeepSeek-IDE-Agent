@@ -236,6 +236,9 @@ export const electronBridge = {
     async getAppInfo() {
         return callIpc('getAppInfo', []);
     },
+    async revealInExplorer(filePath: string): Promise<{ success: boolean; error?: string }> {
+        return callIpc('revealInExplorer', [filePath]);
+    },
     onSystemEvent(callback: (event: { type: string; payload?: any }) => void): () => void {
         if (api) return api.onSystemEvent(callback);
         return () => {};

@@ -64,6 +64,7 @@ export interface ElectronAPI {
 
     // 应用
     getAppInfo: () => Promise<AppInfo>;
+    revealInExplorer: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     onSystemEvent: (callback: (event: SystemEvent) => void) => () => void;
 }
 
@@ -226,6 +227,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // 应用
     getAppInfo: () => ipcRenderer.invoke('app:info'),
+    revealInExplorer: (filePath: string) => ipcRenderer.invoke('app:revealInExplorer', filePath),
     onSystemEvent: (callback: (event: SystemEvent) => void) => {
         const handler = (_event: IpcRendererEvent, data: SystemEvent) => callback(data);
         ipcRenderer.on('system:event', handler);
