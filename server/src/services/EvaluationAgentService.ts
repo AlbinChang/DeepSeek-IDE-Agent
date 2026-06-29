@@ -1,6 +1,3 @@
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-
 import { AgentService } from "@/services/AgentService.js";
 import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
 import { AIProviderFactory } from "@/services/AIProviderFactory.js";
@@ -8,7 +5,7 @@ import { HistoryOptimizerService } from "@/services/HistoryOptimizerService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
 import { config as globalConfig } from "@/config/index.js";
-import { formatBeijingIso, getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
+import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 
 const getTS = () => getBeijingLogTimePrefix();
 
@@ -38,7 +35,6 @@ export interface EvaluationAgentInput {
 export interface EvaluationAgentOutput {
     decision: EvaluationDecision;
     finalReply: string;
-    reportPath: string;
     reportContent: string;
     usage: any;
 }
@@ -48,7 +44,7 @@ export interface EvaluationAgentOutput {
  * - 使用独立 evaluator-agent.json 系统提示词
  * - 仅注入「用户指令 + 主Agent最终回复」作为任务上下文
  * - 复用主Agent同款工具链，支持评估任务 TODO 化与工作区核验
- * - 输出评估报告到 .evaluate/result.md，并给出控制流决策
+ * - 评估结果通过内存传递，不再写入 .evaluate 文件夹
  */
 export class EvaluationAgentService {
     private static instance: EvaluationAgentService;
@@ -77,11 +73,6 @@ export class EvaluationAgentService {
             mainAgentFinalReply,
         } = input;
 
-        const evaluateDir = path.join(root, ".evaluate");
-        const reportPath = path.join(evaluateDir, "result.md");
-
-        await this.resetReport(reportPath);
-
         const evaluationTask = [
             "你现在是评估专家Agent，请执行完整评估闭环。",
             "",
@@ -102,8 +93,8 @@ export class EvaluationAgentService {
             "   - 必须核验临时文件治理是否合规：临时产物是否统一位于工作目录 `.temp/` 下。",
             "   - 若存在临时文件落在 `.temp/` 之外且用户未明确要求该位置，必须判定为问题，并给出迁移建议。",
             "3. 形成结构化评估报告：目标、文件变更清单解析、证据、差距、风险、后续动作",
-            "   - 你的最终输出必须是可直接落盘的完整 Markdown 报告正文，不得只给简短结论。",
-            "   - 系统会把你的最终输出写入 .evaluate/result.md，请确保内容完整、可追溯。",
+            "   - 你的最终输出必须是完整的 Markdown 报告正文，不得只给简短结论。",
+            "   - 评估结果将通过内存传递给主Agent，请确保内容完整、可追溯。",
             "   - 若结论为需要继续迭代，后续动作必须指向原目标文件的原路径局部修复：列出文件路径、问题位置或可定位区域、最小修复动作和复查方式。",
             "   - 若结论为需要继续迭代，必须输出“可直接修复清单”：每个问题包含等级（P0/P1/P2/P3）、需修改文件路径、页码/行号/区域、问题描述、最小修复动作和复查方式。",
             "   - 如果评估报告已能定位问题并给出修复动作（例如 P1 问题已给出目标文件和修复建议），必须要求主Agent直接修复，不要要求用户确认是否修复。",
@@ -118,7 +109,7 @@ export class EvaluationAgentService {
             "   - 若无法确认问题数，保守输出：问题个数：1，并在正文说明不确定原因。",
             "   - 问题个数必须是单一确定值，禁止区间、中文数字、约数或省略。",
             "6. 结尾必须给出“执行结论”单行，格式：执行结论：<四类之一>",
-            "7. 禁止在正文中声称“已写入文件/已保存文件”；你只负责产出报告内容，文件写入由系统执行。"
+            "7. 禁止在正文中声称\u201c已写入文件/已保存文件\u201d；你的报告内容将通过系统消息直接传递给主Agent，无需落盘。"
         ].join("\n");
 
         const finalLocale = locale || "zh-CN";
@@ -171,6 +162,8 @@ export class EvaluationAgentService {
                 startTimeStamp: Date.now(),
                 totalSteps: 0,
                 maxTurns: globalConfig.agent.maxTurns,
+                /** 评估Agent对话旅程独立存放，不污染主Agent持久化历史 */
+                skipPersist: true,
             });
 
             turnResultUsage = turnResult.usage;
@@ -198,63 +191,16 @@ export class EvaluationAgentService {
             console.error(`${getTS()} [EvaluationAgent] runTurns failed for user: ${userId}`, err);
         }
 
-        const reportContent = this.buildReport(finalReply, userInstruction, mainAgentFinalReply);
-        await this.persistReportWithVerification(evaluateDir, reportPath, reportContent);
+        const reportContent = finalReply;
 
-        console.log(`${getTS()} [EvaluationAgent] Evaluation finished for user: ${userId}, decision: ${decision}, issueCount: ${issueCount}, report: ${reportPath}`);
+        console.log(`${getTS()} [EvaluationAgent] Evaluation finished for user: ${userId}, decision: ${decision}, issueCount: ${issueCount}`);
 
         return {
             decision,
             finalReply,
-            reportPath,
             reportContent,
             usage: turnResultUsage,
         };
-    }
-
-    private async persistReportWithVerification(evaluateDir: string, reportPath: string, reportContent: string): Promise<void> {
-        await fs.mkdir(evaluateDir, { recursive: true });
-        await fs.writeFile(reportPath, reportContent, "utf-8");
-
-        const stats = await fs.stat(reportPath);
-        if (!stats.isFile() || stats.size <= 0) {
-            throw new Error(`Evaluation report write verification failed: ${reportPath}`);
-        }
-    }
-
-    private async resetReport(reportPath: string): Promise<void> {
-        try {
-            await fs.unlink(reportPath);
-            console.log(`${getTS()} [EvaluationAgent] Removed stale report: ${reportPath}`);
-        } catch (err: any) {
-            if (err?.code !== "ENOENT") {
-                console.warn(`${getTS()} [EvaluationAgent] Failed to remove stale report: ${reportPath}`, err);
-            }
-        }
-    }
-
-    private buildReport(finalReply: string, userInstruction: string, mainAgentFinalReply: string): string {
-        const safeFinal = finalReply || "(评估Agent未返回有效内容)";
-        const now = formatBeijingIso();
-
-        return [
-            `# 评估报告`,
-            "",
-            `- 生成时间: ${now}`,
-            "",
-            "## 用户原始指令",
-            "",
-            userInstruction || "(空)",
-            "",
-            "## 主Agent最终回复",
-            "",
-            mainAgentFinalReply || "(空)",
-            "",
-            "## 评估结论",
-            "",
-            safeFinal,
-            "",
-        ].join("\n");
     }
 
     private normalizeDecisionLine(line: string): string {

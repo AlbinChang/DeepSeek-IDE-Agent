@@ -207,6 +207,12 @@ export interface AgentTurnEngineOptions {
     totalSteps?: number;
     /** 单次 runTurns 允许的最大轮次，超出则强制退出（默认 1000） */
     maxTurns?: number;
+    /**
+     * 是否跳过会话历史持久化。
+     * 设为 true 时，runTurns 不会调用 agentService.updateSessionHistory。
+     * 评估 Agent 的对话旅程是临时的、短暂的，不应污染主 Agent 的持久化历史。
+     */
+    skipPersist?: boolean;
 }
 
 export interface AgentTurnEngineResult {
@@ -597,8 +603,10 @@ export class AgentTurnEngine {
 
                 // 工具循环结束（最终回答），持久化时保留推理内容
                 const assistantMsgToSave = { ...assistantMsg };
-                const historyToSave = [...optimizedMessages, lastUserMsgRecord, assistantMsgToSave];
-                agentService.updateSessionHistory(userId, historyToSave, root);
+                if (!options.skipPersist) {
+                    const historyToSave = [...optimizedMessages, lastUserMsgRecord, assistantMsgToSave];
+                    agentService.updateSessionHistory(userId, historyToSave, root);
+                }
 
                 finalAssistantContent = assistantMsgToSave.content || "";
                 finalAssistantReasoning = assistantMsgToSave.reasoning_content || "";

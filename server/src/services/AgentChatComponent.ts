@@ -214,7 +214,7 @@ export class AgentChatComponent {
             const MAX_TURNS = globalConfig.agent.maxTurns;
 
             let totalSteps = 0;
-            let pendingEvaluatorRepairDirective: { reportPath: string; finalReply: string } | null = null;
+            let pendingEvaluatorRepairDirective: { finalReply: string } | null = null;
             let evaluatorRepairConfirmationRetries = 0;
 
             while(true)
@@ -260,9 +260,8 @@ export class AgentChatComponent {
                                 "你刚才试图询问用户是否确认评估报告修复。当前处于评估驱动修复轮：评估报告已给出明确文件路径、问题定位和修复动作时，视为本轮已有修复授权。",
                                 "不要再询问用户是否确认、是否继续或是否采用建议；请立即基于评估报告创建修复 TODO，读取对应文件并在原文件原路径上执行最小必要修改。",
                                 "只有评估报告缺少可定位目标、缺少修复动作，或确实需要用户提供外部素材、账号授权、主观取舍时，才可以等待用户输入。",
-                                `评估报告路径: ${pendingEvaluatorRepairDirective.reportPath}`,
                                 "评估结论正文如下：",
-                                pendingEvaluatorRepairDirective.finalReply || "(评估结论为空，请读取评估报告文件)",
+                                pendingEvaluatorRepairDirective.finalReply || "(评估结论为空，请基于已有信息推断修复方案)",
                             ].join("\n"),
                         });
                         emit({ type: "stage", content: "评估报告已有明确修复建议，主Agent将直接修复，不再等待二次确认。" });
@@ -336,7 +335,6 @@ export class AgentChatComponent {
                     // 评估Agent结论：需要主Agent继续迭代
                     if (evaluationResult.decision === "continue_main_agent") {
                         pendingEvaluatorRepairDirective = {
-                            reportPath: evaluationResult.reportPath,
                             finalReply: evaluationResult.finalReply || "",
                         };
                         evaluatorRepairConfirmationRetries = 0;
@@ -349,23 +347,19 @@ export class AgentChatComponent {
                         }
                         // 关键策略：继续迭代前清空上一轮主Agent历史，避免旧工具轨迹污染新一轮决策。
                         // 新一轮仅保留系统提示、固定用户意图，以及评估Agent输出的当前迭代指令。
-                        const cleanHistoryForNewTurn = (msgs: any[]) => {
-                            return msgs;
-                        };
-                        activeHistory = await prepareMessages(cleanHistoryForNewTurn([]));
+                        activeHistory = await prepareMessages([]);
                         activeHistory.push({
                             role: "system",
                             content: [
                                 "评估Agent已完成本轮评估，结论：需要继续迭代优化，务必将评估报告的问题一一修复。",
-                                "默认采用原文件原路径的迭代修复模式：先读取评估报告和现有目标文件，再在原文件上做最小必要修改。",
+                                "默认采用原文件原路径的迭代修复模式：先读取现有目标文件，再在原文件上做最小必要修改。",
                                 "若评估报告已经列出 P1/P0/P2 等问题、目标文件路径和修复动作，视为本轮已有修复授权；不要询问用户是否确认、是否继续、是否采用建议。",
                                 "只有报告明确缺少用户输入、外部素材、授权或主观取舍时，才可以请求用户介入。",
                                 "禁止为了绕开问题而新建 V2/V3/新版/修正版/最终版 等平行交付文件；除非用户明确要求多版本，否则只能收敛到原目标文件。",
                                 "在开始修复前，基于评估报告的问题清单创建本轮修复 TODO；每个 TODO 必须绑定原目标文件路径和具体问题，不要重新发明与原产物脱节的方案。",
                                 "请严格依据评估报告执行下一轮 TODO 规划、原文件修复与复查。",
-                                `评估报告路径: ${evaluationResult.reportPath}`,
                                 "评估结论正文如下：",
-                                evaluationResult.finalReply || "(评估结论为空，请读取评估报告文件)",
+                                evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)",
                             ].join("\n"),
                         });
                         emit({ type: "stage", content: "评估完成：需要继续迭代，主Agent正在根据评估报告执行下一轮..." });
@@ -383,7 +377,7 @@ export class AgentChatComponent {
                     clearPromptCache();
                     emit({
                         type: "done",
-                        content: `评估已完成：${decisionLabel}。评估报告已写入 ${evaluationResult.reportPath}`,
+                        content: `评估已完成：${decisionLabel}。`,
                         usage: usage,
                     });
                     return;
