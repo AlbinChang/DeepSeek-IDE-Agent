@@ -510,11 +510,13 @@ export class SharedContractsSection extends BasePromptSection {
 
             for (const [key, contract] of Object.entries(shared)) {
                 const c = contract as any;
+                // 跳过已废弃的契约（已被 simplicity_principle 覆盖，不再注入提示词）
+                if (c._deprecated) continue;
+                // 跳过无规则的契约
+                if (!Array.isArray(c.rules) || c.rules.length === 0) continue;
                 lines.push(`#### ${c.description || key}`);
-                if (Array.isArray(c.rules)) {
-                    for (const rule of c.rules) {
-                        lines.push(`- ${rule}`);
-                    }
+                for (const rule of c.rules) {
+                    lines.push(`- ${rule}`);
                 }
             }
 

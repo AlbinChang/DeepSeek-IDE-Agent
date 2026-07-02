@@ -11,7 +11,8 @@
         "枚举值必须从 enum 列表精确选取一个，禁止自创或近似匹配",
         "不添加 schema 未声明的字段",
         "嵌套对象递归满足子 schema 的 required/type/enum 约束",
-        "遇到 INVALID_TOOL_ARGS 错误时只修报错字段不动其他参数"
+        "遇到 INVALID_TOOL_ARGS 错误时只修报错字段不动其他参数",
+        "【JSON 字符串转义铁律】凡将用户可见文本（代码、路径、命令、文件内容等）作为 JSON 字符串参数传入时，必须确保 JSON 合法转义。铁律：① 字符串内的每个双引号 \" 必须写为 \\\"；② 每个反斜杠 \\ 必须写为 \\\\（Windows 路径 C:\\Users → C:\\\\Users）；③ 换行符写为 \\n，制表符写为 \\t；④ 字符串内若含 JSON 片段（如 curl -d '{\"key\":\"val\"}'），该片段本身也必须满足本条规则——逐层嵌套逐层转义；⑤ 传入之前，逐字通读参数值，心里模拟 JSON 解析器，确认不会因未转义字符导致解析失败。典型反面：file_write 的 content 参数包含 `console.log(\"hello\")` 但写成 `console.log(\"hello\")` 未转义引号 → JSON 解析失败；PowerShell 命令字符串含 `$var` 或反引号 `` ` `` 未正确处理。"
       ]
     },
     "agent_port_protection": {
@@ -97,57 +98,42 @@
         "【定时任务安全】定时任务必须有：① 分布式调度锁（同一时刻只有一个实例执行）；② 批量处理分页 + 游标（避免一次性加载全部数据 OOM）；③ 异常重试上限 + 退避策略；④ 处理进度记录（失败可断点续跑）。"
       ]
     },
+    "simplicity_principle": {
+      "id": "simplicity-principle",
+      "description": "简洁性原则 — 所有编码决策的最高优先级约束。能用简单方案解决的问题，绝不引入额外复杂度。",
+      "rules": [
+        "【简洁至上】在所有满足需求的方案中，优先选择最简单、最直接的那个。每当你准备引入一个新类、新设计模式、新第三方库、新抽象层或多层继承时，必须先问自己：去掉它能行吗？如果不加也能干净地完成需求，就不加。",
+        "【复杂度控制 O(1)→O(N)】编写循环/查找/遍历逻辑时，确保时间复杂度 ≤ O(N log N)。优先用 Map/Set 做 O(1) 查找替代 Array.find/filter 的 O(N) 扫描；禁止嵌套双重循环遍历同一数据集（O(N²)）；字符串拼接用数组 join 替代循环内 +=；递归深度不超过 log N 量级，大数据集用迭代替代递归。",
+        "【标准库第一】能用语言标准库解决的，不引入第三方库；能用单文件微库解决的，不引入框架；能用函数组合解决的，不引入依赖注入容器。Python 标准库优先（pathlib/sqlite3/json/csv/datetime/re/subprocess/itertools/collections），Node.js 标准库优先（fs/path/http/crypto/stream），Go 标准库优先（net/http/encoding/json/crypto/sync/context/io）。引入任何三方库前确认：与项目版本兼容、近 6 个月有维护、无高危 CVE、License 兼容。",
+        "【不过度抽象】代码复用出现 3 次以上才抽取公共函数/组件；只有 1-2 个实现时不建接口/抽象类；只有 1 张表时不建 DAO/Repository 层；单体架构能支撑当前规模时不拆微服务。抽象只为解决已发生的真实痛点，不为预防假设性痛点。if-else 嵌套不超过 2 层，≥3 个平级分支用 Map 查表替代。",
+        "【安全敏感不造轮子】加密/哈希（bcrypt/scrypt/AES-GCM）、JWT/Session（jsonwebtoken/jose）、输入校验（zod/pydantic）、SQL 防注入（参数化查询/ORM）、XSS 防护——这些领域严禁手写实现，必须使用业界安全审计过的标准库。确需手写核心逻辑时，必须在代码注释中举证标准库/开源方案不适用的具体原因。",
+        "【适度设计】不要为了 SOLID 而 SOLID。一个 50 行的工具函数不需要拆成 3 个类 + 接口 + 工厂。先写出清晰、直接、能工作的代码，然后只在以下情况重构：(a) 同一模式确实出现 3 次以上；(b) 现有代码明显阻碍新需求落地；(c) 性能瓶颈有实际测量数据支撑。"
+      ]
+    },
     "algorithm_complexity": {
       "id": "algorithm-complexity",
-      "description": "算法时间复杂度规范 — 编写任何包含循环/遍历/查找/排序逻辑的代码时必须遵循，控制复杂度在 O(1) 至 O(n log n) 之间",
-      "rules": [
-        "【硬上限】所有算法时间复杂度必须 ≤ O(n log n)。严禁出现 O(n²) 及以上复杂度（如嵌套双重循环遍历同一数据集、冒泡/插入/选择排序）。若数据规模足以让 O(n²) 退化为性能瓶颈，必须重构为 O(n log n) 或更优方案。",
-        "【查找优先哈希】任何「根据某值查找对应数据」场景，必须优先用 Map/Set/对象 key 实现 O(1) 查找，禁止用 Array.find/filter/indexOf 做 O(n) 线性扫描。典型场景：ID→对象映射、去重、存在性检查、配置键值对。",
-        "【排序底线】需要排序时使用语言内置排序（TimSort O(n log n)），禁止手写冒泡/插入/选择等 O(n²) 排序算法。多字段排序用复合比较函数一次完成，禁止多次排序叠加。",
-        "【循环优化】单层循环已是 O(n)，禁止在循环体内嵌套同规模循环（变 O(n²)）。确需笛卡尔积/全排列时优先用数学公式或分治缩小规模；大数组遍历中禁止使用 shift/unshift（O(n)），改用 pop/push（O(1)）或反转索引。",
-        "【字符串处理】循环内拼接大量字符串时，必须用数组 join('') 或 StringBuilder 模式（分摊 O(n)），禁止用 += 逐次拼接（每次创建新字符串 O(n²)）。正则匹配禁止在循环内重复 new RegExp（编译开销累积），提取到循环外。",
-        "【递归深度】递归深度不得超过 log n 量级；超大数据集禁止未优化递归（爆栈）。尾递归场景显式改为迭代；DFS 深过 1000 层必须用显式栈 + 循环替代。",
-        "【空间复杂度】空间复杂度控制在 O(n) 以内。禁止不必要的数据深拷贝（如 JSON.parse(JSON.stringify(...))）；流式处理场景用迭代器/生成器避免全量加载到内存。",
-        "【预计算与缓存】多次调用的纯函数若入参有限，用 Map 做 memoization；循环内重复计算的不变值提到循环外；数据库/API 批量查询代替循环内逐条查询（1 次 RTT vs N 次 RTT 的天壤之别）。"
-      ]
+      "description": "算法时间复杂度规范（已被 simplicity_principle 中的【复杂度控制】覆盖，保留作为详细参考）",
+      "_deprecated": true,
+      "_note": "此节已不再注入系统提示词（simplicity_principle 覆盖了核心要点）。如需恢复，在 PromptSectionFactory 中取消注释即可。",
+      "rules": []
     },
     "design_patterns_over_conditionals": {
       "id": "design-patterns-over-conditionals",
-      "description": "设计模式替代多层条件分支规范 — 禁止深层 if-else/switch，必须用设计模式消除分支提升可维护性",
-      "rules": [
-        "【嵌套硬限制】if-else 嵌套深度不得超过 2 层。超过时必须立即重构：优先用卫语句（Guard Clause）提前 return/throw 扁平化；若分支数 ≥3 且可能继续增长，必须用设计模式替换。",
-        "【策略模式替换 if-else】同一逻辑存在 ≥3 个平级分支（按类型/渠道/状态分流不同行为）时，必须抽取为 Strategy 模式：定义策略接口 → 各分支实现为独立策略类 → 通过 Map<key, 策略> 查表分发。禁止在业务方法内写「if type==A ... else if type==B ... else」。",
-        "【工厂模式解耦创建】存在 ≥3 处 new 具体类 + 条件判断创建不同子类的代码时，必须抽取为 Factory 模式。简单工厂接收类型标识返回对应实例；复杂场景用抽象工厂创建产品族。禁止在调用方代码中硬编码 new + if-else 选择具体类。",
-        "【责任链替换顺序校验】按顺序依次尝试多个处理器（校验链/过滤链/审批链）时，必须用 Chain of Responsibility 模式：每个 Handler 持有 next 引用，自己处理或传递给下一个。禁止写成「if handlerA.pass → if handlerB.pass → if handlerC.pass」的 if-else 链。",
-        "【状态模式替代状态 if】对象行为随内部状态变化（≥3 个状态、每个状态 ≥2 种行为）时，必须用 State 模式：每个状态封装为独立类，行为委托给当前状态对象。禁止在方法内写「if state==PENDING ... else if state==PROCESSING ... else if state==COMPLETED」。",
-        "【命令模式封装操作】需要排队/撤销/重做/日志记录的操作集合，必须用 Command 模式：每个操作封装为 Command 对象（含 execute/undo），调用方通过 Invoker 执行。禁止用 if-else 判断操作类型后直接调用不同方法。",
-        "【查表法消除 switch】所有固定映射的 switch/if-else（如错误码→错误消息、类型→处理器、状态→下一步）必须替换为 Map/对象字面量查表：`const handler = map[key]; if (handler) handler()`。禁止在 switch 中逐个 case 返回或执行相似逻辑。",
-        "【Optional/Maybe 消除 null 判断链】连续 null 检查链（`if a != null → if a.b != null → a.b.c`）必须用 Optional/Maybe 模式或可选链 `?.` 语法替代。禁止出现 3 层以上嵌套 null 判断。"
-      ]
+      "description": "设计模式替代多层条件分支规范（已被 simplicity_principle 覆盖，不再注入提示词）",
+      "_deprecated": true,
+      "rules": []
     },
     "lightweight_tooling_first": {
       "id": "lightweight-tooling-first",
-      "description": "轻量级工具优先规范 — 选型时必须优先用轻量库/标准库/微框架，禁止为简单场景引入重型框架，确保灵活性、可观测性与可测试性",
-      "rules": [
-        "【轻量优先原则】能用标准库解决的不引入第三方库；能用单文件微库（<10KB）解决的不引入全家桶框架；能用函数组合解决的不引入依赖注入容器。选型决策必须基于当前实际需求，禁止为「未来可能需要」引入重型基础设施。",
-        "【框架选型阶梯】Web 服务：静态/简单 API → 标准库 http/net 或微框架（Express/Fastify/Hono）；复杂业务 → 渐进式框架（Next.js/Nuxt 的 API Routes）。禁止为 2-3 个接口启动 Spring Boot/Django REST Framework 全家桶。CLI 工具：优先 stdio + commander/yargs；禁止为简单命令引入 NestJS CLI 插件体系。",
-        "【可观测性内建】任何引入的框架/库必须能直接对接标准可观测性三大支柱：① 结构化日志（JSON 格式→日志采集）；② Metrics（Prometheus 格式→指标监控）；③ Tracing（OpenTelemetry→链路追踪）。禁止引入无法暴露标准可观测端口的黑盒框架。",
-        "【可测试性门禁】引入框架前必须确认其支持：① 单元测试不启动完整服务（handler 纯函数可测）；② 集成测试可内存运行（无需外部容器）；③ Mock/Stub 替代真实依赖有明确注入点。若框架强制启动真实服务才能测试（如某些 EJB/Spring Cloud 重度容器依赖），禁止引入。",
-        "【依赖传染控制】引入一个框架不应强制引入 ≥5 个传递依赖。若框架的 package.json 依赖树深度 >4 层或传递依赖 >50 个（不含 devDep），必须寻找更轻的替代品。典型反面：为用 ORM 的一个查询引入整个 Hibernate → 改用原生 SQL/Knex/Drizzle；为用 HTTP 客户端引入整个 Spring WebClient → 改用 fetch/undici。",
-        "【适度抽象原则】禁止在项目初期（需求 <3 个版本迭代）建立过度抽象层：通用 DAO/Repository 模式在只有 1 张表时不建；微服务拆分在单体能支撑 10 万 DAU 前不拆；CQRS/Event Sourcing 在 CRUD 够用时不引入。抽象只为解决已发生的痛点，不为预防假设性痛点。"
-      ]
+      "description": "轻量级工具优先规范（已被 simplicity_principle 覆盖，不再注入提示词）",
+      "_deprecated": true,
+      "rules": []
     },
     "no_reinventing_wheels": {
       "id": "no-reinventing-wheels",
-      "description": "禁止重复造轮子规范 — 能用成熟框架/标准库/社区方案解决的问题，严禁从零手写等效实现，确保可靠性、安全性与开发效率",
-      "rules": [
-        "【框架优先原则】面对任何技术需求，决策顺序固定为：① 语言标准库是否已提供？→ ② 领域公认的成熟开源库是否存在？→ ③ 最后手段才自己实现。跳过前两步直接手写，视为违规。",
-        "【标准库第一】各语言标准库覆盖能力极强，必须先穷尽标准库方案。典型场景：argparse/pathlib/sqlite3/json/csv/datetime/re/subprocess/itertools/collections（Python）；http/net/encoding/json/crypto/sync/context/io（Go）；fs/path/http/crypto/stream（Node.js）；java.nio/java.time/java.util.stream/java.util.concurrent（Java）。本条与 lightweight_tooling_first 互为补充——先看标准库，再看轻量三方库，最后看框架。",
-        "【领域惯用方案】以下领域有公认的唯一/首选方案，禁止用其他工具替代或手写：HTTP 客户端 → fetch/undici（Node）、requests/httpx（Python）、net/http（Go）、OkHttp（Java）；测试框架 → vitest/jest（Node）、pytest（Python）、testing（Go）、JUnit5（Java）；ORM/查询 → Drizzle/Prisma（Node）、SQLAlchemy（Python）、GORM（Go）、MyBatis-Plus（Java）；序列化 → JSON 标准库（所有语言，禁止手写 JSON 解析器）；日期时间 → dayjs/luxon（Node）、datetime（Python）、time（Go）、java.time（Java，禁止用 Date/Calendar）。",
-        "【安全敏感信任链】涉及以下领域的代码严禁自行实现，必须使用业界安全审计过的库：加密/哈希（bcrypt/scrypt/argon2、AES-GCM、HMAC、TLS 禁止自创算法）；JWT/Session（jsonwebtoken/jose、express-session 禁止手写 token 编解码）；输入校验（zod/joi、pydantic、validator 禁止手写正则校验）；SQL 防注入（参数化查询/ORM、禁止字符串拼接 SQL）；XSS 防护（DOMPurify、React JSX 自动转义 禁止手写 HTML 清洗）。",
-        "【版本兼容性门禁】引入任何三方库前必须确认：① 与项目声明的语言/运行时最低版本兼容（如 package.json engines、pyproject.toml requires-python）；② 最近 6 个月有维护（npm last publish / GitHub last commit）；③ 无已知高危 CVE（npm audit / pip-audit / govulncheck）；④ License 与项目兼容（MIT/Apache2/BSD → 安全，GPL/AGPL → 需评估）。",
-        "【手写门槛与举证责任】若确需手写核心逻辑（前两步均无可用方案），必须在代码中以注释形式举证：① 为何标准库不适用（具体功能缺失）；② 为何现有开源库不适用（License/性能/体积/安全的具体差距）；③ 手写实现的范围边界与测试策略。缺少举证视为规则违反。"
-      ]
+      "description": "禁止重复造轮子规范（已被 simplicity_principle 覆盖，不再注入提示词）",
+      "_deprecated": true,
+      "rules": []
     }
   }
 }
