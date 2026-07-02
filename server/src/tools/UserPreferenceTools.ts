@@ -107,7 +107,7 @@ export class UserPreferenceTools {
             {
                 name: 'upsert_user_preference',
                 description: [
-                    '新增或刷新用户偏好。每条偏好必须同时包含 type（偏好类型，如 model/style/language/behavior/timezone/format）和 content（偏好内容描述）。',
+                    '⚠️ type 和 content 为必填参数，不可省略！新增或刷新用户偏好。每条偏好必须同时包含 type（偏好类型，如 model/style/language/behavior/timezone/format）和 content（偏好内容描述）。',
                     '冲突淘汰策略：当新偏好与已有偏好矛盾时，先调用 list_user_preferences 获取冲突项 ID，再通过 conflictIds 参数显式传入需淘汰的旧偏好 ID。',
                     '每当用户明确表达偏好（如"我不喜欢 emoji"、"用北京时间"、"优先用 DeepSeek"）时，必须立即调用 upsert 记录。',
                 ].join(' '),
@@ -143,7 +143,7 @@ export class UserPreferenceTools {
             },
             {
                 name: 'delete_user_preference',
-                description: '删除过期或错误的用户偏好。通过 ids 参数传入一个或多个偏好 ID。',
+                description: '⚠️ ids 为必填参数，不可省略！删除过期或错误的用户偏好。通过 ids 参数传入一个或多个偏好 ID。',
                 parameters: {
                     type: 'object',
                     properties: {

@@ -120,9 +120,14 @@ export class ToolManager {
         const issues = this.collectSchemaIssues(args, schema, '');
         if (issues.length === 0) return;
 
+        const schemaHint = schema?.required?.length
+            ? `\n工具 ${toolName} 的 JSON Schema：required 字段 = [${schema.required.join(', ')}]，详见工具定义的 parameters。`
+            : '';
         throw new Error(
-            `INVALID_TOOL_ARGS: ${toolName} 参数不完整或格式错误：${issues.join('；')}。` +
-            '请按工具 schema 重新调用，并显式传入所有 required 字段。'
+            `INVALID_TOOL_ARGS: ${toolName} 参数校验失败 —— ${issues.join('；')}。` +
+            `请严格按工具 schema 修正参数后重新调用。` +
+            `自查清单：所有 required 字段是否已显式传入？类型是否精确匹配（number 不加引号、boolean 用 true/false 不加引号、array 用 [...] 不用 {...}）？是否误传了 schema 未声明的字段？` +
+            schemaHint
         );
     }
 

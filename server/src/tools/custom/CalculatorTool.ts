@@ -237,7 +237,7 @@ function executeAndCapture(script: string, sandbox: Record<string, any>, timeout
  */
 export const CalculatorTool: ToolDefinition = {
     name: 'calculate',
-    description: `JS 脚本执行器。当你需要精确计算、批量数据处理或多步逻辑推导时，用此工具代替脑中推算。
+    description: `⚠️ expression 为必填参数，不可省略！JS 脚本执行器。当你需要精确计算、批量数据处理或多步逻辑推导时，用此工具代替脑中推算。
 
 【应使用此工具的场景】
 • 精确数值计算 — 大数乘除、浮点运算、百分比、比例、三角函数

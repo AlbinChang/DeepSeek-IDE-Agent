@@ -51,7 +51,9 @@ export const Terminal: React.FC = () => {
         const fitAddon = new FitAddon();
         term.loadAddon(fitAddon);
         
-        const sessionId = "immortal-shared-session"; // 使用固定 ID 以支持重连后的 PTY 复用
+        // 使用唯一 sessionId（含时间戳），避免 workspaceRoot 切换时旧 PTY 的异步退出事件
+        // 污染新 PTY 的 listener（两者 sessionId 相同会导致误触发重连循环）
+        const sessionId = `term-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
 
         const clearTerminalReplayBuffer = async () => {
             try {

@@ -84,7 +84,7 @@ export class NeverMistakeTools {
             },
             {
                 name: 'append_never_mistake_rule',
-                description: '追加或更新防重复犯错规则。每条必须同时包含 shouldNot（不应该做什么）和 shouldDo（应该做什么）。最多保留 20 条，溢出时自动淘汰最旧记录。工具调用自愈时必须使用此工具沉淀失败模式。',
+                description: '⚠️ entries 为必填参数，不可省略！追加或更新防重复犯错规则。每条必须同时包含 shouldNot（不应该做什么）和 shouldDo（应该做什么）。最多保留 20 条，溢出时自动淘汰最旧记录。工具调用自愈时必须使用此工具沉淀失败模式。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -106,7 +106,7 @@ export class NeverMistakeTools {
             },
             {
                 name: 'delete_never_mistake_rule',
-                description: '删除过时或错误的防重复犯错规则。通过 ids 参数传入一个或多个规则 ID。',
+                description: '⚠️ ids 为必填参数，不可省略！删除过时或错误的防重复犯错规则。通过 ids 参数传入一个或多个规则 ID。',
                 parameters: {
                     type: 'object',
                     properties: {

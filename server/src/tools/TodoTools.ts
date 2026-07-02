@@ -116,7 +116,7 @@ export class TodoTools {
             },
             {
                 name: 'update_todo',
-                description: '更新已有任务的状态或描述。每项必须提供 id 及待更新字段（status/description）。每项独立更新，不同结论自然拆分为不同数组元素。返回完整的最新清单。',
+                description: '⚠️ todos 为必填参数，不可省略！更新已有任务的状态或描述。每项必须提供 id 及待更新字段（status/description）。每项独立更新，不同结论自然拆分为不同数组元素。返回完整的最新清单。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -139,7 +139,7 @@ export class TodoTools {
             },
             {
                 name: 'delete_todo',
-                description: '删除指定任务。通过 ids 参数传入一个或多个任务 ID。返回完整的最新清单。',
+                description: '⚠️ ids 为必填参数，不可省略！删除指定任务。通过 ids 参数传入一个或多个任务 ID。返回完整的最新清单。',
                 parameters: {
                     type: 'object',
                     properties: {

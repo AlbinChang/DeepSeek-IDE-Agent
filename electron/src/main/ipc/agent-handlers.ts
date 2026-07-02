@@ -6,6 +6,7 @@
  */
 import { IpcMain, BrowserWindow } from 'electron';
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'path';
 import { PROJECT_ROOT, SERVER_SRC, CONFIG_ROOT } from '../index.js';
 
@@ -38,6 +39,68 @@ async function getAgentChatComponent(): Promise<any> {
     const { AgentChatComponent } = await import('@/services/AgentChatComponent.js');
     agentChatComponentInstance = AgentChatComponent.getInstance();
     return agentChatComponentInstance;
+}
+
+/**
+ * 从持久化存储读取用户设置，解析出实际使用的 provider 配置（含 apiKey）。
+ *
+ * 读取优先级（由高到低）：
+ *   1. <workspaceRoot>/.llm/users/<userId>/settings.json  （工作区配置）
+ *   2. <PROJECT_ROOT>/.llm/users/<userId>/settings.json    （Electron 全局配置）
+ *   3. <PROJECT_ROOT>/.electron-store/settings.json        （settings:sync 总是写入这里）
+ *   4. SettingsService.getDefaultSettings()                 （环境变量兜底）
+ *
+ * 所有路径均绕过 SettingsService 内存缓存，直接读盘，确保更新后的 key 立即生效。
+ */
+async function resolveProviderConfig(
+    userId: string,
+    root: string,
+    requestedProvider?: string,
+    requestedModel?: string,
+) {
+    const { AIProviderFactory } = await import('@/services/AIProviderFactory.js');
+    const { SettingsService } = await import('@/services/SettingsService.js');
+
+    let settings = SettingsService.getDefaultSettings();
+
+    // 候选路径列表（按优先级排序）
+    const candidatePaths: string[] = [];
+    if (root) {
+        candidatePaths.push(path.join(root, '.llm', 'users', userId, 'settings.json'));
+    }
+    candidatePaths.push(path.join(PROJECT_ROOT, '.llm', 'users', userId, 'settings.json'));
+    candidatePaths.push(path.join(PROJECT_ROOT, '.electron-store', 'settings.json'));
+
+    for (const candidatePath of candidatePaths) {
+        try {
+            if (!fs.existsSync(candidatePath)) continue;
+            const raw = fs.readFileSync(candidatePath, 'utf-8');
+            let parsed: any;
+            try {
+                parsed = JSON.parse(raw);
+            } catch {
+                continue;
+            }
+
+            // .electron-store 格式为 { "user:<userId>": { providers, ... } }
+            const userData = parsed?.[`user:${userId}`] || parsed;
+            if (userData && typeof userData === 'object' && userData.providers) {
+                settings = { ...settings, ...userData };
+                console.log(`[AgentIPC] Loaded settings from: ${candidatePath}`);
+                break;
+            }
+        } catch {
+            // 文件损坏或不可读，尝试下一个路径
+        }
+    }
+
+    return AIProviderFactory.resolveSelection(
+        settings.providers,
+        settings.activeProvider,
+        settings.activeModel,
+        requestedProvider,
+        requestedModel,
+    );
 }
 
 export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
@@ -73,11 +136,14 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                 const agentService = await getAgentService();
                 const agentChatComponent = await getAgentChatComponent();
 
-                // 发送初始化事件
+                // 从持久化存储读取用户设置，解析实际 API key 与模型配置
+                const resolved = await resolveProviderConfig(userId, root, provider, model);
+
+                // 发送初始化事件（使用解析后的 model，与 SSE 路径一致）
                 sendEvent({
                     type: 'init',
                     traceId,
-                    model: model || 'deepseek-chat',
+                    model: resolved.modelId,
                     timestamp: Date.now(),
                 });
 
@@ -85,8 +151,8 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                 await agentChatComponent.handleChat(
                     agentService,
                     userId,
-                    provider || 'deepseek',
-                    model || 'deepseek-chat',
+                    resolved.provider,
+                    resolved.modelId,
                     userInstruct, // 保持原始类型（string），与 SSE 路径一致
                     traceId,
                     locale,
@@ -111,7 +177,7 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                         });
                     },
                     reasoningEffort,
-                    undefined, // providerConfig - will be resolved from settings
+                    resolved.providerConfig,
                     root,
                 );
 

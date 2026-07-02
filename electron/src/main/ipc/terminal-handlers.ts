@@ -26,6 +26,8 @@ interface TerminalSession {
     createdAt: number;
     lastActivity: number;
     outputBuffer: Array<{ data: string; timestamp: number }>;
+    /** 标记是否已被显式销毁，防止 onExit 异步事件污染新 session 的 renderer listener */
+    explicitlyDestroyed?: boolean;
 }
 
 const terminalSessions = new Map<string, TerminalSession>();
@@ -133,8 +135,9 @@ export function registerTerminalIpc(ipcMain: IpcMain, mainWindow: BrowserWindow)
 
             // PTY 退出处理
             ptyProcess.onExit(({ exitCode, signal }: any) => {
-                console.log(`[TerminalIPC] PTY exited: sessionId=${sessionId}, code=${exitCode}, signal=${signal}`);
-                if (!mainWindow.isDestroyed()) {
+                console.log(`[TerminalIPC] PTY exited: sessionId=${sessionId}, code=${exitCode}, signal=${signal}, explicit=${session.explicitlyDestroyed}`);
+                // 如果已被显式销毁，跳过向 renderer 发送退出事件，避免触发前端误重连
+                if (!session.explicitlyDestroyed && !mainWindow.isDestroyed()) {
                     mainWindow.webContents.send('terminal:output', {
                         sessionId,
                         data: `\r\n[进程已退出，退出码: ${exitCode}]\r\n`,
@@ -199,6 +202,7 @@ export function registerTerminalIpc(ipcMain: IpcMain, mainWindow: BrowserWindow)
     ipcMain.on('terminal:destroy', (_event, sessionId: string) => {
         const session = terminalSessions.get(sessionId);
         if (session) {
+            session.explicitlyDestroyed = true;  // 先标记，抑制 onExit 向 renderer 发送退出事件
             try { session.ptyProcess.kill(); } catch {}
             terminalSessions.delete(sessionId);
             console.log(`[TerminalIPC] Destroyed session: ${sessionId}`);
