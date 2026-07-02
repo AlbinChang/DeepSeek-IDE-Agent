@@ -1,12 +1,10 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { ZoomIn, ZoomOut, Loader2 } from 'lucide-react';
 
-// 使用本地 npm 包内置的 worker（无需 CDN，国内环境无网络延迟）
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url
-).toString();
+// 使用 Vite 打包后的本地 worker URL（无需 CDN，避免 Electron 环境路径失效）
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 interface PdfPreviewProps {
     base64: string;
@@ -30,6 +28,7 @@ const PdfPreview: React.FC<PdfPreviewProps> = ({ base64 }) => {
     const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
     const observerRef = useRef<IntersectionObserver | null>(null);
     const renderedRef = useRef<Set<number>>(new Set());
+    const renderingRef = useRef<Set<number>>(new Set());
 
     // 加载 PDF 文档
     useEffect(() => {
@@ -40,6 +39,7 @@ const PdfPreview: React.FC<PdfPreviewProps> = ({ base64 }) => {
         setPageCount(0);
         setPageStates([]);
         renderedRef.current.clear();
+        renderingRef.current.clear();
         canvasRefs.current.clear();
 
         const loadPdf = async () => {
@@ -91,7 +91,8 @@ const PdfPreview: React.FC<PdfPreviewProps> = ({ base64 }) => {
         currentScale: number,
         canvas: HTMLCanvasElement
     ) => {
-        if (renderedRef.current.has(pageNum)) return;
+        if (renderedRef.current.has(pageNum) || renderingRef.current.has(pageNum)) return;
+        renderingRef.current.add(pageNum);
 
         setPageStates(prev =>
             prev.map(s => s.pageNum === pageNum ? { ...s, rendering: true } : s)
@@ -124,8 +125,29 @@ const PdfPreview: React.FC<PdfPreviewProps> = ({ base64 }) => {
             setPageStates(prev =>
                 prev.map(s => s.pageNum === pageNum ? { ...s, rendering: false } : s)
             );
+        } finally {
+            renderingRef.current.delete(pageNum);
         }
     }, []);
+
+    const renderVisiblePages = useCallback(() => {
+        if (!pdfDoc) return;
+        const container = containerRef.current;
+        if (!container) return;
+
+        const containerRect = container.getBoundingClientRect();
+        container.querySelectorAll<HTMLElement>('[data-page-num]').forEach(el => {
+            const pageNum = Number(el.dataset.pageNum);
+            const canvas = canvasRefs.current.get(pageNum);
+            if (!canvas || renderedRef.current.has(pageNum) || renderingRef.current.has(pageNum)) return;
+
+            const pageRect = el.getBoundingClientRect();
+            const shouldRender = pageRect.bottom >= containerRect.top - 600 && pageRect.top <= containerRect.bottom + 600;
+            if (shouldRender) {
+                renderPageToCanvas(pageNum, pdfDoc, scale, canvas);
+            }
+        });
+    }, [pdfDoc, renderPageToCanvas, scale]);
 
     // IntersectionObserver: 懒渲染进入视口的页面
     useEffect(() => {
@@ -135,6 +157,9 @@ const PdfPreview: React.FC<PdfPreviewProps> = ({ base64 }) => {
         if (observerRef.current) {
             observerRef.current.disconnect();
         }
+
+        const container = containerRef.current;
+        if (!container) return;
 
         observerRef.current = new IntersectionObserver(
             (entries) => {
@@ -148,27 +173,28 @@ const PdfPreview: React.FC<PdfPreviewProps> = ({ base64 }) => {
                     }
                 }
             },
-            { rootMargin: '200px' } // 提前 200px 开始渲染
+            { root: container, rootMargin: '600px 0px' }
         );
 
         // 观察所有页面占位元素
-        const container = containerRef.current;
-        if (container) {
-            container.querySelectorAll('[data-page-num]').forEach(el => {
-                observerRef.current?.observe(el);
-            });
-        }
+        container.querySelectorAll('[data-page-num]').forEach(el => {
+            observerRef.current?.observe(el);
+        });
+
+        const frame = window.requestAnimationFrame(renderVisiblePages);
 
         return () => {
+            window.cancelAnimationFrame(frame);
             observerRef.current?.disconnect();
             observerRef.current = null;
         };
-    }, [pdfDoc, pageStates, scale, renderPageToCanvas]);
+    }, [pdfDoc, pageStates.length, scale, renderPageToCanvas, renderVisiblePages]);
 
     // 缩放变化时重新渲染
     useEffect(() => {
         if (!pdfDoc || pageStates.length === 0) return;
         renderedRef.current.clear();
+        renderingRef.current.clear();
         // 重新计算 viewport
         setPageStates(prev => {
             const updated = prev.map(s => ({

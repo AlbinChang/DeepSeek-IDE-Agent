@@ -55,6 +55,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   // PDF 预览状态
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   // 方案七：利用 Ref 维护原子性操作锁，强力干预 Monaco 内部异步 Canceled 链路
   const modelLockRef = useRef<boolean>(false);
@@ -90,7 +91,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   };
 
   const handleSaveFile = async () => {
-    if (!activeFile || isLocked || viewMode === 'preview' || isSaving) return;
+    if (!activeFile || isLocked || viewMode === 'preview' || viewMode === 'pdf' || isPdf || isSaving) return;
 
     const contentToSave = getCurrentEditorContent();
     if (contentToSave === savedContent) {
@@ -176,8 +177,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   useEffect(() => {
     if (!activeFile || !isPdf) {
       setPdfBase64(null);
+      setPdfError(null);
       return;
     }
+
+    let cancelled = false;
 
     // PDF 文件自动进入预览模式
     if (viewMode !== 'pdf') {
@@ -186,20 +190,37 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     setPdfLoading(true);
     setPdfBase64(null);
+    setPdfError(null);
 
     const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
-    if (!effectiveRoot) return;
+    if (!effectiveRoot) {
+      setPdfLoading(false);
+      setPdfError('工作区根目录缺失，无法读取 PDF');
+      return;
+    }
 
     electronBridge.readFileBinary({ filePath: activeFile, root: effectiveRoot })
       .then((result: any) => {
+        if (cancelled) return;
         if (result?.success && result.base64) {
           setPdfBase64(result.base64);
         } else {
-          console.error('[Editor] PDF read failed:', result?.error);
+          const message = result?.error || 'PDF 文件读取失败';
+          setPdfError(message);
+          console.error('[Editor] PDF read failed:', message);
         }
       })
-      .catch((err: any) => console.error('[Editor] PDF read error:', err))
-      .finally(() => setPdfLoading(false));
+      .catch((err: any) => {
+        if (cancelled) return;
+        const message = err?.message || String(err) || 'PDF 文件读取失败';
+        setPdfError(message);
+        console.error('[Editor] PDF read error:', err);
+      })
+      .finally(() => {
+        if (!cancelled) setPdfLoading(false);
+      });
+
+    return () => { cancelled = true; };
   }, [activeFile, isPdf, workspaceRoot]);
 
   // 同步外部 mode 到内部 viewMode (附带渲染屏障防止 Monaco 竞争)
@@ -281,6 +302,16 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     }
 
     if (abortControllerRef.current) abortControllerRef.current.abort();
+
+    if (isPdf) {
+      activeFileRef.current = activeFile;
+      setFileContent('');
+      setSavedContent('');
+      setOriginalContent('');
+      setIsDirty(false);
+      return;
+    }
+
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const signal = controller.signal;
@@ -354,7 +385,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         abortControllerRef.current = null;
       }
     };
-  }, [activeFile, fileName, viewMode, workspaceRoot]);
+  }, [activeFile, fileName, isPdf, viewMode, workspaceRoot]);
 
   // [Section 方案九] 删除原先 262 行的独立 useEffect 逻辑以避免多头管理
   /* 
@@ -802,8 +833,9 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                   正在读取 PDF 文件...
                 </div>
               ) : (
-                <div className="flex items-center justify-center h-full bg-[#eef0f3] text-red-500/80 text-[9pt]">
-                  PDF 文件读取失败
+                <div className="flex flex-col items-center justify-center h-full gap-1 bg-[#eef0f3] px-6 text-center text-[9pt] text-red-500/80">
+                  <span>PDF 文件读取失败</span>
+                  {pdfError && <span className="max-w-[520px] break-words text-[8pt] text-slate-500">{pdfError}</span>}
                 </div>
               )}
             </Suspense>
