@@ -136,6 +136,18 @@
         "【依赖传染控制】引入一个框架不应强制引入 ≥5 个传递依赖。若框架的 package.json 依赖树深度 >4 层或传递依赖 >50 个（不含 devDep），必须寻找更轻的替代品。典型反面：为用 ORM 的一个查询引入整个 Hibernate → 改用原生 SQL/Knex/Drizzle；为用 HTTP 客户端引入整个 Spring WebClient → 改用 fetch/undici。",
         "【适度抽象原则】禁止在项目初期（需求 <3 个版本迭代）建立过度抽象层：通用 DAO/Repository 模式在只有 1 张表时不建；微服务拆分在单体能支撑 10 万 DAU 前不拆；CQRS/Event Sourcing 在 CRUD 够用时不引入。抽象只为解决已发生的痛点，不为预防假设性痛点。"
       ]
+    },
+    "no_reinventing_wheels": {
+      "id": "no-reinventing-wheels",
+      "description": "禁止重复造轮子规范 — 能用成熟框架/标准库/社区方案解决的问题，严禁从零手写等效实现，确保可靠性、安全性与开发效率",
+      "rules": [
+        "【框架优先原则】面对任何技术需求，决策顺序固定为：① 语言标准库是否已提供？→ ② 领域公认的成熟开源库是否存在？→ ③ 最后手段才自己实现。跳过前两步直接手写，视为违规。",
+        "【标准库第一】各语言标准库覆盖能力极强，必须先穷尽标准库方案。典型场景：argparse/pathlib/sqlite3/json/csv/datetime/re/subprocess/itertools/collections（Python）；http/net/encoding/json/crypto/sync/context/io（Go）；fs/path/http/crypto/stream（Node.js）；java.nio/java.time/java.util.stream/java.util.concurrent（Java）。本条与 lightweight_tooling_first 互为补充——先看标准库，再看轻量三方库，最后看框架。",
+        "【领域惯用方案】以下领域有公认的唯一/首选方案，禁止用其他工具替代或手写：HTTP 客户端 → fetch/undici（Node）、requests/httpx（Python）、net/http（Go）、OkHttp（Java）；测试框架 → vitest/jest（Node）、pytest（Python）、testing（Go）、JUnit5（Java）；ORM/查询 → Drizzle/Prisma（Node）、SQLAlchemy（Python）、GORM（Go）、MyBatis-Plus（Java）；序列化 → JSON 标准库（所有语言，禁止手写 JSON 解析器）；日期时间 → dayjs/luxon（Node）、datetime（Python）、time（Go）、java.time（Java，禁止用 Date/Calendar）。",
+        "【安全敏感信任链】涉及以下领域的代码严禁自行实现，必须使用业界安全审计过的库：加密/哈希（bcrypt/scrypt/argon2、AES-GCM、HMAC、TLS 禁止自创算法）；JWT/Session（jsonwebtoken/jose、express-session 禁止手写 token 编解码）；输入校验（zod/joi、pydantic、validator 禁止手写正则校验）；SQL 防注入（参数化查询/ORM、禁止字符串拼接 SQL）；XSS 防护（DOMPurify、React JSX 自动转义 禁止手写 HTML 清洗）。",
+        "【版本兼容性门禁】引入任何三方库前必须确认：① 与项目声明的语言/运行时最低版本兼容（如 package.json engines、pyproject.toml requires-python）；② 最近 6 个月有维护（npm last publish / GitHub last commit）；③ 无已知高危 CVE（npm audit / pip-audit / govulncheck）；④ License 与项目兼容（MIT/Apache2/BSD → 安全，GPL/AGPL → 需评估）。",
+        "【手写门槛与举证责任】若确需手写核心逻辑（前两步均无可用方案），必须在代码中以注释形式举证：① 为何标准库不适用（具体功能缺失）；② 为何现有开源库不适用（License/性能/体积/安全的具体差距）；③ 手写实现的范围边界与测试策略。缺少举证视为规则违反。"
+      ]
     }
   }
 }
