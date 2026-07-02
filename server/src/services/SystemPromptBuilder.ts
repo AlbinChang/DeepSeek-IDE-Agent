@@ -73,7 +73,7 @@ export class SystemPromptBuilder {
     unregister(sectionId: string): boolean {
         if (!this.sectionIds.has(sectionId)) return false;
         this.sectionIds.delete(sectionId);
-        const idx = this.sections.findIndex(s => s.id === section.id);
+        const idx = this.sections.findIndex(s => s.id === sectionId);
         if (idx >= 0) {
             this.sections.splice(idx, 1);
         }

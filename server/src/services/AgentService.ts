@@ -21,6 +21,10 @@ import { fileURLToPath } from 'node:url';
 import { config as globalConfig } from '@/config/index.js';
 import { SyntaxCheckService } from '@/services/SyntaxCheckService.js';
 
+// SOLID 重构：新的提示词构建架构（可逐步迁移）
+import { createStandardBuilder, buildSystemPrompt as buildPromptV2 } from '@/services/PromptSectionFactory.js';
+import type { PromptBuildContext } from '@/types/prompt.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -698,6 +702,130 @@ export class AgentService extends EventEmitter {
 
     public getIsolationKey(userId: string, root: string): string {
         return userId + ':' + root;
+    }
+
+    /**
+     * 【SOLID v2】基于插件架构的系统提示词构建。
+     *
+     * 与 buildSystemPrompt 功能等价，但使用 SystemPromptBuilder + IPromptSection 插件体系，
+     * 实现 SRP（每个片段独立维护）、OCP（通过 register/unregister 扩展）、DIP（依赖抽象接口）。
+     *
+     * 建议新 Agent 类型优先使用此方法；原有 buildSystemPrompt 保持兼容。
+     * 迁移路径：评估 Agent 可先行切换，待稳定后统一迁移主 Agent。
+     */
+    public async buildSystemPromptV2(
+        userId: string,
+        locale: string,
+        agentConfigFile: string = 'main-agent.json',
+        workspaceRoot?: string,
+        requestId?: string,
+    ): Promise<string> {
+        // 缓存命中逻辑复用
+        if (requestId) {
+            const cacheKey = this.buildCacheKey(requestId, agentConfigFile);
+            if (this.systemPromptCache.has(cacheKey)) {
+                console.log(`[AgentService] System prompt cache HIT (v2) for key: ${cacheKey}`);
+                return this.systemPromptCache.get(cacheKey)!;
+            }
+        }
+
+        const root = this.checkWorkspace(userId, workspaceRoot);
+        const envInfo = await SystemTools.getEnvInfo();
+
+        // 加载 Agent 配置
+        const configPath = path.join(CONFIG_ROOT, agentConfigFile);
+        let agentConfig: any;
+        try {
+            const fs = await import('fs/promises');
+            const data = await fs.readFile(configPath, 'utf-8');
+            agentConfig = JSON.parse(data);
+        } catch (e) {
+            throw new Error(`Failed to load agent configuration (${agentConfigFile}): ` + e);
+        }
+
+        // 构建上下文
+        const ctx: PromptBuildContext = {
+            userId,
+            workspaceRoot: root,
+            locale,
+            envInfo,
+            projectVersions: await this.detectProjectVersions(root),
+            projectSourceEncoding: null,
+            isMavenProject: false,
+            localDate: formatBeijingDate(),
+            localTimeZone: BEIJING_TIME_ZONE,
+            agentConfigFile,
+        };
+
+        // 使用插件架构构建提示词
+        const prompt = await buildPromptV2(agentConfig, ctx);
+
+        // 缓存写入
+        if (requestId) {
+            this.setSystemPromptCache(requestId, agentConfigFile, prompt);
+        }
+
+        console.log(`[AgentService] Generated system prompt (v2) for user ${userId}${requestId ? ` (requestId: ${requestId})` : ''}`);
+        return prompt;
+    }
+
+    /** 提取项目版本检测为独立方法（SRP） */
+    private async detectProjectVersions(root: string): Promise<{ java?: string | null; python?: string | null; go?: string | null }> {
+        const result: { java?: string | null; python?: string | null; go?: string | null } = {};
+        try {
+            // 复用现有检测逻辑（避免重复实现，保持与 buildSystemPrompt 一致）
+            const nodePath = await import('path');
+            const searchRoots = [root, nodePath.join(root, '..'), nodePath.join(root, '..', '..')];
+            const normalizeJava = (raw: string) => raw.replace(/_/g, '.').replace(/^1\.([0-9]+)$/, '$1');
+
+            for (const sr of searchRoots) {
+                if (result.java) break;
+                try {
+                    const fs = await import('fs/promises');
+                    const xml = await fs.readFile(nodePath.join(sr, 'pom.xml'), 'utf-8');
+                    const m = xml.match(/<java\.version>\s*([^<]+)\s*<\/java\.version>/) ||
+                             xml.match(/<maven\.compiler\.release>\s*([^<]+)\s*<\/maven\.compiler\.release>/) ||
+                             xml.match(/<maven\.compiler\.source>\s*([^<]+)\s*<\/maven\.compiler\.source>/);
+                    if (m) result.java = `Java ${normalizeJava(m[1].trim())}`;
+                } catch {}
+                if (!result.java) {
+                    for (const gf of ['build.gradle', 'build.gradle.kts']) {
+                        try {
+                            const fs = await import('fs/promises');
+                            const gradle = await fs.readFile(nodePath.join(sr, gf), 'utf-8');
+                            const m = gradle.match(/sourceCompatibility\s*[=:]\s*['"]?([0-9.]+)['"]?/);
+                            if (m) { result.java = `Java ${normalizeJava(m[1].trim())}`; break; }
+                        } catch {}
+                    }
+                }
+            }
+            for (const sr of searchRoots) {
+                if (result.python) break;
+                try {
+                    const fs = await import('fs/promises');
+                    const ver = (await fs.readFile(nodePath.join(sr, '.python-version'), 'utf-8')).trim();
+                    if (ver) result.python = `Python ${ver}`;
+                } catch {}
+                if (!result.python) {
+                    try {
+                        const fs = await import('fs/promises');
+                        const toml = await fs.readFile(nodePath.join(sr, 'pyproject.toml'), 'utf-8');
+                        const m = toml.match(/requires-python\s*=\s*["']([^"']+)["']/);
+                        if (m) result.python = `Python ${m[1].trim()}`;
+                    } catch {}
+                }
+            }
+            for (const sr of searchRoots) {
+                if (result.go) break;
+                try {
+                    const fs = await import('fs/promises');
+                    const goMod = await fs.readFile(nodePath.join(sr, 'go.mod'), 'utf-8');
+                    const m = goMod.match(/^go\s+([0-9.]+)/m);
+                    if (m) result.go = `Go ${m[1]}`;
+                } catch {}
+            }
+        } catch {}
+        return result;
     }
 
     /**

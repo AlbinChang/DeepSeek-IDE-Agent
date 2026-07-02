@@ -14,6 +14,9 @@ import { McpService } from '@/services/McpService.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 import { WORKSPACE_SKILL_DIRECTORIES } from '@/utils/WorkspaceSkillPaths.js';
 import { config as globalConfig } from '@/config/index.js';
+import { CONFIG_ROOT } from '@/utils/PathUtils.js';
+import * as path from 'node:path';
+import { readFile } from 'node:fs/promises';
 
 // ============================================================
 // 抽象基类（减少样板代码）
@@ -482,5 +485,42 @@ export class TodoPolicySection extends BasePromptSection {
             '3. 确认全部任务终态后，才允许输出最终答复；',
             '4. 仍有可推进任务时禁止强行终态。',
         ].join('\n');
+    }
+}
+
+/**
+ * 共享契约注入（从 shared-contracts.json 加载）
+ * priority: static —— 契约在会话生命周期内不变
+ */
+export class SharedContractsSection extends BasePromptSection {
+    readonly id = 'shared-contracts';
+    readonly priority: PromptPriority = 'static';
+
+    async build(_ctx: PromptBuildContext): Promise<string> {
+        try {
+            const contractsPath = path.join(CONFIG_ROOT, 'shared-contracts.json');
+            const raw = await readFile(contractsPath, 'utf-8');
+            const contracts = JSON.parse(raw);
+            const shared = contracts.shared_contracts;
+            if (!shared) return '';
+
+            const lines: string[] = [
+                '### 共享契约 (SHARED CONTRACTS — 主Agent与评估Agent共同遵循)',
+            ];
+
+            for (const [key, contract] of Object.entries(shared)) {
+                const c = contract as any;
+                lines.push(`#### ${c.description || key}`);
+                if (Array.isArray(c.rules)) {
+                    for (const rule of c.rules) {
+                        lines.push(`- ${rule}`);
+                    }
+                }
+            }
+
+            return lines.join('\n');
+        } catch {
+            return '';
+        }
     }
 }
