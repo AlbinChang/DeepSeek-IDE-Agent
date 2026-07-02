@@ -31,6 +31,23 @@ function resolveSafePath(userPath: string, root?: string): string {
     return resolved;
 }
 
+// 简单 MIME 类型推断（按文件扩展名）
+function getMimeType(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeMap: Record<string, string> = {
+        '.pdf': 'application/pdf',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.svg': 'image/svg+xml',
+        '.bmp': 'image/bmp',
+        '.ico': 'image/x-icon',
+    };
+    return mimeMap[ext] || 'application/octet-stream';
+}
+
 // 文件编码检测与转换（简化版）
 function detectEncoding(buffer: Buffer): string {
     // 简单的 BOM 检测
@@ -283,6 +300,43 @@ export function registerFileIpc(ipcMain: IpcMain) {
             const content = fs.readFileSync(resolvedPath);
             const md5 = crypto.createHash('md5').update(content).digest('hex');
             return { success: true, md5 };
+        } catch (err: any) {
+            return { success: false, error: err?.message || String(err) };
+        }
+    });
+
+    // ── 读取二进制文件（base64 编码返回，用于 PDF/图片等非文本预览） ──
+    ipcMain.handle('file:readBinary', async (_event, params: {
+        filePath: string;
+        root?: string;
+    }) => {
+        try {
+            const resolvedPath = resolveSafePath(params.filePath, params.root);
+
+            if (!fs.existsSync(resolvedPath)) {
+                return { success: false, error: `File not found: ${params.filePath}` };
+            }
+
+            const stat = fs.statSync(resolvedPath);
+            if (stat.isDirectory()) {
+                return { success: false, error: `Path is a directory: ${params.filePath}` };
+            }
+
+            // 50MB 上限，防止主进程 OOM
+            const MAX_BINARY_SIZE = 50 * 1024 * 1024;
+            if (stat.size > MAX_BINARY_SIZE) {
+                return { success: false, error: `File too large (${(stat.size / 1024 / 1024).toFixed(1)}MB > 50MB)` };
+            }
+
+            const buffer = fs.readFileSync(resolvedPath);
+            const base64 = buffer.toString('base64');
+
+            return {
+                success: true,
+                base64,
+                size: stat.size,
+                mimeType: getMimeType(resolvedPath),
+            };
         } catch (err: any) {
             return { success: false, error: err?.message || String(err) };
         }

@@ -19,6 +19,7 @@ export interface ElectronAPI {
 
     // 文件操作（替换 REST /api/files/*）
     readFile: (params: FileReadParams) => Promise<FileReadResult>;
+    readFileBinary: (params: { filePath: string; root?: string }) => Promise<{ success: boolean; base64?: string; size?: number; mimeType?: string; error?: string }>;
     writeFile: (params: FileWriteParams) => Promise<FileWriteResult>;
     listFiles: (params: ListFilesParams) => Promise<ListFilesResult>;
     searchFiles: (params: SearchFilesParams) => Promise<SearchFilesResult>;
@@ -170,6 +171,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // 文件操作
     readFile: (params: FileReadParams) => ipcRenderer.invoke('file:read', params),
+    readFileBinary: (params: { filePath: string; root?: string }) => ipcRenderer.invoke('file:readBinary', params),
     writeFile: (params: FileWriteParams) => ipcRenderer.invoke('file:write', params),
     listFiles: (params: ListFilesParams) => ipcRenderer.invoke('file:list', params),
     searchFiles: (params: SearchFilesParams) => ipcRenderer.invoke('file:search', params),

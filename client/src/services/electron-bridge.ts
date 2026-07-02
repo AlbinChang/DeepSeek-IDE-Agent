@@ -150,6 +150,9 @@ export const electronBridge = {
     async readFile(params: { filePath: string; startLine?: number; endLine?: number; root?: string }) {
         return callIpc('readFile', [params]);
     },
+    async readFileBinary(params: { filePath: string; root?: string }) {
+        return callIpc('readFileBinary', [params]);
+    },
     async writeFile(params: { filePath: string; content: string; encoding?: string; root?: string }) {
         return callIpc('writeFile', [params]);
     },

@@ -1,4 +1,4 @@
-﻿import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
+﻿import React, { useRef, useEffect, useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { Editor, DiffEditor, loader } from '@monaco-editor/react';
 import type { OnMount } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
@@ -9,10 +9,13 @@ loader.config({ monaco });
 
 import { Lock, FileCode, Eye, Code, X } from 'lucide-react';
 import { useInlineCompletions } from '@/hooks/useInlineCompletions';
-import { USER_ID, GATEWAY_EVENT } from '@/config';
+import { GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { electronBridge } from '@/services/electron-bridge';
+
+// PDF 预览组件按需懒加载（避免为所有用户增加 ~200KB bundle）
+const PdfPreview = lazy(() => import('@/components/PdfPreview'));
 
 interface FileEditorProps {
   activeFile: string;
@@ -39,7 +42,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [originalContent, setOriginalContent] = useState<string>('');
-  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview'>(mode);
+  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf'>(mode);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const diffEditorRef = useRef<any>(null);
   const savedContentRef = useRef('');
@@ -47,6 +50,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
   const fileName = useMemo(() => activeFile.split(/[/\\]/).pop() || activeFile, [activeFile]);
   const isMarkdown = useMemo(() => activeFile.toLowerCase().endsWith('.md'), [activeFile]);
+  const isPdf = useMemo(() => activeFile.toLowerCase().endsWith('.pdf'), [activeFile]);
+
+  // PDF 预览状态
+  const [pdfBase64, setPdfBase64] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
 
   // 方案七：利用 Ref 维护原子性操作锁，强力干预 Monaco 内部异步 Canceled 链路
   const modelLockRef = useRef<boolean>(false);
@@ -57,7 +65,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const saveFileRef = useRef<() => Promise<void>>(async () => {});
 
   // 方案十二：模式切换护栏，记录上一次模式，防止在同模式下错误地执行 setModel(null) 触发 wordHighlighter 销毁
-  const lastModeRef = useRef<'editor' | 'diff' | 'preview'>(mode);
+  const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf'>(mode);
 
   const getCurrentEditorContent = () => {
     if (viewMode === 'editor' && editorRef.current) {
@@ -98,25 +106,14 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     setIsSaving(true);
     try {
-      if (electronBridge.isElectron) {
-        // Electron IPC 直写文件系统（零网络开销）
-        const result = await electronBridge.writeFile({
-          filePath: activeFile,
-          content: contentToSave,
-          encoding: fileEncoding,
-          root: effectiveRoot,
-        });
-        if (!result.success) throw new Error(result.error || 'File write failed');
-      } else {
-        // Web 模式：通过 REST API
-        await axios.post(`${API_BASE}/api/files/save`, {
-          path: activeFile,
-          content: contentToSave,
-          encoding: fileEncoding,
-          userId: USER_ID,
-          root: effectiveRoot
-        });
-      }
+      // Electron IPC 直写文件系统（零网络开销）
+      const result = await electronBridge.writeFile({
+        filePath: activeFile,
+        content: contentToSave,
+        encoding: fileEncoding,
+        root: effectiveRoot,
+      });
+      if (!result.success) throw new Error(result.error || 'File write failed');
 
       if (!isMountedRef.current) return;
       setSavedContent(contentToSave);
@@ -174,6 +171,36 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       setViewMode('editor');
     }
   }, [activeFile]);
+
+  // PDF 文件：自动切换为 pdf 预览模式并加载二进制内容
+  useEffect(() => {
+    if (!activeFile || !isPdf) {
+      setPdfBase64(null);
+      return;
+    }
+
+    // PDF 文件自动进入预览模式
+    if (viewMode !== 'pdf') {
+      setViewMode('pdf');
+    }
+
+    setPdfLoading(true);
+    setPdfBase64(null);
+
+    const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
+    if (!effectiveRoot) return;
+
+    electronBridge.readFileBinary({ filePath: activeFile, root: effectiveRoot })
+      .then((result: any) => {
+        if (result?.success && result.base64) {
+          setPdfBase64(result.base64);
+        } else {
+          console.error('[Editor] PDF read failed:', result?.error);
+        }
+      })
+      .catch((err: any) => console.error('[Editor] PDF read error:', err))
+      .finally(() => setPdfLoading(false));
+  }, [activeFile, isPdf, workspaceRoot]);
 
   // 同步外部 mode 到内部 viewMode (附带渲染屏障防止 Monaco 竞争)
   useEffect(() => {
@@ -757,6 +784,29 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         {viewMode === 'preview' && isMarkdown && (
           <div className="absolute inset-0 z-20 bg-[#0d1117]">
             <MarkdownPreview content={fileContent} />
+          </div>
+        )}
+
+        {/* 4. PDF 预览层 */}
+        {viewMode === 'pdf' && isPdf && (
+          <div className="absolute inset-0 z-20">
+            <Suspense fallback={
+              <div className="flex items-center justify-center h-full text-white/30 text-[9pt]">
+                加载 PDF 查看器...
+              </div>
+            }>
+              {pdfBase64 ? (
+                <PdfPreview base64={pdfBase64} fileName={fileName} />
+              ) : pdfLoading ? (
+                <div className="flex items-center justify-center h-full text-white/30 text-[9pt]">
+                  正在读取 PDF 文件...
+                </div>
+              ) : (
+                <div className="flex items-center justify-center h-full text-red-400/60 text-[9pt]">
+                  PDF 文件读取失败
+                </div>
+              )}
+            </Suspense>
           </div>
         )}
 
