@@ -791,18 +791,18 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         {viewMode === 'pdf' && isPdf && (
           <div className="absolute inset-0 z-20">
             <Suspense fallback={
-              <div className="flex items-center justify-center h-full text-white/30 text-[9pt]">
+              <div className="flex items-center justify-center h-full bg-[#eef0f3] text-slate-500 text-[9pt]">
                 加载 PDF 查看器...
               </div>
             }>
               {pdfBase64 ? (
-                <PdfPreview base64={pdfBase64} fileName={fileName} />
+                <PdfPreview base64={pdfBase64} />
               ) : pdfLoading ? (
-                <div className="flex items-center justify-center h-full text-white/30 text-[9pt]">
+                <div className="flex items-center justify-center h-full bg-[#eef0f3] text-slate-500 text-[9pt]">
                   正在读取 PDF 文件...
                 </div>
               ) : (
-                <div className="flex items-center justify-center h-full text-red-400/60 text-[9pt]">
+                <div className="flex items-center justify-center h-full bg-[#eef0f3] text-red-500/80 text-[9pt]">
                   PDF 文件读取失败
                 </div>
               )}
