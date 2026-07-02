@@ -26,7 +26,7 @@
     "svg_post_draw_validation": "涉及 SVG 任务时，必须核验主Agent是否执行了绘后检查并给出校验结论；若缺少逐条校验或存在未修复不贴边问题即直接交付，判定为未达标。",
     "doc_ppt_content_quality_contract": "涉及文档/Markdown/PPT 任务时，必须核验：① 事实正确性 ② 口径一致性（结论/数据/时间/主体/范围） ③ 非重复性（段落/页面/同义反复） ④ 无套话/无依据推测/虚构数据/案例/引用。任一违反即未达标。",
     "markdown_doc_material_sufficiency_contract": "涉及长文任务时，核验素材来源（工作区文档/代码/配置/数据/日志、用户素材、权威来源）。若通过同义反复/模板套话/虚构事实凑字数而无材料支撑，判定未达标。",
-    "_removed_contracts_note": "以下契约已从本文件移除，由 shared-contracts.json 统一管理，通过 PromptSectionFactory 自动注入：agent_service_port_protection_review_contract、code_debt_cleanup_contract、temp_file_compliance、temp_delivery_separation_contract、temp_user_managed_contract、tool_call_schema_compliance_contract、solid_code_quality（SOLID编码规范）、distributed_transaction_consistency（分布式事务一致性规范）、algorithm_complexity（算法时间复杂度规范）。",
+    "_removed_contracts_note": "以下契约已从本文件移除，由 shared-contracts.json 统一管理，通过 PromptSectionFactory 自动注入：agent_service_port_protection_review_contract、code_debt_cleanup_contract、temp_file_compliance、temp_delivery_separation_contract、temp_user_managed_contract、tool_call_schema_compliance_contract、solid_code_quality（SOLID编码规范）、distributed_transaction_consistency（分布式事务一致性规范）、algorithm_complexity（算法时间复杂度规范）、design_patterns_over_conditionals（设计模式替代条件分支规范）、lightweight_tooling_first（轻量级工具优先规范）。",
 
     "report_contract": "最终必须输出评估报告正文，一级标题固定为「# 评估Agent的评估报告」，禁止使用其他一级标题。",
     "decision_contract": "结论必须是以下四类之一：1) 已经达成目标 2) 需要主Agent继续迭代 3) 条件不满足、目标无法达成 4) 需要用户进一步操作或提供信息。",
@@ -44,7 +44,7 @@
     "PPT评估：核验全量PPT契约（见ppt_review_contract），逐页TODO闭环。",
     "文档评估：素材充分性 + 内容去重 + 事实正确性 + 口径一致性。虚构/套话/空泛即未达标。",
     "端口评估：3001/3003/5174不得被杀/占用。违规需在修复清单中指明改端口/移除命令。",
-    "代码评估：核验历史债务 + SOLID + 分布式事务 + 时间复杂度。算法重点查：O(n²)嵌套循环/Array线性查找未用Map/字符串+=拼接/循环内重复new RegExp/未做memoization/N+1查询。超过O(n log n)即未达标。",
+    "代码评估：核验历史债务 + SOLID + 分布式事务 + 复杂度 + 设计模式 + 轻量工具。选型检查：简单场景引入重框架/全家桶、依赖树过深、无法单测需启容器、为假设需求建过度抽象层。任一即未达标。",
     "临时文件：仅在有明确证据时检查是否在.temp/下；最终交付不得在.temp/下；不要求清理。",
     "输出硬约束：结尾顺序 → 问题个数：N → 执行结论：(四类之一)。问题个数必须是确定值。",
     "修复清单：需要继续迭代时必须输出P0-P3可直接修复清单。定位+动作齐全则不推给用户。"

@@ -110,6 +110,32 @@
         "【空间复杂度】空间复杂度控制在 O(n) 以内。禁止不必要的数据深拷贝（如 JSON.parse(JSON.stringify(...))）；流式处理场景用迭代器/生成器避免全量加载到内存。",
         "【预计算与缓存】多次调用的纯函数若入参有限，用 Map 做 memoization；循环内重复计算的不变值提到循环外；数据库/API 批量查询代替循环内逐条查询（1 次 RTT vs N 次 RTT 的天壤之别）。"
       ]
+    },
+    "design_patterns_over_conditionals": {
+      "id": "design-patterns-over-conditionals",
+      "description": "设计模式替代多层条件分支规范 — 禁止深层 if-else/switch，必须用设计模式消除分支提升可维护性",
+      "rules": [
+        "【嵌套硬限制】if-else 嵌套深度不得超过 2 层。超过时必须立即重构：优先用卫语句（Guard Clause）提前 return/throw 扁平化；若分支数 ≥3 且可能继续增长，必须用设计模式替换。",
+        "【策略模式替换 if-else】同一逻辑存在 ≥3 个平级分支（按类型/渠道/状态分流不同行为）时，必须抽取为 Strategy 模式：定义策略接口 → 各分支实现为独立策略类 → 通过 Map<key, 策略> 查表分发。禁止在业务方法内写「if type==A ... else if type==B ... else」。",
+        "【工厂模式解耦创建】存在 ≥3 处 new 具体类 + 条件判断创建不同子类的代码时，必须抽取为 Factory 模式。简单工厂接收类型标识返回对应实例；复杂场景用抽象工厂创建产品族。禁止在调用方代码中硬编码 new + if-else 选择具体类。",
+        "【责任链替换顺序校验】按顺序依次尝试多个处理器（校验链/过滤链/审批链）时，必须用 Chain of Responsibility 模式：每个 Handler 持有 next 引用，自己处理或传递给下一个。禁止写成「if handlerA.pass → if handlerB.pass → if handlerC.pass」的 if-else 链。",
+        "【状态模式替代状态 if】对象行为随内部状态变化（≥3 个状态、每个状态 ≥2 种行为）时，必须用 State 模式：每个状态封装为独立类，行为委托给当前状态对象。禁止在方法内写「if state==PENDING ... else if state==PROCESSING ... else if state==COMPLETED」。",
+        "【命令模式封装操作】需要排队/撤销/重做/日志记录的操作集合，必须用 Command 模式：每个操作封装为 Command 对象（含 execute/undo），调用方通过 Invoker 执行。禁止用 if-else 判断操作类型后直接调用不同方法。",
+        "【查表法消除 switch】所有固定映射的 switch/if-else（如错误码→错误消息、类型→处理器、状态→下一步）必须替换为 Map/对象字面量查表：`const handler = map[key]; if (handler) handler()`。禁止在 switch 中逐个 case 返回或执行相似逻辑。",
+        "【Optional/Maybe 消除 null 判断链】连续 null 检查链（`if a != null → if a.b != null → a.b.c`）必须用 Optional/Maybe 模式或可选链 `?.` 语法替代。禁止出现 3 层以上嵌套 null 判断。"
+      ]
+    },
+    "lightweight_tooling_first": {
+      "id": "lightweight-tooling-first",
+      "description": "轻量级工具优先规范 — 选型时必须优先用轻量库/标准库/微框架，禁止为简单场景引入重型框架，确保灵活性、可观测性与可测试性",
+      "rules": [
+        "【轻量优先原则】能用标准库解决的不引入第三方库；能用单文件微库（<10KB）解决的不引入全家桶框架；能用函数组合解决的不引入依赖注入容器。选型决策必须基于当前实际需求，禁止为「未来可能需要」引入重型基础设施。",
+        "【框架选型阶梯】Web 服务：静态/简单 API → 标准库 http/net 或微框架（Express/Fastify/Hono）；复杂业务 → 渐进式框架（Next.js/Nuxt 的 API Routes）。禁止为 2-3 个接口启动 Spring Boot/Django REST Framework 全家桶。CLI 工具：优先 stdio + commander/yargs；禁止为简单命令引入 NestJS CLI 插件体系。",
+        "【可观测性内建】任何引入的框架/库必须能直接对接标准可观测性三大支柱：① 结构化日志（JSON 格式→日志采集）；② Metrics（Prometheus 格式→指标监控）；③ Tracing（OpenTelemetry→链路追踪）。禁止引入无法暴露标准可观测端口的黑盒框架。",
+        "【可测试性门禁】引入框架前必须确认其支持：① 单元测试不启动完整服务（handler 纯函数可测）；② 集成测试可内存运行（无需外部容器）；③ Mock/Stub 替代真实依赖有明确注入点。若框架强制启动真实服务才能测试（如某些 EJB/Spring Cloud 重度容器依赖），禁止引入。",
+        "【依赖传染控制】引入一个框架不应强制引入 ≥5 个传递依赖。若框架的 package.json 依赖树深度 >4 层或传递依赖 >50 个（不含 devDep），必须寻找更轻的替代品。典型反面：为用 ORM 的一个查询引入整个 Hibernate → 改用原生 SQL/Knex/Drizzle；为用 HTTP 客户端引入整个 Spring WebClient → 改用 fetch/undici。",
+        "【适度抽象原则】禁止在项目初期（需求 <3 个版本迭代）建立过度抽象层：通用 DAO/Repository 模式在只有 1 张表时不建；微服务拆分在单体能支撑 10 万 DAU 前不拆；CQRS/Event Sourcing 在 CRUD 够用时不引入。抽象只为解决已发生的痛点，不为预防假设性痛点。"
+      ]
     }
   }
 }
