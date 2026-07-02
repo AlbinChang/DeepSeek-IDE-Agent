@@ -790,17 +790,25 @@ export class FileTools {
                 };
             }
 
+            // 【性能优化】预计算每行起始偏移量，O(L) 一次构建。二分查找 O(log L) 替代原 O(M×L) 逐偏移量遍历全行
+            const lineStarts: number[] = [0];
+            for (let i = 0; i < rawContent.length; i++) {
+                if (rawContent[i] === '\n') {
+                    lineStarts.push(i + 1);
+                }
+            }
+            const offsetToLine = (offset: number): number => {
+                let lo = 0, hi = lineStarts.length - 1;
+                while (lo < hi) {
+                    const mid = (lo + hi + 1) >>> 1;
+                    if (lineStarts[mid] <= offset) lo = mid;
+                    else hi = mid - 1;
+                }
+                return lo + 1; // 1-indexed
+            };
+
             if (occurrences.length > 1) {
-                // 计算每个出现位置的行号
-                const lines = rawContent.split('\n');
-                const linePositions = occurrences.map(offset => {
-                    let charCount = 0;
-                    for (let i = 0; i < lines.length; i++) {
-                        charCount += lines[i].length + 1; // +1 for \n
-                        if (charCount > offset) return i + 1;
-                    }
-                    return lines.length;
-                });
+                const linePositions = occurrences.map(offsetToLine);
                 return {
                     status: 'error',
                     mode: 'text_replace',
@@ -819,9 +827,9 @@ export class FileTools {
             const finalBuffer = FileIO.encodeString(newContent, encoding);
             await FileIO.writeFile(unsafePath, workspaceRoot, finalBuffer);
 
-            // 构建操作后上下文快照
+            // 构建操作后上下文快照（复用已计算的 lineStarts 二分查找替换行号）
             const newLines = newContent.split(/\r?\n|\r|\u2028|\u2029/);
-            const replacementLine = rawContent.slice(0, occurrences[0]).split('\n').length;
+            const replacementLine = offsetToLine(occurrences[0]);
             const lineNumWidth = String(newLines.length).length;
             const snapshotStart = Math.max(0, replacementLine - 4);
             const snapshotEnd = Math.min(newLines.length, replacementLine + newText.split('\n').length + 3);

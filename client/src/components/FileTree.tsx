@@ -228,23 +228,28 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
           if (controller.signal.aborted) return;
                 setNodes(oldTree => {
                     let nextTree = oldTree;
+                    // 【性能优化】预构建 path → node 索引，O(N) 一次构建，后续 O(1) 定位
+                    // 替代原 O(P×N) 每路径递归遍历全树
+                    const nodeIndex = new Map<string, FileNode>();
+                    const buildIndex = (nodes: FileNode[]) => {
+                        for (const n of nodes) {
+                            nodeIndex.set(n.path, n);
+                            if (n.children) buildIndex(n.children);
+                        }
+                    };
+                    buildIndex(oldTree);
+
                     for (const res of results) {
                         if (!res) continue;
                         if (res.path === '.') {
                             nextTree = mergeNodes(nextTree, res.children);
                         } else {
-                            const updateTree = (nodes: FileNode[]): FileNode[] => {
-                                return nodes.map(n => {
-                                    if (n.path === res.path) {
-                                        return { ...n, children: n.children ? mergeNodes(n.children, res.children) : res.children };
-                                    }
-                                    if (n.children) {
-                                        return { ...n, children: updateTree(n.children) };
-                                    }
-                                    return n;
-                                });
-                            };
-                            nextTree = updateTree(nextTree);
+                            const target = nodeIndex.get(res.path);
+                            if (target) {
+                                target.children = target.children ? mergeNodes(target.children, res.children) : res.children;
+                                // 触发 React 重渲染：浅拷贝受影响的节点链
+                                nextTree = [...nextTree];
+                            }
                         }
                     }
                     return nextTree;
@@ -376,8 +381,13 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   };
 
   const mergeNodes = (oldNodes: FileNode[], newNodes: FileNode[]): FileNode[] => {
+    // 【性能优化】预构建 path → oldNode 的映射，O(N+M) 替代原 O(N×M) 的 find() 扫描
+    const oldNodeByPath = new Map<string, FileNode>();
+    for (const o of oldNodes) {
+      oldNodeByPath.set(o.path, o);
+    }
     return newNodes.map(newNode => {
-      const oldNode = oldNodes.find(o => o.path === newNode.path);
+      const oldNode = oldNodeByPath.get(newNode.path);
       if (oldNode) {
         newNode.isOpen = oldNode.isOpen;
         // 如果原本是打开的且已经有子节点，保留它们用于占位或递归

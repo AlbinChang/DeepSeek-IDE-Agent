@@ -163,34 +163,46 @@ export class MemoryService {
         await this.ensureMemoryDir(workspaceRoot);
         const filePath = this.getNeverMistakeFile(workspaceRoot);
         const current = await this.getNeverMistakeRules(workspaceRoot);
-        const merged = [...current];
 
+        // 【性能优化】使用 Map 做去重查找 O(1)，替代原 findIndex 的 O(R) 扫描
+        const seen = new Map<string, NeverMistakeRecord>();
+        for (const rule of current) {
+            const key = `${this.normalizeRuleText(rule.shouldNot)}||${this.normalizeRuleText(rule.shouldDo)}`;
+            if (!seen.has(key)) seen.set(key, rule);
+        }
+
+        // 按时间倒序插入新记录，已存在的记录直接替换（保持语义：最新记录在前）
+        const newEntries: NeverMistakeRecord[] = [];
         for (const item of records) {
             const shouldNot = String(item?.shouldNot || '').trim();
             const shouldDo = String(item?.shouldDo || '').trim();
             if (!shouldNot || !shouldDo) continue;
 
-            const normalizedShouldNot = this.normalizeRuleText(shouldNot);
-            const normalizedShouldDo = this.normalizeRuleText(shouldDo);
-            const existsIndex = merged.findIndex((rule) =>
-                this.normalizeRuleText(rule.shouldNot) === normalizedShouldNot &&
-                this.normalizeRuleText(rule.shouldDo) === normalizedShouldDo
-            );
+            const key = `${this.normalizeRuleText(shouldNot)}||${this.normalizeRuleText(shouldDo)}`;
+            const existing = seen.get(key);
 
             const now = Date.now();
             const updatedRecord: NeverMistakeRecord = {
-                id: existsIndex >= 0 ? merged[existsIndex].id : Math.random().toString(36).slice(2, 10),
+                id: existing?.id ?? Math.random().toString(36).slice(2, 10),
                 timestamp: now,
                 date: new Date(now).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
                 shouldNot,
                 shouldDo
             };
 
-            if (existsIndex >= 0) {
-                merged.splice(existsIndex, 1);
-            }
-            merged.unshift(updatedRecord);
+            seen.set(key, updatedRecord);
+            newEntries.unshift(updatedRecord);
         }
+
+        // 合并：新记录在前 → 原记录中未被替换的紧随其后
+        const newKeys = new Set(newEntries.map(e =>
+            `${this.normalizeRuleText(e.shouldNot)}||${this.normalizeRuleText(e.shouldDo)}`));
+        const remaining = current.filter(rule => {
+            const key = `${this.normalizeRuleText(rule.shouldNot)}||${this.normalizeRuleText(rule.shouldDo)}`;
+            return !newKeys.has(key);
+        });
+
+        const merged = [...newEntries, ...remaining];
 
         if (merged.length > this.NEVER_MISTAKE_MAX) {
             merged.length = this.NEVER_MISTAKE_MAX;

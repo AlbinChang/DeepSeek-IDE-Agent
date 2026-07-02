@@ -61,7 +61,10 @@ export class MessagePreparationService {
         }
 
         let preRole = "user";
-        // 【性能优化】预构建 assistant tool_calls ID → 索引 的查找表，避免内层 O(n²) 扫描
+
+        // 【性能优化】单次扫描预构建两个查找表，消除 O(N²) 内层循环：
+        //   1) assistantIndexById: tool_call_id → assistant 消息索引
+        //   2) toolCallHasResponse: tool_call_id → 是否在后续有对应的 tool 消息回复
         const assistantIndexById = new Map<string, number>();
         for (let i = 0; i < msgsToProcess.length; i++) {
             const m = msgsToProcess[i];
@@ -69,6 +72,15 @@ export class MessagePreparationService {
                 for (const tc of m.tool_calls) {
                     if (tc.id) assistantIndexById.set(tc.id, i);
                 }
+            }
+        }
+
+        // 单次反向扫描构建 tool_call 响应状态表（替代原 O(N²) 每消息向前扫描）
+        const toolCallHasResponse = new Map<string, boolean>();
+        for (let i = msgsToProcess.length - 1; i >= 0; i--) {
+            const m = msgsToProcess[i];
+            if (m.role === "tool" && m.tool_call_id) {
+                toolCallHasResponse.set(m.tool_call_id, true);
             }
         }
 
@@ -97,7 +109,6 @@ export class MessagePreparationService {
             }
 
             if (m.role === "tool") {
-                // 【性能优化】使用预构建的 Map 查找，替代 O(n) 数组扫描
                 const hasMatchingCall = assistantIndexById.has(m.tool_call_id);
                 if (!hasMatchingCall) {
                     continue;
@@ -107,17 +118,11 @@ export class MessagePreparationService {
             if (m.role === "assistant" && Array.isArray(clean.tool_calls) && clean.tool_calls.length > 0) {
                 clean.reasoning_content = hasReasoningField(m) ? extractReasoningText(m) : "";
 
-                const expectedIds = new Set(clean.tool_calls.map((tc: any) => tc.id));
-                const respondedIds = new Set<string>();
-                for (let j = i + 1; j < msgsToProcess.length; j++) {
-                    const nxt = msgsToProcess[j];
-                    if (nxt.role === "tool" && nxt.tool_call_id && expectedIds.has(nxt.tool_call_id)) {
-                        respondedIds.add(nxt.tool_call_id);
-                    } else if (nxt.role === "assistant" || nxt.role === "system") {
-                        break;
-                    }
-                }
-                if (respondedIds.size !== expectedIds.size) {
+                // 【性能优化】O(1) 检查每个 tool_call 是否有响应（替代原 O(N) 向前扫描）
+                const allResponded = clean.tool_calls.every(
+                    (tc: any) => toolCallHasResponse.has(tc.id)
+                );
+                if (!allResponded) {
                     delete clean.tool_calls;
                     if (!clean.content) {
                         continue;
