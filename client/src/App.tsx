@@ -236,7 +236,15 @@ function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
         if (e.ctrlKey && e.key === 'l') {
             e.preventDefault();
-            (document.querySelector('textarea') as HTMLElement)?.focus();
+            // 精确定位 AgentChat 面板的主输入框（排除 Monaco 编辑器、临时复制 textarea 等干扰）
+            const chatTextarea = document.querySelector('[data-testid="agent-chat-input"]') as HTMLElement;
+            if (chatTextarea) {
+                chatTextarea.focus();
+            } else {
+                // 降级方案：查找 form 内的 textarea（非 readonly 且非隐藏）
+                const fallback = document.querySelector('form textarea:not([readonly])') as HTMLElement;
+                fallback?.focus();
+            }
         }
     };
     window.addEventListener('keydown', handleKeyDown);

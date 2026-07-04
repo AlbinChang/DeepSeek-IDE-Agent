@@ -119,7 +119,10 @@ export const Terminal: React.FC = () => {
                     if (isDisposed) return;
                     console.log('[Terminal] Electron PTY created:', result);
                     isReadyRef.current = true;
-                    term.focus();
+                    // 仅当 xterm 实例仍存活且未被销毁时才聚焦
+                    if (xtermRef.current && !(xtermRef.current as any)._disposed) {
+                        term.focus();
+                    }
                 }).catch((err: any) => {
                     if (isDisposed) return;
                     console.error('[Terminal] Failed to create PTY:', err);
@@ -200,8 +203,12 @@ export const Terminal: React.FC = () => {
             });
 
             eventSource.onopen = () => {
+                if (isDisposed) return;
                 console.log('[Terminal] SSE Connected.');
-                term.focus();
+                // 仅当 xterm 实例仍存活且未被销毁时才聚焦
+                if (xtermRef.current && !(xtermRef.current as any)._disposed) {
+                    term.focus();
+                }
             };
 
             eventSource.onerror = () => {

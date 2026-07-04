@@ -178,6 +178,7 @@ export const AgentChat: React.FC = () => {
     const [copyFeedback, setCopyFeedback] = useState('');
     const providerMenuRef = useRef<HTMLDivElement>(null);
     const copyResetTimerRef = useRef<number | null>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
 
     // 2026.04: 思考强度控制 (DeepSeek V4 / Gemini 3 均支持 reasoning_effort: high | max)
     // 默认 high，复杂 Agent 场景建议切换到 max。持久化到 localStorage，避免刷新丢失。
@@ -593,6 +594,7 @@ export const AgentChat: React.FC = () => {
     };
 
     const copyTextFallback = (text: string): boolean => {
+        const previousActive = document.activeElement;
         const textarea = document.createElement('textarea');
         textarea.value = text;
         textarea.setAttribute('readonly', 'true');
@@ -604,6 +606,10 @@ export const AgentChat: React.FC = () => {
         textarea.select();
         const copied = document.execCommand('copy');
         document.body.removeChild(textarea);
+        // 还原焦点到主输入框（避免副文本域移除后焦点丢失到 body）
+        if (previousActive === textareaRef.current || document.activeElement === document.body) {
+            textareaRef.current?.focus();
+        }
         return copied;
     };
 
@@ -660,6 +666,16 @@ export const AgentChat: React.FC = () => {
         }
     };
 
+    // 清空历史会话：操作完成后自动将焦点归还给输入框
+    const handleClearHistory = useCallback(async () => {
+        await clearHistory();
+        // window.confirm 会强制抢占焦点，confirm 关闭后焦点回到 body
+        // 延迟一帧确保 DOM 稳定后再聚焦
+        requestAnimationFrame(() => {
+            textareaRef.current?.focus();
+        });
+    }, [clearHistory]);
+
     return (
         <div className='flex flex-col h-full bg-black text-white font-sans'>
              <div className='flex items-center justify-between px-4 pt-px pb-1 border-b border-white/5 bg-black/50 backdrop-blur-md sticky top-0 z-10'>
@@ -706,7 +722,7 @@ export const AgentChat: React.FC = () => {
                     )}
                     {messages.length > 0 && !isLoading && (
                         <button 
-                            onClick={clearHistory} 
+                            onClick={handleClearHistory} 
                             title="清空历史会话"
                             className='p-1.5 hover:bg-white/10 rounded-md transition-colors text-white/40 hover:text-red-400 group'
                         >
@@ -780,6 +796,8 @@ export const AgentChat: React.FC = () => {
                 <div className='max-w-4xl mx-auto relative group'>
                     <div className='relative w-full bg-white/5 border border-white/10 rounded-xl transition-all focus-within:ring-1 focus-within:ring-emerald-500/20 focus-within:border-emerald-500/40'>
                         <textarea 
+                            ref={textareaRef}
+                            data-testid="agent-chat-input"
                             value={input} 
                             onChange={customHandleInputChange} 
                             onKeyDown={handleKeyDown}
