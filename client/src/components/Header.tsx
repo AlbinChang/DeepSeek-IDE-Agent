@@ -46,7 +46,7 @@ export const Header: React.FC<HeaderProps> = ({ activeFile, onBack, onForward, c
                 <div className="flex items-center gap-1.5 text-[8.5px] text-white overflow-hidden font-black tracking-widest">
                     {pathSegments.map((seg, i) => (
                         <React.Fragment key={i}>
-                            <button className="hover:text-white transition-colors truncate max-w-[100px] opacity-80 hover:opacity-100">
+                            <button className="hover:text-white transition-colors truncate max-w-[750px] opacity-80 hover:opacity-100">
                                 {seg}
                             </button>
                             {i < pathSegments.length - 1 && <ChevronRight size={8} className="opacity-40" />}
