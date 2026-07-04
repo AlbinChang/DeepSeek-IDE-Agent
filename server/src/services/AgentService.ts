@@ -487,7 +487,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_powershell_command...');
         this.toolManager.registerTool({
             name: 'run_powershell_command',
-            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。PowerShell 字符串引号规则见系统提示词中的 powershell_quoting_contract。',
+            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。PowerShell 字符串引号规则见系统提示词中的 powershell_quoting_contract。完整输出自动持久化到 .command/output.txt，长输出场景下请用 read_file 按需检索完整内容。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -507,7 +507,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_cmd_command...');
         this.toolManager.registerTool({
             name: 'run_cmd_command',
-            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。适合纯文本处理（findstr、dir、type）和简单文件操作。',
+            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。适合纯文本处理（findstr、dir、type）和简单文件操作。完整输出自动持久化到 .command/output.txt，长输出场景下请用 read_file 按需检索完整内容。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1071,6 +1071,7 @@ export class AgentService extends EventEmitter {
             `- run_cmd_command：${envInfo.cmdAvailable ? `✅ 可用（${envInfo.cmdVersion}）` : '❌ 不可用，禁止调用'}。仅限 Windows，调 cmd.exe。`,
             '- 工具名即执行器。command 直接写原生命令体。',
             '- Windows 上优先用 run_powershell_command；仅在用户明确要求或命令确实只能在 cmd.exe 下执行时才用 run_cmd_command；Linux/macOS 上仅能用 run_powershell_command。',
+            '- **输出持久化**：每次命令执行后，完整输出（stdout+stderr+元数据）自动写入 .command/output.txt。返回给 LLM 的结果可能被截断，长输出场景请用 read_file 读取 .command/output.txt 获取完整内容。',
         ].join('\n');
 
         const processSafetyGuard = ProcessSafetyGuard.getInstance();

@@ -288,6 +288,8 @@ export class ShellPolicySection extends BasePromptSection {
             `- run_powershell_command：${envInfo.powershellAvailable ? `✅ 可用（${envInfo.powershellVersion}）` : '❌ 不可用'}`,
             `- run_cmd_command：${envInfo.cmdAvailable ? `✅ 可用（${envInfo.cmdVersion}）` : '❌ 不可用'}`,
             '- Windows 优先用 run_powershell_command；仅在用户明确要求或命令确实只能在 cmd.exe 下执行时才用 run_cmd_command。',
+            '- 每次命令执行后，完整输出（stdout+stderr+元数据）自动持久化到 .command/output.txt；返回给 LLM 的结果可能已被截断。',
+            '- 长命令输出场景：先观察返回结果中的关键信息；若信息不足，用 read_file 读取 .command/output.txt 获取完整输出。',
         ].join('\n');
     }
 }

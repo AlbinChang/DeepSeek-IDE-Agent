@@ -1,4 +1,6 @@
 ﻿import * as os from 'os';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { spawn } from 'child_process';
 import { EventDistributor } from '@/services/EventDistributor.js';
 import { GitService } from '@/services/GitService.js';
@@ -12,6 +14,11 @@ export interface CommandResult {
 }
 
 export class SystemTools {
+    /** 命令输出持久化目录（相对于工作区根目录） */
+    private static readonly COMMAND_OUTPUT_DIR = '.command';
+    /** 单文件输出路径（每次命令执行覆盖写入） */
+    private static readonly COMMAND_OUTPUT_FILE = 'output.txt';
+
     private static readonly SHELL_WRAPPER_PATTERNS = [
         /^(?:cmd|cmd\.exe)\s+\/[cCdDsS]/i,
         /^(?:powershell|powershell\.exe|pwsh)\s+-/i,
@@ -21,6 +28,53 @@ export class SystemTools {
     private static startsWithShellWrapper(command: string): boolean {
         const trimmed = String(command || '').trim();
         return this.SHELL_WRAPPER_PATTERNS.some((pattern) => pattern.test(trimmed));
+    }
+
+    /**
+     * 将命令执行的完整输出持久化到工作区的 .command/output.txt
+     * Agent 可通过 read_file 按需检索完整输出，避免长输出被截断丢失信息
+     */
+    private static async persistCommandOutput(
+        workspaceRoot: string,
+        command: string,
+        shell: string,
+        exitCode: number | string | null,
+        durationMs: number,
+        fullStdout: string,
+        fullStderr: string,
+        truncated: boolean,
+        hardKilled: boolean
+    ): Promise<string | null> {
+        try {
+            const dir = path.join(workspaceRoot, this.COMMAND_OUTPUT_DIR);
+            await fs.mkdir(dir, { recursive: true });
+            const filePath = path.join(dir, this.COMMAND_OUTPUT_FILE);
+
+            const timestamp = new Date().toISOString();
+            const durationSec = (durationMs / 1000).toFixed(2);
+            const truncatedNote = truncated ? ' (LLM 上下文已截断，此文件包含完整输出)' : '';
+            const hardKilledNote = hardKilled ? ' ⚠️ 输出超过 5MB 物理上限，进程已被强制终止' : '';
+
+            const content = [
+                `=== 命令执行输出${truncatedNote}${hardKilledNote} ===`,
+                `时间: ${timestamp}`,
+                `命令: ${command}`,
+                `Shell: ${shell}`,
+                `退出码: ${exitCode ?? 'N/A'}`,
+                `耗时: ${durationSec}s`,
+                `=== STDOUT ===`,
+                fullStdout || '(无输出)',
+                `=== STDERR ===`,
+                fullStderr || '(无输出)',
+                `=== END ===`,
+            ].join('\n');
+
+            await fs.writeFile(filePath, content, 'utf-8');
+            return filePath;
+        } catch (err) {
+            console.error('[SystemTools] 持久化命令输出失败:', err);
+            return null;
+        }
     }
 
     /**
@@ -353,12 +407,21 @@ export class SystemTools {
              * 阈值说明：
              * - LLM_MAX_OUTPUT (2.5KB): 返回给大模型推理的内容上限，防止上下文爆炸及链路积压。
              * - PROCESS_HARD_LIMIT (5MB): 允许子进程生存的输出上限，防止恶意输出或死循环。
+             * - FULL_OUTPUT_FILE_LIMIT (10MB): 持久化到 .command/output.txt 的完整输出上限。
              */
             const LLM_MAX_OUTPUT = 2560; // 2.5KB 强力截断点
             const PROCESS_HARD_LIMIT = 5 * 1024 * 1024; // 5MB 物理熔断红线
+            const FULL_OUTPUT_FILE_LIMIT = 10 * 1024 * 1024; // 10MB 文件持久化上限
             
             let isTruncated = false;
             let isHardKilled = false; // OOM 熔断标志，供 close 事件附加错误提示
+
+            // 完整输出缓冲区（不截断），用于持久化到 .command/output.txt
+            // Agent 可通过 read_file 按需检索，避免长输出被截断损失信息
+            let fullStdout = '';
+            let fullStderr = '';
+            let fullTotalLength = 0;
+            const commandStartTime = Date.now();
 
             // 统一 cleanup：无论哪条路径 resolve，都需要清除所有 timer
             let resolved = false;
@@ -379,6 +442,16 @@ export class SystemTools {
 
                 // [DECOUPLING OPTIMIZATION] Agent 终端数据不再广播至前端 PTY 区域。
                 // 仅保留逻辑层缓冲区供 LLM 使用和链路追踪记录。
+
+                // 1. 完整输出缓冲区（用于文件持久化，不做 LLM 截断）
+                if (fullTotalLength < FULL_OUTPUT_FILE_LIMIT) {
+                    fullTotalLength += data.length;
+                    if (pipeType === 'stdout') {
+                        fullStdout += chunk;
+                    } else {
+                        fullStderr += chunk;
+                    }
+                }
 
                 // 2. 逻辑层缓冲区 (用于返回给 LLM 或后续处理)
                 // stdout 采用滚动尾部窗口：构建结果/测试报告/错误堆栈总在末尾，保留尾部才有意义
@@ -412,18 +485,51 @@ export class SystemTools {
             child.stdout.on('data', (d) => onData(d, 'stdout'));
             child.stderr.on('data', (d) => onData(d, 'stderr'));
 
+            /**
+             * 在命令执行完毕后，将完整输出写入 .command/output.txt 供 Agent 按需检索
+             */
+            const persistAndResolve = async (
+                exitCode: number | string | null,
+                status: 'success' | 'error',
+                extraStderr: string,
+                outputFilePath: string | null
+            ) => {
+                const stdoutFinal = isTruncated ? '--- [Agent 自动截断: 输出过长，仅保留最近内容] ---\n' + stdout : stdout;
+                const resultStderr = stderr + extraStderr;
+
+                // 构建返回给 LLM 的结果，附带输出文件路径提示
+                const fileHint = outputFilePath
+                    ? `\n\n[Agent] 完整输出已保存至 ${this.COMMAND_OUTPUT_DIR}/${this.COMMAND_OUTPUT_FILE}，可使用 read_file 按需查阅完整内容。`
+                    : '';
+
+                resolve({
+                    stdout: stdoutFinal + fileHint,
+                    stderr: resultStderr,
+                    status,
+                    code: exitCode
+                });
+            };
+
             timer = setTimeout(() => {
                 if (resolved) return;
                 resolved = true;
                 cleanup();
                 killProc();
-                const stdoutOnTimeout = isTruncated ? '--- [Agent 自动截断: 输出过长，仅保留最近内容] ---\n' + stdout : stdout;
-                resolve({ 
-                    stdout: stdoutOnTimeout, 
-                    stderr: stderr + `\n[Error] Command timed out after ${finalTimeout}ms`, 
-                    status: 'error',
-                    code: 'SIGTERM'
-                });
+                // 超时路径：异步持久化后再 resolve
+                const exitCode = 'SIGTERM';
+                const duration = Date.now() - commandStartTime;
+                if (workspaceRoot) {
+                    this.persistCommandOutput(
+                        workspaceRoot, command, shell, exitCode, duration,
+                        fullStdout, fullStderr, isTruncated, isHardKilled
+                    ).then((filePath) => {
+                        persistAndResolve(exitCode, 'error',
+                            `\n[Error] Command timed out after ${finalTimeout}ms`, filePath);
+                    });
+                } else {
+                    persistAndResolve(exitCode, 'error',
+                        `\n[Error] Command timed out after ${finalTimeout}ms`, null);
+                }
             }, finalTimeout);
 
             child.on('close', (code) => {
@@ -436,15 +542,19 @@ export class SystemTools {
                     ? '\n[错误] 命令输出超过 5MB 物理上限，进程已被强制终止。请优化命令减少输出量（如加 --silent / -q 参数）。'
                     : '';
 
-                // 对最后一份数据做微小延迟确保 onData 队列清空
-                setTimeout(() => {
-                    const stdoutFinal = isTruncated ? '--- [Agent 自动截断: 输出过长，仅保留最近内容] ---\n' + stdout : stdout;
-                    resolve({
-                        stdout: stdoutFinal,
-                        stderr: stderr + extraStderr,
-                        status: code === 0 ? 'success' : 'error',
-                        code
-                    });
+                const status = code === 0 ? 'success' as const : 'error' as const;
+                const duration = Date.now() - commandStartTime;
+
+                // 对最后一份数据做微小延迟确保 onData 队列清空，然后持久化并 resolve
+                setTimeout(async () => {
+                    let filePath: string | null = null;
+                    if (workspaceRoot) {
+                        filePath = await this.persistCommandOutput(
+                            workspaceRoot, command, shell, code, duration,
+                            fullStdout, fullStderr, isTruncated, isHardKilled
+                        );
+                    }
+                    await persistAndResolve(code, status, extraStderr, filePath);
                 }, 10);
             });
 
@@ -452,6 +562,7 @@ export class SystemTools {
                 if (resolved) return;
                 resolved = true;
                 cleanup();
+                // spawn 失败（如 shell 不存在），无需持久化
                 resolve({
                     stdout: stdout,
                     stderr: err.message,
