@@ -105,9 +105,9 @@ export class EvaluationAgentService {
             "   - 需要主Agent继续迭代",
             "   - 条件不满足、目标无法达成",
             "   - 需要用户进一步操作或提供信息",
-            "5. 结尾区域必须先输出固定字段“问题个数：N”（N 为非负整数，使用阿拉伯数字）。",
-            "   - 若无法确认问题数，保守输出：问题个数：1，并在正文说明不确定原因。",
-            "   - 问题个数必须是单一确定值，禁止区间、中文数字、约数或省略。",
+            "5. 结尾区域必须先输出固定字段「问题个数：N」和「P0+P1问题个数：M」（M 为 P0 和 P1 级别的问题总数，0 ≤ M ≤ N）。",
+            "   - 若无法确认问题数，保守输出：问题个数：1、P0+P1问题个数：1，并在正文说明不确定原因。",
+            "   - 问题个数和 P0+P1问题个数 都必须是单一确定值，禁止区间、中文数字、约数或省略。",
             "6. 结尾必须给出“执行结论”单行，格式：执行结论：<四类之一>",
             "7. 禁止在正文中声称\u201c已写入文件/已保存文件\u201d；你的报告内容将通过系统消息直接传递给主Agent，无需落盘。"
         ].join("\n");
@@ -142,6 +142,7 @@ export class EvaluationAgentService {
         let finalReply = "";
         let decision: EvaluationDecision = "continue_main_agent";
         let issueCount = 1;
+        let p0p1IssueCount = 1;
 
         try {
             const turnResult = await AgentTurnEngine.runTurns({
@@ -171,15 +172,17 @@ export class EvaluationAgentService {
             finalReply = rawFinalReply;
             decision = this.parseDecision(rawFinalReply);
             issueCount = this.parseIssueCount(rawFinalReply);
+            p0p1IssueCount = this.parseP0P1IssueCount(rawFinalReply, issueCount);
 
-            // 收紧放行条件：仅当“问题个数=0”时，才允许终止迭代。
-            if (issueCount > 0) {
+            // 质量门禁：仅 P0+P1 级别问题阻塞交付，P2/P3 不阻塞。
+            if (p0p1IssueCount > 0) {
                 decision = "continue_main_agent";
             }
         } catch (err: any) {
             const errMsg = String(err?.message || err || "未知异常").trim();
             decision = "continue_main_agent";
             issueCount = 1;
+            p0p1IssueCount = 1;
             finalReply = [
                 "## 评估执行异常",
                 "",
@@ -193,7 +196,7 @@ export class EvaluationAgentService {
 
         const reportContent = finalReply;
 
-        console.log(`${getTS()} [EvaluationAgent] Evaluation finished for user: ${userId}, decision: ${decision}, issueCount: ${issueCount}`);
+        console.log(`${getTS()} [EvaluationAgent] Evaluation finished for user: ${userId}, decision: ${decision}, issueCount: ${issueCount}, p0p1IssueCount: ${p0p1IssueCount}`);
 
         return {
             decision,
@@ -248,6 +251,42 @@ export class EvaluationAgentService {
 
         // 歧义输出不再静默放行为“继续迭代”，直接要求补充信息。
         return "need_user_input";
+    }
+
+    /**
+     * 解析评估报告中的 P0+P1 级别问题个数。
+     * 质量门禁仅以此值为准：P0+P1=0 时放行，P2/P3 不阻塞交付。
+     * 若报告未显式给出该字段，保守回退到总问题数（issueCount）。
+     */
+    private parseP0P1IssueCount(finalReply: string, fallbackTotalIssueCount: number): number {
+        const source = String(finalReply || "");
+        if (!source.trim()) return fallbackTotalIssueCount;
+
+        // 优先解析显式字段：P0+P1问题个数/P0P1问题个数：M
+        const explicitLine = source
+            .split(/\r?\n/)
+            .map((line) => this.normalizeDecisionLine(line))
+            .find((line) => /^(P0\+P1问题个数|P0P1问题个数|P0\+P1问题数|P0P1问题数)\s*[：:]/.test(line));
+
+        if (explicitLine) {
+            const normalized = explicitLine.replace(/\s+/g, "");
+            const m = normalized.match(/(?:P0\+P1问题个数|P0P1问题个数|P0\+P1问题数|P0P1问题数)[：:](\d+)/);
+            if (m) {
+                const count = Number(m[1] || 0);
+                // P0+P1 不应超过总问题数，若超过则以上限为准
+                return Math.min(count, fallbackTotalIssueCount);
+            }
+            if (/(?:P0\+P1问题个数|P0P1问题个数|P0\+P1问题数|P0P1问题数)[：:](?:0|0个?)/.test(normalized)) return 0;
+        }
+
+        // 回退：尝试从「可直接修复清单」中统计 P0/P1 标记
+        const p0p1Matches = source.match(/[（(]P[01][）)]/g);
+        if (p0p1Matches && p0p1Matches.length > 0) {
+            return Math.min(p0p1Matches.length, fallbackTotalIssueCount);
+        }
+
+        // 无法解析 P0+P1 计数时，保守使用总问题数
+        return fallbackTotalIssueCount;
     }
 
     private parseIssueCount(finalReply: string): number {
