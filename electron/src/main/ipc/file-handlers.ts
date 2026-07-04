@@ -44,6 +44,8 @@ function getMimeType(filePath: string): string {
         '.svg': 'image/svg+xml',
         '.bmp': 'image/bmp',
         '.ico': 'image/x-icon',
+        '.tiff': 'image/tiff',
+        '.tif': 'image/tiff',
     };
     return mimeMap[ext] || 'application/octet-stream';
 }

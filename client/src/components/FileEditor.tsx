@@ -42,7 +42,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [originalContent, setOriginalContent] = useState<string>('');
-  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf'>(mode);
+  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image'>(mode);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const diffEditorRef = useRef<any>(null);
   const savedContentRef = useRef('');
@@ -51,11 +51,21 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const fileName = useMemo(() => activeFile.split(/[/\\]/).pop() || activeFile, [activeFile]);
   const isMarkdown = useMemo(() => activeFile.toLowerCase().endsWith('.md'), [activeFile]);
   const isPdf = useMemo(() => activeFile.toLowerCase().endsWith('.pdf'), [activeFile]);
+  const isImage = useMemo(() => {
+    const ext = activeFile.toLowerCase().split('.').pop();
+    return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'tiff', 'tif'].includes(ext || '');
+  }, [activeFile]);
 
   // PDF 预览状态
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
+
+  // 图片预览状态
+  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const [imageLoading, setImageLoading] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [imageMimeType, setImageMimeType] = useState<string>('');
 
   // 方案七：利用 Ref 维护原子性操作锁，强力干预 Monaco 内部异步 Canceled 链路
   const modelLockRef = useRef<boolean>(false);
@@ -66,7 +76,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const saveFileRef = useRef<() => Promise<void>>(async () => {});
 
   // 方案十二：模式切换护栏，记录上一次模式，防止在同模式下错误地执行 setModel(null) 触发 wordHighlighter 销毁
-  const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf'>(mode);
+  const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf' | 'image'>(mode);
 
   const getCurrentEditorContent = () => {
     if (viewMode === 'editor' && editorRef.current) {
@@ -91,7 +101,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   };
 
   const handleSaveFile = async () => {
-    if (!activeFile || isLocked || viewMode === 'preview' || viewMode === 'pdf' || isPdf || isSaving) return;
+    if (!activeFile || isLocked || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || isPdf || isImage || isSaving) return;
 
     const contentToSave = getCurrentEditorContent();
     if (contentToSave === savedContent) {
@@ -171,6 +181,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       console.log(`[Editor] Auto-switching from preview to editor because ${activeFile} is not Markdown`);
       setViewMode('editor');
     }
+    // 当文件改变且非图片时，从 image 模式切回 editor
+    if (activeFile && !isImage && viewMode === 'image') {
+      console.log(`[Editor] Auto-switching from image to editor because ${activeFile} is not an image`);
+      setViewMode('editor');
+    }
   }, [activeFile]);
 
   // PDF 文件：自动切换为 pdf 预览模式并加载二进制内容
@@ -222,6 +237,57 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     return () => { cancelled = true; };
   }, [activeFile, isPdf, workspaceRoot]);
+
+  // 图片文件：自动切换为 image 预览模式并加载二进制内容
+  useEffect(() => {
+    if (!activeFile || !isImage) {
+      setImageBase64(null);
+      setImageError(null);
+      setImageMimeType('');
+      return;
+    }
+
+    let cancelled = false;
+
+    if (viewMode !== 'image') {
+      setViewMode('image');
+    }
+
+    setImageLoading(true);
+    setImageBase64(null);
+    setImageError(null);
+
+    const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
+    if (!effectiveRoot) {
+      setImageLoading(false);
+      setImageError('工作区根目录缺失，无法读取图片');
+      return;
+    }
+
+    electronBridge.readFileBinary({ filePath: activeFile, root: effectiveRoot })
+      .then((result: any) => {
+        if (cancelled) return;
+        if (result?.success && result.base64) {
+          setImageBase64(result.base64);
+          setImageMimeType(result.mimeType || '');
+        } else {
+          const message = result?.error || '图片文件读取失败';
+          setImageError(message);
+          console.error('[Editor] Image read failed:', message);
+        }
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        const message = err?.message || String(err) || '图片文件读取失败';
+        setImageError(message);
+        console.error('[Editor] Image read error:', err);
+      })
+      .finally(() => {
+        if (!cancelled) setImageLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [activeFile, isImage, workspaceRoot]);
 
   // 同步外部 mode 到内部 viewMode (附带渲染屏障防止 Monaco 竞争)
   useEffect(() => {
@@ -303,7 +369,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     if (abortControllerRef.current) abortControllerRef.current.abort();
 
-    if (isPdf) {
+    if (isPdf || isImage) {
       activeFileRef.current = activeFile;
       setFileContent('');
       setSavedContent('');
@@ -523,7 +589,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                editorRef.current.setModel(null);
             }
             diffEditorRef.current.setModel({ original: originalModel, modified: modifiedModel });
-          } else if (viewMode === 'preview') {
+          } else if (viewMode === 'preview' || viewMode === 'image') {
             editorRef.current?.setModel(null);
             diffEditorRef.current?.setModel(null);
           }
@@ -861,6 +927,30 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                 </div>
               )}
             </Suspense>
+          </div>
+        )}
+
+        {/* 5. 图片预览层 */}
+        {viewMode === 'image' && isImage && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#0a0a0a]">
+            {imageLoading ? (
+              <div className="flex flex-col items-center gap-2 text-white/40 text-[9pt]">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-white/60" />
+                <span>正在读取图片...</span>
+              </div>
+            ) : imageError ? (
+              <div className="flex flex-col items-center gap-1 px-6 text-center text-[9pt] text-red-400/80">
+                <span className="text-[10pt] font-bold">图片加载失败</span>
+                <span className="max-w-[520px] break-words text-[8pt] text-white/30">{imageError}</span>
+              </div>
+            ) : imageBase64 ? (
+              <img
+                src={`data:${imageMimeType || 'image/png'};base64,${imageBase64}`}
+                alt={fileName}
+                className="max-h-full max-w-full object-contain"
+                style={{ imageRendering: 'auto' }}
+              />
+            ) : null}
           </div>
         )}
 
