@@ -191,12 +191,22 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
     if (prevProps.onToggleThinking !== nextProps.onToggleThinking) return false;
     // 4. 对于已完成的消息 (isFinal)，永不重渲染
     if (nextProps.message.isFinal && prevProps.message.isFinal) return true;
+    // 4b. isFinal 状态翻转（流式 → 完成）必须重渲染，否则纯文本不会切换为 Markdown
+    if (prevProps.message.isFinal !== nextProps.message.isFinal) return false;
     // 5. 对于流式消息，比较 parts 长度和最后一个 part 的 content
     const prevLen = prevProps.message.parts?.length ?? 0;
     const nextLen = nextProps.message.parts?.length ?? 0;
     if (prevLen !== nextLen) return false;
     // 比较 content 摘要（对于长 content 来说很轻量）
     if (prevProps.message.content !== nextProps.message.content) return false;
+    // 6. 关键：比较最后一个 part 的 content。
+    // 推理（reasoning）流式追加时 message.content 始终为空、parts.length 不变，
+    // 若不比较此项，React.memo 会一直跳过重渲染 → 表现为"吐字卡住，
+    // 直到新 part 出现才蹦出一大段"。字符串比较在内容尾部追加场景下开销可控。
+    const prevLastPart = prevProps.message.parts?.[prevLen - 1];
+    const nextLastPart = nextProps.message.parts?.[nextLen - 1];
+    if (prevLastPart?.id !== nextLastPart?.id) return false;
+    if (prevLastPart?.content !== nextLastPart?.content) return false;
     // markdownComponents 引用比较（useMemo 保证了稳定性）
     if (prevProps.markdownComponentsWithCode !== nextProps.markdownComponentsWithCode) return false;
     if (prevProps.markdownComponentsTextOnly !== nextProps.markdownComponentsTextOnly) return false;
