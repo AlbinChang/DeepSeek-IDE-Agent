@@ -71,6 +71,16 @@ export function registerTerminalIpc(ipcMain: IpcMain, mainWindow: BrowserWindow)
             const cols = params.cols || 80;
             const rows = params.rows || 24;
 
+            // 幂等保护：同 sessionId 重复创建时，先杀掉旧 PTY，防止进程泄漏
+            // 且旧 PTY 继续用同一 sessionId 向 renderer 双写输出
+            const existing = terminalSessions.get(sessionId);
+            if (existing) {
+                console.warn(`[TerminalIPC] Duplicate create for ${sessionId}, killing stale PTY`);
+                existing.explicitlyDestroyed = true;
+                try { existing.ptyProcess.kill(); } catch {}
+                terminalSessions.delete(sessionId);
+            }
+
             // 如果该用户已有会话，先销毁
             for (const [id, session] of terminalSessions) {
                 if (session.userId === params.userId && session.workDir !== workDir) {

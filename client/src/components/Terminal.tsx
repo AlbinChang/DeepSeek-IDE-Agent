@@ -387,6 +387,11 @@ export const Terminal: React.FC = () => {
             // 对齐 43.1: 工业级延迟挂载 (延迟 50ms 确保容器在 DOM 中已稳定且非 display:none)
             initOpenTimeoutRef.current = setTimeout(() => {
                 if (isDisposed || !terminalRef.current) return;
+
+                // [Fix] ResizeObserver 的 handleResize 延迟挂载路径可能已抢先完成 open + connectTerminal
+                // （observe() 后会立即触发一次回调）。若已连接则直接跳过，
+                // 否则会用同一 sessionId 重复创建 PTY，导致主进程旧 PTY 泄漏并双写输出。
+                if (hasConnectedRef.current || xtermRef.current) return;
                 
                 // 确保容器有物理尺寸，避免 xterm Agent助手计算抛错 (Section 4.5.11)
                 if (terminalRef.current.clientWidth === 0) {
