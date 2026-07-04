@@ -15,6 +15,7 @@ export interface ElectronAPI {
     // Agent 对话（替换 SSE）
     startAgentChat: (params: AgentChatParams) => Promise<string>; // 返回 streamId
     cancelAgentChat: (streamId: string) => void;
+    clearSession: (params: { userId: string; workspaceRoot?: string }) => Promise<{ success: boolean; error?: string }>;
     onAgentEvent: (callback: (event: AgentEvent) => void) => () => void; // 返回取消订阅函数
 
     // 文件操作（替换 REST /api/files/*）
@@ -186,6 +187,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Agent 对话
     startAgentChat: (params: AgentChatParams) => ipcRenderer.invoke('agent:chat', params),
     cancelAgentChat: (streamId: string) => ipcRenderer.send('agent:cancel', streamId),
+    clearSession: (params: { userId: string; workspaceRoot?: string }) => ipcRenderer.invoke('agent:clear', params),
     onAgentEvent: (callback: (event: AgentEvent) => void) => {
         const handler = (_event: IpcRendererEvent, data: AgentEvent) => callback(data);
         ipcRenderer.on('agent:event', handler);

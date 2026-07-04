@@ -848,14 +848,18 @@ export function useAgentSSE() {
         // 禁止在此使用 window.confirm —— Electron 中原生对话框关闭后会破坏渲染窗口的
         // 键盘焦点状态，导致输入框长时间无法聚焦（Chromium 已知 bug）。
         try {
-            if (!electronBridge.isElectron) {
+            if (electronBridge.isElectron) {
+                // Electron 模式：通过 IPC 调用主进程清空会话（含 TODO 持久化清理）
+                await electronBridge.clearSession({ userId: USER_ID, workspaceRoot });
+            } else {
+                // Web 模式：通过 HTTP API 清空会话
                 await fetch(`${API_BASE}/api/chat/clear`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ userId: USER_ID, workspaceRoot })
                 });
             }
-            // Electron 模式：仅清空本地 IndexedDB
+            // 清空本地 IndexedDB
             await db.chatHistory.where("workspaceRoot").equals(workspaceRoot).delete();
             setMessages([]);
             setInput("");

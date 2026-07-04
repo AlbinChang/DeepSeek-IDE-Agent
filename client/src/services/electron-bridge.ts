@@ -146,6 +146,11 @@ export const electronBridge = {
         });
     },
 
+    /** 清空会话（含 TODO 持久化清理） */
+    async clearSession(params: { userId: string; workspaceRoot?: string }): Promise<{ success: boolean; error?: string }> {
+        return callIpc('clearSession', [params]);
+    },
+
     // ═══ File Operations ═══
     async readFile(params: { filePath: string; startLine?: number; endLine?: number; root?: string }) {
         return callIpc('readFile', [params]);

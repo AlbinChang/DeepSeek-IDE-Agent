@@ -220,6 +220,7 @@ interface ElectronAPI {
     // Agent
     startAgentChat: (params: AgentChatParams) => Promise<string>;
     cancelAgentChat: (streamId: string) => void;
+    clearSession: (params: { userId: string; workspaceRoot?: string }) => Promise<{ success: boolean; error?: string }>;
     onAgentEvent: (callback: (event: AgentEvent) => void) => () => void;
 
     // Files

@@ -28,7 +28,9 @@ export class AgentChatComponent {
         agentService.clearSessionHistory(userId, root);
         if (root) {
             console.log(`${getTS()} [AgentChat] Clearing session history for user: ${userId} in workspace: ${root}`);
-            TodoService.clearAllTodos(root, userId).catch(() => {});
+            TodoService.clearAllTodos(root, userId).catch((err) => {
+                console.error(`${getTS()} [AgentChat] Failed to clear todos for user ${userId}:`, err);
+            });
             agentService.contextStore.updateContext(userId, { currentFile: null, selection: null, workspaceRoot: root }, root);
         }
         console.log(`${getTS()} [AgentChat] Session cleared for user: ${userId}`);
