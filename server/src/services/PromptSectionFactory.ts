@@ -29,6 +29,7 @@ import {
     UserPreferenceSection,
     IntentAlignmentSection,
     TodoPolicySection,
+    CodeDesignFlowSection,
     SharedContractsSection,
 } from '@/services/PromptSections.js';
 
@@ -46,6 +47,7 @@ export function createStandardBuilder(agentConfig: any): SystemPromptBuilder {
 
     // Static 区 — 会话生命周期内稳定不变（利于 KV Cache 命中）
     builder.register(new SharedContractsSection());
+    builder.register(new CodeDesignFlowSection());
     builder.register(new RoleSection(agentConfig));
     builder.register(new CapabilitiesSection(agentConfig));
     builder.register(new WorkspaceProfileSection());
