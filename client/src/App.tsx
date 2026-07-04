@@ -452,17 +452,18 @@ function App() {
                   )}
                 </div>
 
-                {/* 底部面板内容区 */}
+                {/* 底部面板内容区 — 使用 CSS 可见性控制，避免终端销毁重建 */}
                 <div className="flex-1 overflow-hidden min-h-0">
-                  {bottomPanelTab === 'terminal' ? (
+                  <div className={bottomPanelTab === 'terminal' ? '' : 'hidden'}>
                     <Suspense fallback={<PanelFallback label="Loading Terminal" />}>
                       <Terminal />
                     </Suspense>
-                  ) : (
+                  </div>
+                  <div className={bottomPanelTab === 'problems' ? '' : 'hidden'}>
                     <Suspense fallback={<PanelFallback label="Loading Problems" />}>
                       <ProblemList />
                     </Suspense>
-                  )}
+                  </div>
                 </div>
               </Panel>
             </PanelGroup>

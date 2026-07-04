@@ -19,6 +19,7 @@ export const Terminal: React.FC = () => {
     const isReadyRef = useRef<boolean>(true); // 修改：默认为 true，解决 E2E 测试和组件初次挂载时的显示延迟问题
     const lastDimsRef = useRef<{ cols: number, rows: number } | null>(null); // 新增：Resize 幂等校验
     const activeESRef = useRef<EventSource | null>(null); // 新增：单实例引用，防止多开导致的重复输出
+    const hasConnectedRef = useRef<boolean>(false); // 新增：防止延迟可见时重复调用 connectTerminal
 
     useEffect(() => {
         if (!terminalRef.current || !workspaceRoot) return;
@@ -254,6 +255,7 @@ export const Terminal: React.FC = () => {
         };
 
         let streamCleanup: (() => void) | undefined;
+        const bufferedData: string[] = [];
 
         const handleResize = () => {
             if (isDisposed || !terminalRef.current) return;
@@ -263,6 +265,34 @@ export const Terminal: React.FC = () => {
                 console.log('[Terminal] Container now visible, delayed open triggering...');
                 term.open(terminalRef.current);
                 xtermRef.current = term;
+                // 首次连接（仅一次），防止重复创建 PTY / SSE
+                if (!hasConnectedRef.current) {
+                    hasConnectedRef.current = true;
+                    try {
+                        fitAddon.fit();
+                        isReadyRef.current = true;
+                        if (bufferedData.length > 0) {
+                            bufferedData.forEach(d => { try { term.write(d); } catch (e) {} });
+                            bufferedData.length = 0;
+                        }
+                        const { cols, rows } = term;
+                        if (lastDimsRef.current?.cols !== cols || lastDimsRef.current?.rows !== rows) {
+                            lastDimsRef.current = { cols, rows };
+                            if (electronBridge.isElectron) {
+                                electronBridge.resizeTerminal(sessionId, cols, rows);
+                            } else {
+                                fetch(`${TERMINAL_HTTP_BASE}/terminal/resize`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ userId: USER_ID, sessionId, cols, rows, root: workspaceRoot })
+                                }).catch(err => console.error('[Terminal] Initial resize failed', err));
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[Terminal] Delayed init error:', e);
+                    }
+                    streamCleanup = connectTerminal();
+                }
             }
 
             if (!xtermRef.current) return;
@@ -338,6 +368,11 @@ export const Terminal: React.FC = () => {
             rafRef.current = requestAnimationFrame(handleResize);
         });
 
+        // 始终启动 ResizeObserver，确保容器从 display:none 变为可见时能触发 handleResize
+        if (terminalRef.current) {
+            resizeObserver.observe(terminalRef.current);
+        }
+
         if (terminalRef.current) {
             // 对齐 43.1: 工业级延迟挂载 (延迟 50ms 确保容器在 DOM 中已稳定且非 display:none)
             initOpenTimeoutRef.current = setTimeout(() => {
@@ -350,9 +385,10 @@ export const Terminal: React.FC = () => {
                     return;
                 }
 
+                // 防止 handleResize 中重复连接
+                hasConnectedRef.current = true;
                 term.open(terminalRef.current);
                 xtermRef.current = term;
-                resizeObserver.observe(terminalRef.current);
 
                 // 首次 fit
                 try {
@@ -387,8 +423,6 @@ export const Terminal: React.FC = () => {
                 streamCleanup = connectTerminal();
             }, 50);
         }
-
-        const bufferedData: string[] = [];
 
         // 监听全局终端数据事件 (由 Agent 执行工具触发，对齐 Section 4.1.5)
         const handleGlobalTerminalData = (e: any) => {
