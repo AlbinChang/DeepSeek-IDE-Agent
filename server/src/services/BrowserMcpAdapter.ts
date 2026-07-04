@@ -667,6 +667,7 @@ export class BrowserMcpAdapter {
         lines.push('- 典型调用：`save_webpage` 参数 `{ "url": "https://...", "outputDir": "articles" }`；批量下载多篇文章时逐篇调用即可。');
         lines.push('- `outputDir` 为**必填参数**：保存目录由你根据用户意图与工作区目录结构决定（用户指定了位置则严格遵从）；最终交付物禁止写入 .temp/。');
         lines.push('- 正文自动识别失败或提示过大时，传入 `selector` 参数指定正文根元素（如 `#content_views`）。');
+        lines.push('- **付费墙/登录墙**：返回值含 `accessRestricted: true` 时表示页面存在付费/登录限制、仅保存了可见部分。必须在回复中**明确告知用户**内容不完整及原因（禁止用"可能"等模糊表述），并建议用户自行登录该网站（或开通会员）阅读全文，或寻找其他免费转载来源；不要反复重试下载同一受限页面。');
         lines.push('- **禁止**用 `playwright__browser_take_screenshot` 全页截图代替文章内容下载——截图不可检索、不可复制、体积巨大，仅用于视觉留存。');
         lines.push('- **禁止**用 `playwright__browser_evaluate` 分段读取 HTML 再手工写文件——这会撑爆上下文且极易失败，直接调用 `save_webpage`。');
         lines.push('');

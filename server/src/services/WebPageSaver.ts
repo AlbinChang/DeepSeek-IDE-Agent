@@ -48,6 +48,15 @@ const NAVIGATE_TIMEOUT_MS = 125_000;
 /** 单次 evaluate 超时 */
 const EVALUATE_TIMEOUT_MS = 30_000;
 
+/**
+ * 可自动重试的提取中断特征：
+ * 真实案例——CSDN 等站点加载后触发客户端跳转，销毁执行上下文，
+ * browser_evaluate 报 "Execution context was destroyed, most likely because of a navigation"。
+ */
+const RETRYABLE_EXTRACT_RE = /Execution context was destroyed|because of a navigation|Cannot find context|Target (page|context|browser).*?closed|payload 取回不完整/i;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 /** 图片下载限制 */
 const MAX_IMAGES = 80;
 const IMAGE_FETCH_TIMEOUT_MS = 20_000;
@@ -85,6 +94,8 @@ interface ExtractedPayload {
     html: string;
     markdown: string;
     images: ExtractedImage[];
+    /** 访问限制识别结果（付费墙/登录墙/关注解锁），空串表示未检测到 */
+    restriction?: string;
 }
 
 // ============================================================
@@ -127,7 +138,7 @@ const EXTRACT_SCRIPT_PART2 = String.raw`;
         var candidates = USER_SELECTOR ? [USER_SELECTOR] : [
             'article', '#content_views', '#article_content', '.markdown-body',
             '#js_content', '.rich_media_content', '.article-content', '.post-content',
-            '.post_body', '.content-article', 'main'
+            '.post_body', '.content-article', '.J-articleContent', '.article-detail', 'main'
         ];
         var root = null;
         for (var ci = 0; ci < candidates.length; ci++) {
@@ -173,12 +184,12 @@ const EXTRACT_SCRIPT_PART2 = String.raw`;
         }
 
         // ---------- 3. 噪音清理 ----------
-        var killSel = 'script,style,link,noscript,iframe,frame,embed,object,form,button,input,select,textarea,canvas,video,audio,.pre-numbering,.hljs-button,.code-block-extension-header';
+        var killSel = 'script,style,link,noscript,iframe,frame,embed,object,form,button,input,select,textarea,canvas,video,audio,nav,footer,.pre-numbering,.hljs-button,.code-block-extension-header';
         var killNodes = clone.querySelectorAll(killSel);
         for (var ki = 0; ki < killNodes.length; ki++) {
             if (killNodes[ki].parentNode) killNodes[ki].parentNode.removeChild(killNodes[ki]);
         }
-        var noiseRe = /(comment|recommend|advert|adsbox|adsbygoogle|sidebar|related-|share-box|login-box|passport|subscribe-box|copy-btn|copy-code|clipboard)/i;
+        var noiseRe = /(comment|recommend|advert|adsbox|adsbygoogle|sidebar|related-|share-box|login-box|passport|subscribe-box|copy-btn|copy-code|clipboard|breadcrumb|navbar|topbar|toolbar|page-nav|site-nav)/i;
         var copyRe = /(copy-btn|copy-code|clipboard|hljs-button)/i;
         var noiseEls = clone.querySelectorAll('div,section,aside,ul,span,a');
         for (var ni = noiseEls.length - 1; ni >= 0; ni--) {
@@ -279,14 +290,39 @@ const EXTRACT_SCRIPT_PART2 = String.raw`;
 
         function inlineOf(node) { return inlineNodes(toArray(node.childNodes)); }
 
+        var KNOWN_LANGS = {
+            js: 1, jsx: 1, ts: 1, tsx: 1, javascript: 1, typescript: 1, java: 1, kotlin: 1,
+            groovy: 1, scala: 1, python: 1, py: 1, go: 1, rust: 1, c: 1, cpp: 1, csharp: 1,
+            cs: 1, php: 1, ruby: 1, swift: 1, dart: 1, xml: 1, html: 1, css: 1, scss: 1,
+            less: 1, json: 1, yaml: 1, yml: 1, toml: 1, ini: 1, properties: 1, sql: 1,
+            bash: 1, sh: 1, shell: 1, zsh: 1, powershell: 1, bat: 1, cmd: 1, dockerfile: 1,
+            makefile: 1, nginx: 1, http: 1, diff: 1, markdown: 1, md: 1, text: 1,
+            plaintext: 1, txt: 1, lua: 1, perl: 1, r: 1, matlab: 1, vue: 1, svelte: 1
+        };
+
+        // 归一化代码语言标识：清洗 CSDN 等平台的私有 class（如 code-snippet__js → js）
+        function normalizeLang(lang) {
+            if (!lang) return '';
+            lang = lang.toLowerCase();
+            if (KNOWN_LANGS[lang]) return lang;
+            var parts = lang.split(/[^a-z0-9+#]+/).filter(function (p) { return !!p; });
+            for (var pi = parts.length - 1; pi >= 0; pi--) {
+                if (KNOWN_LANGS[parts[pi]]) return parts[pi];
+            }
+            return parts.length === 1 ? parts[0] : '';
+        }
+
         function codeBlockMd(pre) {
             var codeEl = pre.querySelector('code') || pre;
             var cls = ((codeEl.getAttribute('class') || '') + ' ' + (pre.getAttribute('class') || ''));
             var lang = '';
             var m = cls.match(/language-([A-Za-z0-9#+_-]+)/) || cls.match(/(?:^|\s)lang-([A-Za-z0-9#+_-]+)/);
-            if (m) lang = m[1];
+            if (m) lang = normalizeLang(m[1]);
             var codeText = (codeEl.textContent || '').replace(/\u00a0/g, ' ').replace(/\n+$/, '');
-            return '\n' + FENCE + lang + '\n' + codeText + '\n' + FENCE + '\n';
+            // 代码内容本身含三反引号围栏时加长围栏，避免 Markdown 结构破坏
+            var fence = FENCE;
+            while (codeText.indexOf(fence) !== -1) fence += BT;
+            return '\n' + fence + lang + '\n' + codeText + '\n' + fence + '\n';
         }
 
         function listMd(node, depth) {
@@ -385,13 +421,29 @@ const EXTRACT_SCRIPT_PART2 = String.raw`;
         var markdown = blockChildren(clone, 0).replace(/\n{3,}/g, '\n\n').trim();
         var title = (doc.title || '').trim();
 
+        // ---------- 7. 访问限制检测（付费墙 / 登录墙 / 关注解锁） ----------
+        // 真实案例：CSDN 付费文章仅渲染约 20% 正文并显示 "解锁文章" 按钮，
+        // 静默保存会让用户误以为下载完整。检测到限制时仍保存可见部分，但显著提醒。
+        var restriction = '';
+        try {
+            var wallSel = '.hide-article-box, #btn-readmore, .article-hide-box, .pay-read, .pay-column-box, [class*="paywall"], [id*="paywall"], [class*="vip-mask"], [class*="unlock-box"]';
+            var wallEl = null;
+            try { wallEl = doc.querySelector(wallSel); } catch (e2) {}
+            if (wallEl) restriction = '命中付费/解锁遮罩元素';
+            var scanText = ((root.textContent) || '').slice(0, 200000);
+            var wallRe = /(解锁文章|解锁全文|付费阅读|付费内容|购买本篇|开通.{0,4}(VIP|会员)|会员专享|会员可见|登录后(阅读|查看|复制|继续)|登录.{0,8}阅读全文|关注.{0,10}阅读全文|订阅后(阅读|查看)|sign in to (read|continue)|subscribe to (read|continue|unlock)|members?.only)/i;
+            var wallMatch = scanText.match(wallRe);
+            if (wallMatch) restriction = (restriction ? restriction + '；' : '') + '正文区域出现 "' + wallMatch[0] + '"';
+        } catch (e3) {}
+
         var payload = JSON.stringify({
             ok: true,
             title: title,
             url: location.href,
             html: clone.innerHTML,
             markdown: markdown,
-            images: images
+            images: images,
+            restriction: restriction
         });
         window.__WEB_IDE_SAVE_PAGE__ = payload;
         return { ok: true, length: payload.length, title: title, imageCount: images.length };
@@ -576,9 +628,12 @@ function escapeHtml(text: string): string {
 }
 
 /** 生成离线可读的独立 HTML 文档 */
-function buildStandaloneHtml(title: string, sourceUrl: string, savedAt: string, bodyHtml: string): string {
+function buildStandaloneHtml(title: string, sourceUrl: string, savedAt: string, bodyHtml: string, restrictionNotice = ''): string {
     const safeTitle = escapeHtml(title);
     const safeUrl = escapeHtml(sourceUrl);
+    const noticeHtml = restrictionNotice
+        ? `\n<div style="color:#9a6700;font-weight:600;">⚠️ ${escapeHtml(restrictionNotice)}</div>`
+        : '';
     return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -603,7 +658,7 @@ h1, h2, h3 { line-height: 1.35; }
 <div class="save-meta">
 <div><strong>${safeTitle}</strong></div>
 <div>来源：<a href="${safeUrl}">${safeUrl}</a></div>
-<div>保存时间：${savedAt}（由 save_webpage 工具保存）</div>
+<div>保存时间：${savedAt}（由 save_webpage 工具保存）</div>${noticeHtml}
 </div>
 ${bodyHtml}
 </body>
@@ -662,50 +717,65 @@ export class WebPageSaver {
                 }
             }
 
-            // 2. 额外等待（动态渲染页面）
+            // 2–5. 提取管线（等待 → 滚动 → 页内提取 → 分块取回）
+            // 整体可重试：部分站点（如 CSDN）加载后触发客户端跳转销毁执行上下文，
+            // 首次失败后等待页面稳定再重试一次即可成功。
             const waitSeconds = Math.min(Math.max(Number(params.waitSeconds) || 0, 0), 30);
-            if (waitSeconds > 0) {
-                await evaluate(
-                    `() => new Promise(function (r) { setTimeout(function () { r(true); }, ${waitSeconds * 1000}); })`,
-                    (waitSeconds + 5) * 1000,
-                );
-            }
-
-            // 3. 滚动触发懒加载图片
-            if (includeImages) {
-                try { await evaluate(SCROLL_SCRIPT); } catch { warnings.push('懒加载滚动失败，部分图片可能未渲染真实地址。'); }
-            }
-
-            // 4. 页内提取（payload 暂存 window，只返回精简元数据）
-            const meta = await evaluate(buildExtractionScript(params.selector)) as
-                | { ok: true; length: number; title: string; imageCount: number }
-                | { ok: false; error: string }
-                | null;
-            if (!meta || typeof meta !== 'object' || (meta as any).ok !== true) {
-                return {
-                    status: 'error', step: 'extract',
-                    message: `正文提取失败: ${(meta as any)?.error || '未知原因'}。可尝试通过 selector 参数指定正文根元素。`,
-                };
-            }
-            const okMeta = meta as { ok: true; length: number; title: string; imageCount: number };
-            if (okMeta.length > MAX_PAYLOAD_CHARS) {
-                try { await evaluate(CLEANUP_SCRIPT); } catch {}
-                return {
-                    status: 'error', step: 'extract',
-                    message: `页面正文过大（${okMeta.length} 字符，上限 ${MAX_PAYLOAD_CHARS}）。请通过 selector 参数缩小正文范围。`,
-                };
-            }
-
-            // 5. 分块取回 payload（每块 60KB，规避 MCP 单次响应体积限制）
-            let payloadStr = '';
-            for (let start = 0; start < okMeta.length; start += CHUNK_SIZE) {
-                const chunk = await evaluate(
-                    `() => (window.${PAYLOAD_VAR} || '').slice(${start}, ${start + CHUNK_SIZE})`,
-                );
-                if (typeof chunk !== 'string') {
-                    throw new Error(`分块取回失败（offset=${start}）：返回类型 ${typeof chunk}`);
+            const runExtractionPipeline = async (): Promise<string> => {
+                if (waitSeconds > 0) {
+                    await evaluate(
+                        `() => new Promise(function (r) { setTimeout(function () { r(true); }, ${waitSeconds * 1000}); })`,
+                        (waitSeconds + 5) * 1000,
+                    );
                 }
-                payloadStr += chunk;
+
+                // 滚动触发懒加载图片
+                if (includeImages) {
+                    try { await evaluate(SCROLL_SCRIPT); } catch { warnings.push('懒加载滚动失败，部分图片可能未渲染真实地址。'); }
+                }
+
+                // 页内提取（payload 暂存 window，只返回精简元数据）
+                const meta = await evaluate(buildExtractionScript(params.selector)) as
+                    | { ok: true; length: number; title: string; imageCount: number }
+                    | { ok: false; error: string }
+                    | null;
+                if (!meta || typeof meta !== 'object' || (meta as any).ok !== true) {
+                    throw new Error(`正文提取失败: ${(meta as any)?.error || '未知原因'}。可尝试通过 selector 参数指定正文根元素。`);
+                }
+                const okMeta = meta as { ok: true; length: number; title: string; imageCount: number };
+                if (okMeta.length > MAX_PAYLOAD_CHARS) {
+                    try { await evaluate(CLEANUP_SCRIPT); } catch {}
+                    throw new Error(`页面正文过大（${okMeta.length} 字符，上限 ${MAX_PAYLOAD_CHARS}）。请通过 selector 参数缩小正文范围。`);
+                }
+
+                // 分块取回 payload（每块 60KB，规避 MCP 单次响应体积限制）
+                let payloadStr = '';
+                for (let start = 0; start < okMeta.length; start += CHUNK_SIZE) {
+                    const chunk = await evaluate(
+                        `() => (window.${PAYLOAD_VAR} || '').slice(${start}, ${start + CHUNK_SIZE})`,
+                    );
+                    if (typeof chunk !== 'string') {
+                        throw new Error(`分块取回失败（offset=${start}）：返回类型 ${typeof chunk}`);
+                    }
+                    payloadStr += chunk;
+                }
+                if (payloadStr.length !== okMeta.length) {
+                    throw new Error(`payload 取回不完整（实际 ${payloadStr.length} / 预期 ${okMeta.length} 字符），页面可能在提取过程中发生了跳转。`);
+                }
+                return payloadStr;
+            };
+
+            let payloadStr: string;
+            try {
+                payloadStr = await runExtractionPipeline();
+            } catch (err: any) {
+                const msg = String(err?.message || err);
+                if (!RETRYABLE_EXTRACT_RE.test(msg)) throw err;
+                // 页面跳转/上下文销毁 → 等待稳定后重试一次
+                console.warn(`${getTS()} [WebPageSaver] ⚠️ 提取中断（${msg.slice(0, 160)}），等待页面稳定后重试…`);
+                warnings.push('首次提取因页面跳转中断，已自动重试。');
+                await sleep(2_000);
+                payloadStr = await runExtractionPipeline();
             }
 
             // 6. 清理页面暂存变量
@@ -715,6 +785,11 @@ export class WebPageSaver {
             let { html, markdown } = payload;
             const title = payload.title || 'webpage';
             const sourceUrl = payload.url || params.url || '';
+
+            // 访问限制（付费墙/登录墙）：不阻断保存，但在交付物与返回值中显著提醒
+            const restrictionNotice = payload.restriction
+                ? `页面疑似存在付费墙/登录限制（${payload.restriction}），已保存当前可见部分，内容可能不完整。如需全文，请用户在自己的浏览器中登录该网站（或开通相应会员）后阅读，或寻找其他免费转载来源。`
+                : '';
 
             // 7. 准备输出目录与文件名（outDirAbs 已在参数校验阶段解析并通过越界防护）
             await fs.mkdir(outDirAbs, { recursive: true });
@@ -727,6 +802,7 @@ export class WebPageSaver {
                 const assetDirAbs = path.join(outDirAbs, assetDirName);
                 await fs.mkdir(assetDirAbs, { recursive: true });
                 const mapping = await downloadImages(payload.images, sourceUrl, assetDirAbs, imageStats, warnings);
+                let orphanCount = 0;
                 for (const [docUrl, localName] of mapping) {
                     const rel = `${assetDirName}/${localName}`;
                     markdown = markdown.split(docUrl).join(rel);
@@ -734,6 +810,21 @@ export class WebPageSaver {
                     // innerHTML 序列化会把 & 编码为 &amp;，需要额外替换转义形态
                     const escaped = docUrl.replace(/&/g, '&amp;');
                     if (escaped !== docUrl) html = html.split(escaped).join(rel);
+                    // 孤立图片清理：下载后未被正文任何形态引用的图片（如装饰小图标）直接删除
+                    if (!markdown.includes(rel) && !html.includes(rel)) {
+                        try {
+                            await fs.unlink(path.join(assetDirAbs, localName));
+                            imageStats.downloaded--;
+                            orphanCount++;
+                        } catch {}
+                    }
+                }
+                if (orphanCount > 0) {
+                    warnings.push(`已清理 ${orphanCount} 张未被正文引用的孤立图片。`);
+                }
+                // 全部图片都被清理时移除空资源目录
+                if (imageStats.downloaded === 0) {
+                    try { await fs.rmdir(assetDirAbs); } catch {}
                 }
             }
 
@@ -749,6 +840,7 @@ export class WebPageSaver {
                     '',
                     `> 来源：${sourceUrl}`,
                     `> 保存时间：${savedAt}（由 save_webpage 工具保存）`,
+                    ...(restrictionNotice ? [`> ⚠️ ${restrictionNotice}`] : []),
                     '',
                     '---',
                     '',
@@ -760,7 +852,7 @@ export class WebPageSaver {
             }
             if (format !== 'markdown') {
                 const htmlPath = path.join(outDirAbs, `${base}.html`);
-                await fs.writeFile(htmlPath, buildStandaloneHtml(title, sourceUrl, savedAt, html), 'utf-8');
+                await fs.writeFile(htmlPath, buildStandaloneHtml(title, sourceUrl, savedAt, html, restrictionNotice), 'utf-8');
                 savedFiles.html = toRel(htmlPath);
             }
             if (imageStats.downloaded > 0) {
@@ -769,7 +861,8 @@ export class WebPageSaver {
 
             console.log(
                 `${getTS()} [WebPageSaver] ✅ Saved "${title}" → ${Object.values(savedFiles).join(', ')} ` +
-                `(images: ${imageStats.downloaded}/${imageStats.total})`,
+                `(images: ${imageStats.downloaded}/${imageStats.total})` +
+                (restrictionNotice ? ' ⚠️ access-restricted' : ''),
             );
 
             return {
@@ -780,6 +873,8 @@ export class WebPageSaver {
                 markdownChars: format !== 'html' ? markdown.length : undefined,
                 htmlChars: format !== 'markdown' ? html.length : undefined,
                 images: imageStats,
+                accessRestricted: restrictionNotice ? true : undefined,
+                restrictionNotice: restrictionNotice || undefined,
                 warnings: warnings.length ? warnings : undefined,
             };
         } catch (err: any) {
@@ -804,9 +899,12 @@ export function buildSaveWebpageToolDefinition(
         description:
             '【网页完整下载 · 服务端直接落盘】将指定 url（或浏览器当前页面）的正文完整保存为 Markdown + 独立 HTML 文件，' +
             '并自动下载正文图片到本地、把图片引用改写为相对路径。内容在服务端组装写盘，不占用对话上下文，' +
-            '任意长度的长文都能无损保存。⚠️ outputDir 为必填参数，保存位置由你根据用户意图显式指定。' +
+            '任意长度的长文都能无损保存；页面跳转导致的提取中断会自动重试。' +
+            '⚠️ outputDir 为必填参数，保存位置由你根据用户意图显式指定。' +
             '需要"下载/保存/收藏网页文章（含图片）"时必须优先使用本工具；' +
-            '禁止用全页截图或 browser_evaluate 手工分段拷贝 HTML 代替。',
+            '禁止用全页截图或 browser_evaluate 手工分段拷贝 HTML 代替。' +
+            '返回值含 `accessRestricted: true` 时表示页面存在付费墙/登录限制、仅保存了可见部分：' +
+            '此时必须在回复中明确告知用户内容不完整及原因，并建议用户自行登录该网站阅读全文，不得隐瞒或模糊化表述。',
         parameters: {
             type: 'object',
             properties: {
