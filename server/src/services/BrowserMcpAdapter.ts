@@ -19,6 +19,7 @@ import { createRequire } from 'node:module';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { ToolDefinition } from '@/services/ToolManager.js';
+import { buildSaveWebpageToolDefinition } from '@/services/WebPageSaver.js';
 import { getBeijingLogTimePrefix } from '@/utils/TimeUtils.js';
 
 const getTS = () => getBeijingLogTimePrefix();
@@ -382,6 +383,12 @@ export class BrowserMcpAdapter {
             });
         }
 
+        // 复合工具：save_webpage（服务端聚合多次原生调用直接落盘，绕过 LLM 上下文体积限制）
+        // 依赖 browser_evaluate / browser_navigate 原生工具存在
+        if (state.tools.some((t) => t.name === 'browser_evaluate')) {
+            definitions.push(buildSaveWebpageToolDefinition(this, userId, workspaceRoot));
+        }
+
         console.log(`${getTS()} [BrowserMcpAdapter] Built ${definitions.length} Playwright bridge tool definitions`);
         return definitions;
     }
@@ -396,7 +403,7 @@ export class BrowserMcpAdapter {
         const state = this.getConnectionState(userId, workspaceRoot);
         if (!state || !state.connected) return [];
 
-        return state.tools.map((nativeTool) => {
+        const metadata = state.tools.map((nativeTool) => {
             const agentName = buildPlaywrightToolName(nativeTool.name);
             const description = this.buildToolDescription(nativeTool);
 
@@ -413,6 +420,20 @@ export class BrowserMcpAdapter {
                 },
             };
         });
+
+        if (state.tools.some((t) => t.name === 'browser_evaluate')) {
+            const saveDef = buildSaveWebpageToolDefinition(this, userId, workspaceRoot);
+            metadata.push({
+                type: 'function' as const,
+                function: {
+                    name: saveDef.name,
+                    description: saveDef.description,
+                    parameters: saveDef.parameters,
+                },
+            });
+        }
+
+        return metadata;
     }
 
     /**
@@ -504,6 +525,63 @@ export class BrowserMcpAdapter {
     }
 
     /**
+     * 直接调用 Playwright MCP 原生工具（供服务端复合工具编排使用，如 save_webpage）。
+     * 与 executeTool 的区别：
+     * - 返回原始文本（不做 formatResult 包装），供服务端解析
+     * - 失败时抛出异常（由复合工具统一捕获、汇总为精简摘要）
+     * - 支持自定义超时（导航类操作需要更长时间）
+     */
+    public async callNativeTool(
+        userId: string,
+        workspaceRoot: string,
+        nativeToolName: string,
+        args: Record<string, unknown>,
+        timeoutMs: number = DEFAULT_TOOL_TIMEOUT,
+    ): Promise<{ text: string; isError: boolean }> {
+        const key = BrowserMcpAdapter.sessionKey(userId, workspaceRoot);
+        let state = this.connections.get(key);
+
+        if (!state) {
+            throw new Error('Playwright MCP 适配器未初始化，请先初始化工作区');
+        }
+
+        if (!state.connected) {
+            if (state.errorCount < CIRCUIT_BREAKER_THRESHOLD) {
+                await this.connect(userId, workspaceRoot);
+                state = this.connections.get(key);
+            }
+            if (!state || !state.connected) {
+                throw new Error(`Playwright MCP 未连接（${state?.lastError || '未知原因'}）`);
+            }
+        }
+
+        try {
+            const result = await this.withTimeout(
+                state.client.callTool({ name: nativeToolName, arguments: args || {} }),
+                timeoutMs,
+            );
+
+            const res = result as Record<string, unknown>;
+            const textParts: string[] = [];
+            if (Array.isArray(res?.content)) {
+                for (const item of res.content as Array<Record<string, unknown>>) {
+                    if (item?.type === 'text' && typeof item.text === 'string') {
+                        textParts.push(item.text);
+                    }
+                }
+            }
+            return { text: textParts.join('\n'), isError: Boolean(res?.isError) };
+        } catch (err: any) {
+            state.errorCount += 1;
+            state.lastError = String(err?.message || err);
+            if (this.isConnectionError(err)) {
+                state.connected = false;
+            }
+            throw err;
+        }
+    }
+
+    /**
      * 格式化 MCP 工具返回结果
      */
     private formatResult(raw: unknown): unknown {
@@ -576,12 +654,21 @@ export class BrowserMcpAdapter {
             lines.push(`- **\`${agentName}\`**: ${desc}`);
         }
 
+        lines.push('- **`save_webpage`**: 【复合工具】将网页正文完整保存为 Markdown + 独立 HTML 并自动下载正文图片到本地（服务端直接落盘，内容不占用对话上下文）。');
         lines.push('');
         lines.push('**使用策略**：');
         lines.push('- 优先使用 `playwright__browser_snapshot` 获取页面可访问性快照，了解页面结构。');
         lines.push('- 使用 `playwright__browser_evaluate` 进行定向数据抽取（返回 JavaScript 表达式结果）。');
         lines.push('- 使用 `playwright__browser_take_screenshot` 仅用于视觉留存，不用于数据采集。');
         lines.push('- 交互前先获取最新快照确认元素引用（ref）仍然有效。');
+        lines.push('');
+        lines.push('**📥 网页完整保存 (FULL PAGE SAVE — save_webpage)**：');
+        lines.push('- 需要"下载/保存/收藏网页文章（含图片）"时，**必须**使用 `save_webpage` 复合工具：它在服务端完成正文提取 → 生成 Markdown + 独立 HTML → 下载正文图片并改写为本地相对路径，内容不经过对话上下文，任意长度长文都能完整保存。');
+        lines.push('- 典型调用：`save_webpage` 参数 `{ "url": "https://...", "outputDir": "articles" }`；批量下载多篇文章时逐篇调用即可。');
+        lines.push('- `outputDir` 为**必填参数**：保存目录由你根据用户意图与工作区目录结构决定（用户指定了位置则严格遵从）；最终交付物禁止写入 .temp/。');
+        lines.push('- 正文自动识别失败或提示过大时，传入 `selector` 参数指定正文根元素（如 `#content_views`）。');
+        lines.push('- **禁止**用 `playwright__browser_take_screenshot` 全页截图代替文章内容下载——截图不可检索、不可复制、体积巨大，仅用于视觉留存。');
+        lines.push('- **禁止**用 `playwright__browser_evaluate` 分段读取 HTML 再手工写文件——这会撑爆上下文且极易失败，直接调用 `save_webpage`。');
         lines.push('');
         lines.push('**本地文件预览 (LOCAL HTML FILE PREVIEW)**：');
         lines.push('- ✅ 支持通过 `file://` 协议打开本地 HTML 文件进行预览（已启用 `--allow-unrestricted-file-access`）。');
