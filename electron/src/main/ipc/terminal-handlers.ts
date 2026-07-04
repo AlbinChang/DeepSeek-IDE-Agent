@@ -32,7 +32,7 @@ interface TerminalSession {
 
 const terminalSessions = new Map<string, TerminalSession>();
 const MAX_OUTPUT_BUFFER = 500; // 最多保留 500 条输出
-const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 分钟超时
+const SESSION_TIMEOUT = 8 * 60 * 60 * 1000; // 8 小时超时：仅清理跨应用重启的废弃会话，不误杀工作中的终端
 
 // 定时清理过期会话
 setInterval(() => {
