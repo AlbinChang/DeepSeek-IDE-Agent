@@ -347,23 +347,43 @@ export class AgentChatComponent {
                         } catch (todoResetErr) {
                             console.warn(`${getTS()} [AgentChat] Failed to clear stale TODOs before re-iteration for user: ${userId}`, todoResetErr);
                         }
-                        // 关键策略：继续迭代前清空上一轮主Agent历史，避免旧工具轨迹污染新一轮决策。
-                        // 新一轮仅保留系统提示、固定用户意图，以及评估Agent输出的当前迭代指令。
-                        activeHistory = await prepareMessages([]);
-                        activeHistory.push({
-                            role: "system",
-                            content: [
-                                "评估Agent已完成本轮评估，结论：需要继续迭代优化，务必将评估报告的问题一一修复。",
-                                "默认采用原文件原路径的迭代修复模式：先读取现有目标文件，再在原文件上做最小必要修改。",
-                                "若评估报告已经列出 P1/P0/P2 等问题、目标文件路径和修复动作，视为本轮已有修复授权；不要询问用户是否确认、是否继续、是否采用建议。",
-                                "只有报告明确缺少用户输入、外部素材、授权或主观取舍时，才可以请求用户介入。",
-                                "禁止为了绕开问题而新建 V2/V3/新版/修正版/最终版 等平行交付文件；除非用户明确要求多版本，否则只能收敛到原目标文件。",
-                                "在开始修复前，基于评估报告的问题清单创建本轮修复 TODO；每个 TODO 必须绑定原目标文件路径和具体问题，不要重新发明与原产物脱节的方案。",
-                                "请严格依据评估报告执行下一轮 TODO 规划、原文件修复与复查。",
-                                "评估结论正文如下：",
-                                evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)",
-                            ].join("\n"),
-                        });
+                        // 【修复评估闭环断裂】关键策略变更：
+                        // 旧方案使用 prepareMessages([]) 保留了原始用户意图（如「帮我探索文章」）作为 pinned user message，
+                        // 导致第二轮 Agent 同时收到「探索」（user 消息）和「修复」（system 消息）两个冲突信号，
+                        // 模型天然倾向执行 user 消息中的指令 → 造成评估反馈闭环断裂。
+                        //
+                        // 新方案：不使用 prepareMessages（避免注入原始用户意图），而是构建专用的修复 user 消息，
+                        // 将评估报告的修复要求作为本轮 user 指令，让模型以最高优先级执行修复。
+                        const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId);
+                        const evaluatorReport = evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)";
+                        activeHistory = [
+                            { role: "system", content: iterSystemPrompt },
+                            {
+                                role: "user",
+                                content: [
+                                    "【迭代修复模式 — 评估Agent 已发现问题，请立即在原文件上逐项修复】",
+                                    "",
+                                    "你已经执行过一轮用户原始需求（见下方「原始需求」），并产出了交付物。",
+                                    "评估Agent 已完成审查并发现若干问题。你当前处于迭代修复阶段，不是首次执行。",
+                                    "",
+                                    "你的唯一任务：解析下方评估报告中的「可直接修复清单」，按 P0 → P1 → P2 → P3 优先级，",
+                                    "在原目标文件上逐项执行最小必要修改。每修复一项，更新 TODO 状态。",
+                                    "",
+                                    "铁律：",
+                                    "- 禁止把原始需求当作新任务重新规划、重新执行、重新生成",
+                                    "- 禁止新建 V2/V3/修正版/最终版 等平行文件绕开问题",
+                                    "- 必须先读取目标文件，再在原文件上局部替换/插入/删除",
+                                    "- 评估报告已给出文件路径和修复动作 → 视为已有修复授权，直接修复，不要询问用户",
+                                    "- 只有缺少外部素材、账号授权或无法定位目标文件时，才可请求用户介入",
+                                    "",
+                                    "【原始需求（仅供参考，不要重新执行）】",
+                                    firstUserIntent,
+                                    "",
+                                    "【评估Agent 的评估报告 — 包含可直接修复清单】",
+                                    evaluatorReport,
+                                ].join("\n"),
+                            },
+                        ];
                         emit({ type: "stage", content: "评估完成：需要继续迭代，主Agent正在根据评估报告执行下一轮..." });
                         continue;
                     }
