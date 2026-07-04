@@ -523,12 +523,18 @@ export function useAgentSSE() {
 
                     // annotations
                     for (const ann of annotations) {
+                        // 预计算工具参数 JSON 字符串，避免 JSX render 中每帧重复 JSON.stringify
+                        const precomputedArgsJson = ann.method === 'tool/call' && ann.params?.args
+                            ? JSON.stringify(ann.params.args, null, 2)
+                            : undefined;
                         last.parts.push({
                             id: createClientId(),
                             type: 'annotation',
                             content: ann.content,
                             method: ann.method,
-                            params: ann.params,
+                            params: precomputedArgsJson !== undefined
+                                ? { ...ann.params, _argsJson: precomputedArgsJson }
+                                : ann.params,
                             timestamp: Date.now(),
                         });
                     }

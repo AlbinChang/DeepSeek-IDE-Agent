@@ -47,6 +47,8 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
     markdownComponentsTextOnly,
 }) => {
     const parts = message.parts && message.parts.length > 0 ? message.parts : [];
+    // 流式传输中且当前消息尚未完成 → 文本用纯文本渲染，避免 ReactMarkdown 每 16ms 重新解析整棵 AST
+    const isStreaming = isLoading && isLastItem && !message.isFinal;
 
     return (
         <div className={'message-item flex flex-col ' + (message.role === 'user' ? 'items-end' : 'items-start')}>
@@ -96,6 +98,11 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                                     <div className='text-white/85 leading-normal font-sans text-[8pt] whitespace-pre-wrap'>
                                         {part.content || ''}
                                     </div>
+                                ) : isStreaming ? (
+                                    /* 流式传输中：纯文本渲染，跳过 ReactMarkdown AST 解析，消除每帧卡顿 */
+                                    <div className='text-white/85 leading-normal font-sans text-[8pt] whitespace-pre-wrap break-words'>
+                                        {part.content || ''}
+                                    </div>
                                 ) : (
                                     <div className='prose prose-invert prose-emerald prose-sm max-w-none text-white/85 leading-normal font-sans text-[8pt]'>
                                         <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsWithCode}>
@@ -117,7 +124,8 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                                             </div>
                                         )}
                                         <pre className='text-[7pt] text-white/40 overflow-x-auto font-mono'>
-                                            {JSON.stringify(part.params?.args, null, 2)}
+                                            {/* 使用预处理后的 JSON 字符串，避免 render 中重复 JSON.stringify */}
+                                            {part.params?._argsJson ?? ''}
                                         </pre>
                                     </div>
                                 </div>
@@ -150,6 +158,10 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                 ) : (
                     message.role === 'user' ? (
                         <div className='text-white/85 leading-normal font-sans text-[8pt] whitespace-pre-wrap'>
+                            {message.content || ''}
+                        </div>
+                    ) : isStreaming ? (
+                        <div className='text-white/85 leading-normal font-sans text-[8pt] whitespace-pre-wrap break-words'>
                             {message.content || ''}
                         </div>
                     ) : (
@@ -429,26 +441,33 @@ export const AgentChat: React.FC = () => {
         }
 
         isProgrammaticScrollRef.current = true;
-        if (bottomAnchorRef.current) {
-            bottomAnchorRef.current.scrollIntoView({ block: 'end', inline: 'nearest' });
-        }
+        // 仅使用 scrollTop 设置，避免 scrollIntoView 触发额外的强制回流
         container.scrollTop = container.scrollHeight;
         lastScrollHeightRef.current = container.scrollHeight;
-        window.requestAnimationFrame(() => {
+        // 延迟重置标记，防止 handleScroll 误判
+        requestAnimationFrame(() => {
             isProgrammaticScrollRef.current = false;
         });
     };
 
-    const scheduleScrollToBottom = (force: boolean = false) => {
-        if (scrollRafRef.current) {
-            window.cancelAnimationFrame(scrollRafRef.current);
-        }
+    // 记录上次滚动调度时间戳，流式期间每 ~50ms 最多滚动一次，避免布局颠簸
+    const lastScrollScheduleRef = useRef<number>(0);
+    const SCROLL_THROTTLE_MS = 50;
 
-        scrollRafRef.current = window.requestAnimationFrame(() => {
+    const scheduleScrollToBottom = (force: boolean = false) => {
+        const now = performance.now();
+        // 非强制模式下，流式传输期间限制滚动频率
+        if (!force && isLoading && now - lastScrollScheduleRef.current < SCROLL_THROTTLE_MS) {
+            return;
+        }
+        lastScrollScheduleRef.current = now;
+
+        if (scrollRafRef.current) {
+            cancelAnimationFrame(scrollRafRef.current);
+        }
+        scrollRafRef.current = requestAnimationFrame(() => {
             scrollToBottom(force);
-            scrollRafRef.current = window.requestAnimationFrame(() => {
-                scrollToBottom(force);
-            });
+            scrollRafRef.current = null;
         });
     };
 
@@ -511,7 +530,7 @@ export const AgentChat: React.FC = () => {
     useEffect(() => {
         return () => {
             if (scrollRafRef.current) {
-                window.cancelAnimationFrame(scrollRafRef.current);
+                cancelAnimationFrame(scrollRafRef.current);
             }
         };
     }, []);
