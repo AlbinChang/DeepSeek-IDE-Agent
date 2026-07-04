@@ -24,7 +24,7 @@ export function useInlineCompletions({ editor, debounce, providerId, modelId }: 
         }
 
         const provider: monaco.languages.InlineCompletionsProvider = {
-            provideInlineCompletions: async (_model, _position, _context, token) => {
+            provideInlineCompletions: async (_model, _position, _context, _token) => {
                 // 桌面应用模式：行内补全暂由 Agent 对话承载，后续接入 CompletionIPC
                 return null;
             },

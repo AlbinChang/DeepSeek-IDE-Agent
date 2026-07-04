@@ -151,6 +151,16 @@ export const Terminal: React.FC = () => {
                         // ignore write errors
                     }
                 });
+
+                // [Fix] 注册键盘输入监听，将用户按键转发给 node-pty。
+                // 此前该分支缺少 term.onData 绑定（仅 SSE/Web 分支有），
+                // 导致 electronBridge.isElectron 恒为 true 时终端完全无法交互输入。
+                if (!dataDisposer) {
+                    dataDisposer = term.onData((data) => {
+                        processInputBufferForClear(data);
+                        electronBridge.sendTerminalInput(sessionId, data);
+                    });
+                }
                 
                 return () => {
                     outputCleanup();

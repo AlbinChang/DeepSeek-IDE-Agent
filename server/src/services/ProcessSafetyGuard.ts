@@ -15,9 +15,13 @@
  * - 用户偏好：禁止自动降级模型、进程安全防护
  */
 
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import * as fs from 'fs';
 import { config as globalConfig } from '@/config/index.js';
+
+/** 异步版 shell exec，替代 execSync，避免阻塞 Electron 主进程/Node 事件循环 */
+const execAsync = promisify(exec);
 
 // ============================================================================
 // 类型定义
@@ -172,7 +176,9 @@ export class ProcessSafetyGuard {
         this.isWin = process.platform === 'win32';
         this.selfPid = process.pid;
         this.refreshProtectedPorts();
-        this.refreshChildPids();
+        // refreshChildPids 已改为异步（内部走 execAsync）；构造函数无法 await，
+        // 这里仅做尽力而为的初始预热，evaluate() 每次执行前都会重新刷新一次。
+        void this.refreshChildPids();
     }
 
     static getInstance(): ProcessSafetyGuard {
@@ -241,11 +247,11 @@ export class ProcessSafetyGuard {
     /**
      * 刷新当前 Agent 进程的子进程 PID 列表
      */
-    refreshChildPids(): void {
+    async refreshChildPids(): Promise<void> {
         try {
             if (this.isWin) {
                 // Windows: wmic process where (ParentProcessId={selfPid}) get ProcessId
-                const raw = execSync(
+                const { stdout: raw } = await execAsync(
                     `wmic process where (ParentProcessId=${this.selfPid}) get ProcessId /format:csv`,
                     { timeout: 5000, encoding: 'utf8' }
                 );
@@ -259,7 +265,7 @@ export class ProcessSafetyGuard {
                 }
             } else {
                 // Linux/macOS: pgrep -P {selfPid}
-                const raw = execSync(`pgrep -P ${this.selfPid} 2>/dev/null || echo ''`, {
+                const { stdout: raw } = await execAsync(`pgrep -P ${this.selfPid} 2>/dev/null || echo ''`, {
                     timeout: 5000, encoding: 'utf8'
                 });
                 for (const line of raw.trim().split('\n')) {
@@ -289,13 +295,13 @@ export class ProcessSafetyGuard {
      * 查询指定 PID 绑定的网络端口
      * 跨平台实现：Windows netstat / Linux ss
      */
-    queryPidPortBindings(pid: number): PidPortBinding[] {
+    async queryPidPortBindings(pid: number): Promise<PidPortBinding[]> {
         const bindings: PidPortBinding[] = [];
         try {
             if (this.isWin) {
-                bindings.push(...this.queryPidPortsWindows(pid));
+                bindings.push(...await this.queryPidPortsWindows(pid));
             } else {
-                bindings.push(...this.queryPidPortsLinux(pid));
+                bindings.push(...await this.queryPidPortsLinux(pid));
             }
         } catch {
             // 查询失败时保守处理：不返回绑定信息
@@ -306,10 +312,10 @@ export class ProcessSafetyGuard {
     /**
      * Windows: 使用 netstat -ano 查询 PID 端口绑定
      */
-    private queryPidPortsWindows(pid: number): PidPortBinding[] {
+    private async queryPidPortsWindows(pid: number): Promise<PidPortBinding[]> {
         const bindings: PidPortBinding[] = [];
         try {
-            const raw = execSync('netstat -ano', { timeout: 8000, encoding: 'utf8' });
+            const { stdout: raw } = await execAsync('netstat -ano', { timeout: 8000, encoding: 'utf8' });
             const pidStr = String(pid);
             // netstat -ano 格式：
             //   TCP    0.0.0.0:3001           0.0.0.0:0              LISTENING       12345
@@ -346,20 +352,20 @@ export class ProcessSafetyGuard {
     /**
      * Linux/macOS: 使用 ss / lsof 查询 PID 端口绑定
      */
-    private queryPidPortsLinux(pid: number): PidPortBinding[] {
+    private async queryPidPortsLinux(pid: number): Promise<PidPortBinding[]> {
         const bindings: PidPortBinding[] = [];
         try {
             // 优先使用 ss (iproute2)，比 netstat 更快
             let raw: string;
             try {
-                raw = execSync(`ss -tlnp 2>/dev/null | grep "pid=${pid}"`, {
+                ({ stdout: raw } = await execAsync(`ss -tlnp 2>/dev/null | grep "pid=${pid}"`, {
                     timeout: 5000, encoding: 'utf8'
-                });
+                }));
             } catch {
                 // ss 不可用时降级到 lsof
-                raw = execSync(`lsof -i -P -n 2>/dev/null | grep "^\\S*\\s*${pid}\\s"`, {
+                ({ stdout: raw } = await execAsync(`lsof -i -P -n 2>/dev/null | grep "^\\S*\\s*${pid}\\s"`, {
                     timeout: 5000, encoding: 'utf8'
-                });
+                }));
             }
 
             for (const line of raw.split('\n')) {
@@ -403,10 +409,10 @@ export class ProcessSafetyGuard {
     /**
      * 查询当前有哪些 PID 在监听受保护端口
      */
-    queryProtectedPortPids(): Map<number, number[]> {
+    async queryProtectedPortPids(): Promise<Map<number, number[]>> {
         const portToPids = new Map<number, number[]>();
         for (const port of this.protectedPorts) {
-            const pids = this.queryPortPids(port);
+            const pids = await this.queryPortPids(port);
             if (pids.length > 0) {
                 portToPids.set(port, pids);
             }
@@ -417,11 +423,11 @@ export class ProcessSafetyGuard {
     /**
      * 查询监听指定端口的所有 PID
      */
-    private queryPortPids(port: number): number[] {
+    private async queryPortPids(port: number): Promise<number[]> {
         const pids = new Set<number>();
         try {
             if (this.isWin) {
-                const raw = execSync('netstat -ano', { timeout: 8000, encoding: 'utf8' });
+                const { stdout: raw } = await execAsync('netstat -ano', { timeout: 8000, encoding: 'utf8' });
                 const portStr = `:${port}`;
                 for (const line of raw.split('\n')) {
                     if (!line.includes(portStr)) continue;
@@ -436,7 +442,7 @@ export class ProcessSafetyGuard {
                 }
             } else {
                 try {
-                    const raw = execSync(`ss -tlnp 2>/dev/null | grep ":${port}\\b"`, {
+                    const { stdout: raw } = await execAsync(`ss -tlnp 2>/dev/null | grep ":${port}\\b"`, {
                         timeout: 5000, encoding: 'utf8'
                     });
                     for (const line of raw.split('\n')) {
@@ -448,7 +454,7 @@ export class ProcessSafetyGuard {
                     }
                 } catch {
                     // 退化到 lsof
-                    const raw = execSync(`lsof -i :${port} -t 2>/dev/null`, {
+                    const { stdout: raw } = await execAsync(`lsof -i :${port} -t 2>/dev/null`, {
                         timeout: 5000, encoding: 'utf8'
                     });
                     for (const line of raw.split('\n')) {
@@ -471,12 +477,12 @@ export class ProcessSafetyGuard {
      * 检查 PID 是否属于系统关键服务
      * 返回：{ isSystemService, processName }
      */
-    checkSystemProcess(pid: number): { isSystemService: boolean; processName: string; reason: string } {
+    async checkSystemProcess(pid: number): Promise<{ isSystemService: boolean; processName: string; reason: string }> {
         try {
             if (this.isWin) {
-                return this.checkSystemProcessWindows(pid);
+                return await this.checkSystemProcessWindows(pid);
             } else {
-                return this.checkSystemProcessLinux(pid);
+                return await this.checkSystemProcessLinux(pid);
             }
         } catch {
             // 无法确认时，PID < 100 保守视为系统进程
@@ -487,12 +493,13 @@ export class ProcessSafetyGuard {
         }
     }
 
-    private checkSystemProcessWindows(pid: number): { isSystemService: boolean; processName: string; reason: string } {
+    private async checkSystemProcessWindows(pid: number): Promise<{ isSystemService: boolean; processName: string; reason: string }> {
         try {
             // tasklist 精确查询
-            const raw = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
+            const { stdout: rawOut } = await execAsync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
                 timeout: 5000, encoding: 'utf8'
-            }).trim();
+            });
+            const raw = rawOut.trim();
 
             if (!raw) {
                 return { isSystemService: false, processName: '', reason: '进程不存在或无法查询' };
@@ -512,10 +519,11 @@ export class ProcessSafetyGuard {
 
             // 通过 wmic 检查是否是 Windows 服务
             try {
-                const svcRaw = execSync(
+                const { stdout: svcRawOut } = await execAsync(
                     `wmic service where (ProcessId=${pid}) get Name /format:csv 2>nul`,
                     { timeout: 3000, encoding: 'utf8' }
-                ).trim();
+                );
+                const svcRaw = svcRawOut.trim();
                 const svcLines = svcRaw.split('\n').filter(l => l.trim() && !l.startsWith('Node,'));
                 if (svcLines.length > 1) {
                     return {
@@ -532,10 +540,11 @@ export class ProcessSafetyGuard {
         }
     }
 
-    private checkSystemProcessLinux(pid: number): { isSystemService: boolean; processName: string; reason: string } {
+    private async checkSystemProcessLinux(pid: number): Promise<{ isSystemService: boolean; processName: string; reason: string }> {
         try {
             // 读取 /proc/{pid}/comm
-            const comm = fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim().toLowerCase();
+            const commRaw = await fs.promises.readFile(`/proc/${pid}/comm`, 'utf8');
+            const comm = commRaw.trim().toLowerCase();
 
             // 系统关键进程名检测
             if (LINUX_SYSTEM_PROCESSES.has(comm)) {
@@ -550,7 +559,7 @@ export class ProcessSafetyGuard {
             if (pid < LINUX_SYSTEM_PID_THRESHOLD) {
                 // 检查是否是内核线程（/proc/{pid}/stat 中 PPID=2 即 kthreadd 的子进程）
                 try {
-                    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+                    const stat = await fs.promises.readFile(`/proc/${pid}/stat`, 'utf8');
                     const statParts = stat.split(' ');
                     const ppid = parseInt(statParts[3], 10);
                     if (ppid === 2) {
@@ -571,7 +580,7 @@ export class ProcessSafetyGuard {
 
             // 检查是否属于 systemd 服务
             try {
-                const cgroup = fs.readFileSync(`/proc/${pid}/cgroup`, 'utf8');
+                const cgroup = await fs.promises.readFile(`/proc/${pid}/cgroup`, 'utf8');
                 if (cgroup.includes('system.slice/') && !cgroup.includes('user.slice')) {
                     return {
                         isSystemService: true,
@@ -598,7 +607,7 @@ export class ProcessSafetyGuard {
     /**
      * 解析命令字符串，提取杀进程的意图信息
      */
-    parseKillIntent(command: string): KillAttempt | null {
+    async parseKillIntent(command: string): Promise<KillAttempt | null> {
         let matchedTool = '';
         let isMassKill = false;
 
@@ -665,7 +674,7 @@ export class ProcessSafetyGuard {
                 if (port > 0) {
                     this.addUniqueNumber(targetPorts, port);
                     // 查询该端口对应的 PID
-                    const portPids = this.queryPortPids(port);
+                    const portPids = await this.queryPortPids(port);
                     for (const pid of portPids) {
                         this.addUniqueNumber(targetPids, pid);
                     }
@@ -684,7 +693,7 @@ export class ProcessSafetyGuard {
                 const port = parseInt(match[1], 10);
                 if (port > 0) {
                     this.addUniqueNumber(targetPorts, port);
-                    const portPids = this.queryPortPids(port);
+                    const portPids = await this.queryPortPids(port);
                     for (const pid of portPids) {
                         this.addUniqueNumber(targetPids, pid);
                     }
@@ -716,7 +725,7 @@ export class ProcessSafetyGuard {
                 const port = parseInt(fuserMatch[1], 10);
                 if (port > 0) {
                     this.addUniqueNumber(targetPorts, port);
-                    const portPids = this.queryPortPids(port);
+                    const portPids = await this.queryPortPids(port);
                     for (const pid of portPids) {
                         this.addUniqueNumber(targetPids, pid);
                     }
@@ -787,15 +796,15 @@ export class ProcessSafetyGuard {
      * 对 kill 尝试进行综合安全性裁决
      * @returns KillVerdict — allowed 为 true 表示安全可执行
      */
-    evaluate(command: string): KillVerdict {
+    async evaluate(command: string): Promise<KillVerdict> {
         this.refreshProtectedPorts();
-        this.refreshChildPids();
+        await this.refreshChildPids();
         const blockedPids: number[] = [];
         const blockedPorts: number[] = [];
         const reasons: string[] = [];
 
         // === 第 0 层：检测是否有 kill 意图 ===
-        const killIntent = this.parseKillIntent(command);
+        const killIntent = await this.parseKillIntent(command);
         if (!killIntent) {
             return { allowed: true, reason: '非进程终止命令', blockedPids: [], blockedPorts: [] };
         }
@@ -857,7 +866,7 @@ export class ProcessSafetyGuard {
         // === 第 3 层：逐个检查每个目标 PID ===
         for (const pid of killIntent.targetPids) {
             // 3a. 系统服务检测
-            const sysCheck = this.checkSystemProcess(pid);
+            const sysCheck = await this.checkSystemProcess(pid);
             if (sysCheck.isSystemService) {
                 blockedPids.push(pid);
                 reasons.push(sysCheck.reason);
@@ -874,7 +883,7 @@ export class ProcessSafetyGuard {
             }
 
             // 3c. 受保护端口绑定检测
-            const bindings = this.queryPidPortBindings(pid);
+            const bindings = await this.queryPidPortBindings(pid);
             const protectedBindings = bindings.filter(b => this.protectedPorts.includes(b.port));
             if (protectedBindings.length > 0) {
                 blockedPids.push(pid);
@@ -917,13 +926,13 @@ export class ProcessSafetyGuard {
      * 在命令执行前进行一次安全检查
      * 如果命令试图杀死受保护的进程，直接抛出错误
      */
-    guard(command: string): void {
+    async guard(command: string): Promise<void> {
         const portUsageVerdict = this.evaluateProtectedPortUsage(command);
         if (!portUsageVerdict.allowed) {
             throw new Error(portUsageVerdict.reason);
         }
 
-        const verdict = this.evaluate(command);
+        const verdict = await this.evaluate(command);
         if (!verdict.allowed) {
             throw new Error(verdict.reason);
         }

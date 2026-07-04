@@ -50,7 +50,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   const [renameInput, setRenameInput] = useState('');
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
-  const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceEntry[]>([]);
+  const [, setRecentWorkspaces] = useState<RecentWorkspaceEntry[]>([]);
   const pollInFlightRef = useRef(false);
   const pollAbortRef = useRef<AbortController | null>(null);
 

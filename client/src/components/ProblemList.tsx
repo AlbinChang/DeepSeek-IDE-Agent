@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { AlertCircle, AlertTriangle, Info, X, ChevronDown, FileText, FolderOpen } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Info, X, ChevronDown, FileText } from 'lucide-react';
 import { useAgentContext, type ProblemEntry } from '@/providers/AgentContext';
 
 /**
@@ -18,12 +18,6 @@ const SEVERITY_ICON: Record<ProblemEntry['severity'], React.ReactNode> = {
     error: <AlertCircle size={12} className="text-red-400 shrink-0" />,
     warning: <AlertTriangle size={12} className="text-yellow-400 shrink-0" />,
     info: <Info size={12} className="text-blue-400 shrink-0" />,
-};
-
-const SEVERITY_LABEL: Record<ProblemEntry['severity'], string> = {
-    error: '错误',
-    warning: '警告',
-    info: '信息',
 };
 
 const SEVERITY_ORDER: Record<ProblemEntry['severity'], number> = {

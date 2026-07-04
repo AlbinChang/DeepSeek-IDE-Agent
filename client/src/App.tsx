@@ -13,7 +13,7 @@ import { Header } from '@/components/Header';
 import { StatusBar } from '@/components/StatusBar';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
 import { useAgentContext } from '@/providers/AgentContext';
-import { USER_ID, GATEWAY_EVENT, LEGACY_WS_EVENT } from '@/config';
+import { GATEWAY_EVENT, LEGACY_WS_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 import { getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspaceEntry } from '@/services/RecentWorkspaces';
 
@@ -189,11 +189,6 @@ function App() {
 
   // 初始同步：状态监控与事件总线 (对齐 15.0 Hot Reattach)
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const rootFromUrl = params.get('root');
-    const rootHint = workspaceRoot || rootFromUrl;
-    const urlSuffix = rootHint ? `&root=${encodeURIComponent(rootHint)}` : '';
-
     // Delay connect by one tick so transient cleanup/re-run cycles do not
     // create CONNECT->CLOSE races before handshake is established.
     let isDisposed = false;

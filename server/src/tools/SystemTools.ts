@@ -262,7 +262,7 @@ export class SystemTools {
         //   - 检测目标 PID 是否绑定 Agent 核心端口（从三个 server_conf.json 读取）
         //   - 检测目标 PID 是否为系统关键服务进程
         //   - 跨平台支持：Windows (netstat/tasklist) + Linux/macOS (ss/lsof/proc)
-        ProcessSafetyGuard.getInstance().guard(command);
+        await ProcessSafetyGuard.getInstance().guard(command);
 
         // 1.5 指令回显 (对齐 Terminal.md Section 4.0)
         if (userId) {

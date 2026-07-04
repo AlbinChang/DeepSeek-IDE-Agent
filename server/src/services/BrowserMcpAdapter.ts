@@ -215,11 +215,23 @@ export class BrowserMcpAdapter {
             }
 
             // 3. 创建 stdio transport + MCP client
+            //
+            // 注意：Electron 单进程架构下 AgentService/BrowserMcpAdapter 直接运行在
+            // Electron 主进程中，此时 process.execPath 指向 electron.exe 而非 node.exe。
+            // 若不加区分地把 electron.exe 当作 Node 可执行文件去启动 Playwright MCP CLI，
+            // Electron 会尝试把该 CLI 脚本当作应用入口加载（而不是以纯 Node 脚本运行），
+            // 导致 MCP stdio 握手失败 → state.connected 恒为 false → 系统提示词报告
+            // "浏览器自动化工具当前不可用"。
+            // 设置 ELECTRON_RUN_AS_NODE=1 强制子进程以纯 Node 进程运行；在非 Electron
+            // 环境（如独立 server 进程）下该变量被忽略，不影响行为。
             const transport = new StdioClientTransport({
                 command: process.execPath,
                 args: cliArgs,
                 cwd: workspaceRoot,
-                env: process.env as Record<string, string>,
+                env: {
+                    ...(process.env as Record<string, string>),
+                    ELECTRON_RUN_AS_NODE: '1',
+                },
             });
 
             const client = new Client(

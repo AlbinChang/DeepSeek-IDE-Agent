@@ -33,16 +33,14 @@ describe('tool description deduplication contracts', () => {
         expect(countOccurrences(fileEdit, 'oldText')).toBeLessThanOrEqual(8);
     });
 
-    it('keeps todo and browser_mcp_call descriptions concise', async () => {
+    it('keeps todo descriptions concise', async () => {
+        // 注：browser_mcp_call 已随 2026.05 BrowserMcpAdapter 重构移除（见 BrowserAutomationTools.ts 顶部
+        // @deprecated 说明）。浏览器工具现由 Playwright MCP 动态桥接为 playwright__* 工具，
+        // 描述文本在运行时由 BrowserMcpAdapter.buildToolDescription() 动态生成，不再是可静态扫描的源码字面量。
         const todoSource = await readSource('tools/TodoTools.ts');
-        const browserSource = await readSource('tools/BrowserAutomationTools.ts');
-
         const appendTodo = extractToolDescription(todoSource, 'append_todo');
-        const browserMcpCall = extractToolDescription(browserSource, 'browser_mcp_call');
 
         expect(appendTodo.length).toBeLessThanOrEqual(900);
-        expect(browserMcpCall.length).toBeLessThanOrEqual(900);
         expect(countOccurrences(appendTodo, 'operation')).toBeLessThanOrEqual(3);
-        expect(countOccurrences(browserMcpCall, 'browser_evaluate')).toBeLessThanOrEqual(2);
     });
 });

@@ -49,7 +49,7 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFi
             maxResults: 100,
           });
           setResults(result.success && Array.isArray(result.results)
-            ? result.results.map(r => r.path)
+            ? result.results.map((r: { path: string }) => r.path)
             : []);
         } else {
           // Web 模式：通过 REST API

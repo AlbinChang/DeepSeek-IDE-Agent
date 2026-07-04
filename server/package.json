@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch --max-old-space-size=4096 --exclude \"test-workspace-*\" --exclude \"test-ws-*\" src/index.ts",
     "build": "tsc && tsc-alias && npm run postbuild",
-    "postbuild": "xcopy /E /I /Y src\\config dist\\config",
+    "postbuild": "xcopy /E /I /Y src\\config dist\\config && xcopy /E /I /Y src\\workers dist\\workers",
     "start": "node --max-old-space-size=4096 dist/index.js",
     "test": "vitest run"
   },

@@ -1,6 +1,8 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { spawn } from 'child_process';
+import { Worker } from 'node:worker_threads';
+import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { PathUtils } from '@/utils/PathUtils.js';
 import { FileIO } from '@/utils/FileIO.js';
@@ -28,6 +30,88 @@ interface CommandRunResult {
     stdout: string;
     stderr: string;
     timedOut: boolean;
+}
+
+// ============================================================
+// TypeScript 项目级类型检查 Worker（避免 ts.createProgram 阻塞主线程/事件循环）
+// ============================================================
+
+interface TsCheckWorkerResult {
+    ok: boolean;
+    hasTsconfig?: boolean;
+    tsconfigBasename?: string;
+    diagnostics?: SyntaxCheckDiagnostic[];
+    errorCount?: number;
+    warnCount?: number;
+    error?: string;
+}
+
+let tsCheckWorker: Worker | null = null;
+let tsCheckReqSeq = 0;
+const tsCheckPending = new Map<number, {
+    resolve: (value: TsCheckWorkerResult) => void;
+    reject: (err: Error) => void;
+    timer: NodeJS.Timeout;
+}>();
+
+function failAllPendingTsChecks(err: Error): void {
+    for (const pending of tsCheckPending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(err);
+    }
+    tsCheckPending.clear();
+}
+
+function getTsCheckWorker(): Worker {
+    if (tsCheckWorker) return tsCheckWorker;
+
+    const workerUrl = new URL('../workers/typescriptProgramCheck.worker.mjs', import.meta.url);
+    const worker = new Worker(fileURLToPath(workerUrl));
+
+    worker.on('message', (msg: any) => {
+        const pending = tsCheckPending.get(msg?.requestId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        tsCheckPending.delete(msg.requestId);
+        pending.resolve(msg);
+    });
+    worker.on('error', (err) => {
+        failAllPendingTsChecks(err instanceof Error ? err : new Error(String(err)));
+        tsCheckWorker = null;
+    });
+    worker.on('exit', () => {
+        failAllPendingTsChecks(new Error('TypeScript 类型检查 worker 已退出'));
+        tsCheckWorker = null;
+    });
+
+    worker.unref(); // 不阻止进程退出
+    tsCheckWorker = worker;
+    return worker;
+}
+
+/**
+ * 在独立 worker 线程中执行 TypeScript 项目级类型检查（ts.createProgram），
+ * 避免这类 CPU 密集型同步计算阻塞 Electron 主进程 / Node 主事件循环。
+ */
+function runTsProgramCheckInWorker(fullPath: string, timeoutMs: number): Promise<TsCheckWorkerResult> {
+    return new Promise((resolve, reject) => {
+        let worker: Worker;
+        try {
+            worker = getTsCheckWorker();
+        } catch (err: any) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+            return;
+        }
+
+        const requestId = ++tsCheckReqSeq;
+        const timer = setTimeout(() => {
+            tsCheckPending.delete(requestId);
+            reject(new Error(`TypeScript 项目级类型检查超时(${timeoutMs}ms)`));
+        }, timeoutMs);
+
+        tsCheckPending.set(requestId, { resolve, reject, timer });
+        worker.postMessage({ requestId, fullPath });
+    });
 }
 
 export class SyntaxCheckService {
@@ -239,43 +323,23 @@ export class SyntaxCheckService {
 
         try {
             // ── 增强策略：优先搜索 tsconfig.json 做项目级类型检查 ──
-            const dir = path.dirname(fullPath);
-            const tsconfigPath = ts.findConfigFile(dir, ts.sys.fileExists);
+            // 🚀 项目级类型检查（ts.createProgram — 等价于 tsc --noEmit）在独立 worker 线程执行，
+            // 避免这类 CPU 密集型同步计算阻塞 Electron 主线程 / Node 主事件循环（详见 typescriptProgramCheck.worker.mjs）。
+            const workerResult = await runTsProgramCheckInWorker(fullPath, this.COMMAND_TIMEOUT_MS);
 
-            if (tsconfigPath) {
-                // 🚀 项目级类型检查（ts.createProgram — 等价于 tsc --noEmit）
-                const configFile = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
-                const parsedConfig = ts.parseJsonConfigFileContent(
-                    configFile.config, ts.sys, dir, {}, tsconfigPath
-                );
-                // 确保目标文件在编译范围内
-                const fileNames = parsedConfig.fileNames.length > 0
-                    ? parsedConfig.fileNames
-                    : [fullPath];
-                const program = ts.createProgram({
-                    rootNames: fileNames.includes(fullPath) ? fileNames : [...fileNames, fullPath],
-                    options: { ...parsedConfig.options, noEmit: true },
-                    host: ts.createCompilerHost(parsedConfig.options),
-                });
+            if (!workerResult.ok) {
+                return {
+                    path: relativePath,
+                    extension: ext,
+                    checker: 'ts-program',
+                    status: 'error',
+                    message: workerResult.error || 'TypeScript 项目级类型检查执行失败。',
+                    durationMs: Date.now() - start
+                };
+            }
 
-                const allDiagnostics = ts.getPreEmitDiagnostics(program)
-                    .filter((d: any) => {
-                        if (!d.file) return false;
-                        return path.normalize(d.file.fileName) === path.normalize(fullPath);
-                    });
-
-                const diagnostics = allDiagnostics
-                    .slice(0, 30)
-                    .map((d: any) => {
-                        const pos = d.file?.getLineAndCharacterOfPosition?.(d.start || 0) || { line: 0, character: 0 };
-                        const message = ts.flattenDiagnosticMessageText(d.messageText, '\n');
-                        const severity = d.category === 0 ? 'warning' : 'error';
-                        return {
-                            line: pos.line + 1,
-                            column: pos.character + 1,
-                            message: severity === 'warning' ? `[warning] ${message}` : message
-                        } as SyntaxCheckDiagnostic;
-                    });
+            if (workerResult.hasTsconfig) {
+                const diagnostics: SyntaxCheckDiagnostic[] = workerResult.diagnostics || [];
 
                 if (diagnostics.length === 0) {
                     return {
@@ -283,13 +347,13 @@ export class SyntaxCheckService {
                         extension: ext,
                         checker: 'ts-program',
                         status: 'ok',
-                        message: `TypeScript 项目级类型检查通过（tsconfig: ${path.basename(tsconfigPath)}）。`,
+                        message: `TypeScript 项目级类型检查通过（tsconfig: ${workerResult.tsconfigBasename}）。`,
                         durationMs: Date.now() - start
                     };
                 }
 
-                const errorCount = allDiagnostics.filter((d: any) => d.category !== 0).length;
-                const warnCount = allDiagnostics.filter((d: any) => d.category === 0).length;
+                const errorCount = workerResult.errorCount || 0;
+                const warnCount = workerResult.warnCount || 0;
                 return {
                     path: relativePath,
                     extension: ext,

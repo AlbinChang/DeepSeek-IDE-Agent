@@ -138,6 +138,10 @@ export class ToolManager {
         const schemaType = Array.isArray(schema.type) ? schema.type[0] : schema.type;
         const label = path || '参数';
 
+        if (Array.isArray(schema.enum) && schema.enum.length > 0 && !schema.enum.includes(value)) {
+            issues.push(`${label} 必须是以下枚举值之一: ${schema.enum.join(', ')}`);
+        }
+
         if (schemaType === 'object') {
             if (typeof value !== 'object' || value === null || Array.isArray(value)) {
                 issues.push(`${label} 应为 object`);

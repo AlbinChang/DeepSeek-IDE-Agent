@@ -52,9 +52,9 @@ interface AgentContextType {
     todos: any[];
     setTodos: (todos: any[]) => void;
     /** 诊断问题列表（语法/类型检查结果，由文件写入后自动填充） */
-    problems: DiagnosticEntry[];
-    setProblems: (problems: DiagnosticEntry[]) => void;
-    addProblems: (entries: DiagnosticEntry[]) => void;
+    problems: ProblemEntry[];
+    setProblems: (problems: ProblemEntry[]) => void;
+    addProblems: (entries: ProblemEntry[]) => void;
     clearProblems: () => void;
 }
 
