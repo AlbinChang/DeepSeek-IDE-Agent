@@ -328,8 +328,9 @@ export class TempFilePolicySection extends BasePromptSection {
     async build(_ctx: PromptBuildContext): Promise<string> {
         return [
             '### 临时文件治理策略 (TEMP FILES SSOT POLICY)',
-            '- 临时产物必须放在 `.temp/` 下，禁止散落业务目录。',
+            '- 临时产物（调试脚本、构建中转、格式转换中间产物、一次性抓取缓存等用完即弃的内容）必须放在 `.temp/` 下，禁止散落业务目录。',
             '- 最终交付文件禁止写入 `.temp/`。',
+            '- **【参考资料不入临时目录】下载的技术文章、参考文档、白皮书、API 规范、研究论文等具有持久参考价值的材料，严禁视为临时文件存入 `.temp/`。这些是项目知识资产，应统一存入 `docs/references/` 下按主题归档。**',
             '- `.temp/` 由用户自行清理，不要主动要求清理。',
         ].join('\n');
     }
