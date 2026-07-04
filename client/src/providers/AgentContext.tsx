@@ -2,6 +2,7 @@
 import type { ReactNode } from 'react';
 import { USER_ID, API_BASE } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
+import { addRecentWorkspace } from '@/services/RecentWorkspaces';
 
 export interface ModelProviderConfig {
     id: string;
@@ -197,6 +198,13 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
             }
         };
         initSettings();
+    }, [workspaceRoot]);
+
+    // 记录最近打开的工作区（仅在 workspaceRoot 有效时）
+    useEffect(() => {
+        if (workspaceRoot) {
+            addRecentWorkspace(workspaceRoot);
+        }
     }, [workspaceRoot]);
 
     // 同步配置到后端Agent助手服务

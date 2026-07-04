@@ -2,6 +2,7 @@ import axios from 'axios';
 import { API_BASE, USER_ID } from '@/config';
 import { disconnectWorkspaceConnections } from '@/services/WorkspaceConnectionService';
 import { electronBridge } from '@/services/electron-bridge';
+import { addRecentWorkspace } from '@/services/RecentWorkspaces';
 
 let switchQueue: Promise<void> = Promise.resolve();
 let latestSwitchToken = 0;
@@ -98,7 +99,12 @@ export async function switchWorkspace(
                 root = (res?.data?.workspaceRoot || requestedPath) as string;
             }
             const confirmedRoot = await waitForWorkspaceStatus(root);
-            return { status: 'success', workspaceRoot: confirmedRoot || root };
+            const finalRoot = confirmedRoot || root;
+            // 记录到最近工作区列表
+            if (finalRoot) {
+                addRecentWorkspace(finalRoot);
+            }
+            return { status: 'success', workspaceRoot: finalRoot };
         }
 
         if (electronBridge.isElectron) {

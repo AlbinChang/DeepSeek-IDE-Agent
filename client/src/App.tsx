@@ -1,7 +1,7 @@
 ﻿import { useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react';
 import { 
   Files, Box, Cpu, HardDrive, Terminal as TerminalIcon, 
-  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2
+  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2, Clock, X, FolderOpen
 } from 'lucide-react';
 import { 
   Panel, 
@@ -15,6 +15,7 @@ import { switchWorkspace } from '@/services/WorkspaceSwitchService';
 import { useAgentContext } from '@/providers/AgentContext';
 import { USER_ID, GATEWAY_EVENT, LEGACY_WS_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
+import { getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspaceEntry } from '@/services/RecentWorkspaces';
 
 // 拖拽分割线组件 (对齐 工业级交互规范)
 const ResizeHandle = ({ className = '', id }: { className?: string; id?: string }) => (
@@ -61,6 +62,7 @@ function App() {
   const [workspaceSwitchInput, setWorkspaceSwitchInput] = useState('');
   const [workspaceSwitchError, setWorkspaceSwitchError] = useState<string | null>(null);
   const workspaceSwitchInputRef = useRef<HTMLInputElement>(null);
+  const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceEntry[]>([]);
 
   // 处理文件切换并记录历史 (对齐 3.1 节)
   const navigateToFile = useCallback((file: string, updateHistory = true) => {
@@ -161,10 +163,12 @@ function App() {
     return () => clearTimeout(timer);
   }, []);
 
-  // 工作区切换弹窗：自动聚焦输入框
+  // 工作区切换弹窗：自动聚焦输入框 + 加载最近工作区
   useEffect(() => {
     if (workspaceSwitchModal === 'input') {
       const timer = setTimeout(() => workspaceSwitchInputRef.current?.focus(), 50);
+      // 加载最近工作区列表
+      setRecentWorkspaces(getRecentWorkspaces());
       return () => clearTimeout(timer);
     }
   }, [workspaceSwitchModal]);
@@ -475,6 +479,85 @@ function App() {
                   />
                   {workspaceSwitchError && (
                     <p className="mt-2 text-xs text-red-400">{workspaceSwitchError}</p>
+                  )}
+
+                  {/* 最近打开的工作区 */}
+                  {recentWorkspaces.length > 0 && (
+                    <div className="mt-4">
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <Clock size={11} className="text-white/35" />
+                        <span className="text-[10px] text-white/35 uppercase tracking-wider">最近打开的工作区</span>
+                      </div>
+                      <div className="max-h-[160px] overflow-y-auto space-y-0.5 custom-scrollbar-thin">
+                        {recentWorkspaces.map((entry) => (
+                          <div
+                            key={entry.path}
+                            className="flex items-center gap-2 px-2 py-1.5 rounded group hover:bg-white/5 cursor-pointer transition-colors"
+                            onClick={() => {
+                              setWorkspaceSwitchInput(entry.path);
+                              setWorkspaceSwitchError(null);
+                            }}
+                            title={entry.path}
+                          >
+                            <FolderOpen size={12} className="text-white/25 shrink-0 group-hover:text-white/50 transition-colors" />
+                            <span className="text-[11px] text-white/60 truncate flex-1 group-hover:text-white/80 transition-colors">
+                              {entry.path}
+                            </span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeRecentWorkspace(entry.path);
+                                setRecentWorkspaces(getRecentWorkspaces());
+                              }}
+                              className="opacity-0 group-hover:opacity-60 hover:!opacity-100 p-0.5 rounded hover:bg-white/10 transition-all shrink-0"
+                              title="从列表中移除"
+                            >
+                              <X size={10} className="text-white/50" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-1.5 text-right">
+                        <button
+                          onClick={() => {
+                            if (electronBridge.isElectron) {
+                              electronBridge.selectWorkspace().then((selectedPath) => {
+                                if (selectedPath) {
+                                  setWorkspaceSwitchInput(selectedPath);
+                                  setWorkspaceSwitchError(null);
+                                }
+                              }).catch(() => {});
+                            }
+                          }}
+                          className="text-[9px] text-white/30 hover:text-white/60 transition-colors uppercase tracking-wider"
+                        >
+                          浏览文件夹...
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {recentWorkspaces.length === 0 && (
+                    <div className="mt-4">
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <Clock size={11} className="text-white/20" />
+                        <span className="text-[10px] text-white/20 uppercase tracking-wider">暂无最近工作区记录</span>
+                      </div>
+                      {electronBridge.isElectron && (
+                        <button
+                          onClick={() => {
+                            electronBridge.selectWorkspace().then((selectedPath) => {
+                              if (selectedPath) {
+                                setWorkspaceSwitchInput(selectedPath);
+                                setWorkspaceSwitchError(null);
+                              }
+                            }).catch(() => {});
+                          }}
+                          className="text-[9px] text-white/30 hover:text-white/60 transition-colors uppercase tracking-wider"
+                        >
+                          浏览文件夹...
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
                 <div className="flex justify-end gap-2 px-5 pb-4">

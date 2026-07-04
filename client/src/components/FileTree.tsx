@@ -2,13 +2,14 @@
 import { createPortal } from 'react-dom';
 import { 
   File, Folder, ChevronRight, ChevronDown, 
-  Loader2, Lock, FolderPlus, Compass, Copy, Trash2, AlertTriangle, Pencil
+  Loader2, Lock, FolderPlus, Compass, Copy, Trash2, AlertTriangle, Pencil, Clock, X, FolderOpen
 } from 'lucide-react';
 import axios from 'axios';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
 import { useAgentContext } from '@/providers/AgentContext';
 import { API_BASE, GATEWAY_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
+import { getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspaceEntry } from '@/services/RecentWorkspaces';
 
 interface FileNode {
   name: string;
@@ -49,6 +50,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   const [renameInput, setRenameInput] = useState('');
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceEntry[]>([]);
   const pollInFlightRef = useRef(false);
   const pollAbortRef = useRef<AbortController | null>(null);
 
@@ -784,6 +786,59 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
                         placeholder="D:/my-project"
                       />
                     </div>
+
+                    {/* 最近打开的工作区 */}
+                    {(() => {
+                      const recents = getRecentWorkspaces();
+                      if (recents.length === 0) return null;
+                      return (
+                        <div>
+                          <div className="flex items-center gap-1.5 mb-1.5">
+                            <Clock size={10} className="text-white/30" />
+                            <span className="text-[8px] text-white/30 uppercase tracking-wider">最近打开</span>
+                          </div>
+                          <div className="max-h-[130px] overflow-y-auto space-y-0.5 custom-scrollbar-thin">
+                            {recents.map((entry) => (
+                              <div
+                                key={entry.path}
+                                className="flex items-center gap-1.5 px-2 py-1 rounded group hover:bg-white/5 cursor-pointer transition-colors"
+                                onClick={() => setInitPathInput(entry.path)}
+                                title={entry.path}
+                              >
+                                <FolderOpen size={11} className="text-white/25 shrink-0 group-hover:text-white/50 transition-colors" />
+                                <span className="text-[10px] text-white/55 truncate flex-1 group-hover:text-white/75 transition-colors">
+                                  {entry.path}
+                                </span>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    removeRecentWorkspace(entry.path);
+                                    setRecentWorkspaces(getRecentWorkspaces());
+                                  }}
+                                  className="opacity-0 group-hover:opacity-50 hover:!opacity-100 p-0.5 rounded hover:bg-white/10 transition-all shrink-0"
+                                  title="移除"
+                                >
+                                  <X size={9} className="text-white/40" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {electronBridge.isElectron && (
+                      <button
+                        onClick={() => {
+                          electronBridge.selectWorkspace().then((selectedPath) => {
+                            if (selectedPath) setInitPathInput(selectedPath);
+                          }).catch(() => {});
+                        }}
+                        className="text-[9px] text-white/25 hover:text-white/50 transition-colors uppercase tracking-wider text-left"
+                      >
+                        📁 浏览文件夹...
+                      </button>
+                    )}
                     <div className="flex gap-2">
                       <button 
                         onClick={() => setIsInitModalOpen(false)}
