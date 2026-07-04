@@ -67,6 +67,10 @@ export interface ElectronAPI {
     getAppInfo: () => Promise<AppInfo>;
     revealInExplorer: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     onSystemEvent: (callback: (event: SystemEvent) => void) => () => void;
+
+    // 诊断
+    getDiagnostics: (params: { filePath: string }) => Promise<DiagnosticsResult>;
+    getDiagnosticsBatch: (params: { filePaths: string[] }) => Promise<DiagnosticsResult[]>;
 }
 
 // ── 参数/结果类型 ──
@@ -158,6 +162,25 @@ interface SystemEvent {
     payload?: any;
 }
 
+interface DiagnosticEntry {
+    line?: number;
+    column?: number;
+    message: string;
+    severity: 'error' | 'warning' | 'info';
+    code?: string;
+}
+
+interface DiagnosticsResult {
+    success: boolean;
+    filePath: string;
+    extension: string;
+    checker: string;
+    passed: boolean;
+    summary: string;
+    diagnostics: DiagnosticEntry[];
+    durationMs: number;
+}
+
 // ── 暴露 API 到渲染进程 ──
 contextBridge.exposeInMainWorld('electronAPI', {
     // Agent 对话
@@ -235,6 +258,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.on('system:event', handler);
         return () => ipcRenderer.removeListener('system:event', handler);
     },
+
+    // 诊断
+    getDiagnostics: (params: { filePath: string }) => ipcRenderer.invoke('diagnostics:get', params),
+    getDiagnosticsBatch: (params: { filePaths: string[] }) => ipcRenderer.invoke('diagnostics:batch', params),
 } satisfies ElectronAPI);
 
 // TypeScript 类型声明：让渲染进程可以访问 window.electronAPI

@@ -197,6 +197,25 @@ interface SystemEvent {
     payload?: any;
 }
 
+interface DiagnosticEntry {
+    line?: number;
+    column?: number;
+    message: string;
+    severity: 'error' | 'warning' | 'info';
+    code?: string;
+}
+
+interface DiagnosticsResult {
+    success: boolean;
+    filePath: string;
+    extension: string;
+    checker: string;
+    passed: boolean;
+    summary: string;
+    diagnostics: DiagnosticEntry[];
+    durationMs: number;
+}
+
 interface ElectronAPI {
     // Agent
     startAgentChat: (params: AgentChatParams) => Promise<string>;
@@ -251,6 +270,10 @@ interface ElectronAPI {
     getAppInfo: () => Promise<AppInfo>;
     revealInExplorer: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     onSystemEvent: (callback: (event: SystemEvent) => void) => () => void;
+
+    // Diagnostics
+    getDiagnostics: (params: { filePath: string }) => Promise<DiagnosticsResult>;
+    getDiagnosticsBatch: (params: { filePaths: string[] }) => Promise<DiagnosticsResult[]>;
 }
 
 declare global {

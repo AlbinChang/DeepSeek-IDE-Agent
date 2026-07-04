@@ -1,7 +1,7 @@
 ﻿import { useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react';
 import { 
   Files, Box, Cpu, HardDrive, Terminal as TerminalIcon, 
-  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2, Clock, X, FolderOpen
+  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2, Clock, X, FolderOpen, AlertCircle
 } from 'lucide-react';
 import { 
   Panel, 
@@ -41,6 +41,7 @@ const AgentChat = lazy(() => import('@/components/AgentChat').then((mod) => ({ d
 const SourceControl = lazy(() => import('@/components/SourceControl').then((mod) => ({ default: mod.SourceControl })));
 const FileEditor = lazy(() => import('@/components/FileEditor').then((mod) => ({ default: mod.FileEditor })));
 const SearchPanel = lazy(() => import('@/components/SearchPanel').then((mod) => ({ default: mod.SearchPanel })));
+const ProblemList = lazy(() => import('@/components/ProblemList').then((mod) => ({ default: mod.ProblemList })));
 
 const PanelFallback = ({ label }: { label: string }) => (
   <div className="h-full w-full flex items-center justify-center text-[10px] font-semibold tracking-[0.22em] uppercase text-white/35 bg-black/30">
@@ -55,7 +56,8 @@ function App() {
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(-1);
   const [activeSidebarView, setActiveSidebarView] = useState<'explorer' | 'git' | 'search' | 'extensions' | 'todo'>('explorer');
-  const { workspaceRoot, setWorkspaceRoot } = useAgentContext();
+  const [bottomPanelTab, setBottomPanelTab] = useState<'terminal' | 'problems'>('terminal');
+  const { workspaceRoot, setWorkspaceRoot, problems } = useAgentContext();
   const workspaceRootRef = useRef<string | null>(workspaceRoot);
   const [isSwitchingWorkspace, setIsSwitchingWorkspace] = useState(false);
   const [workspaceSwitchModal, setWorkspaceSwitchModal] = useState<'hidden' | 'confirm' | 'input' | 'switching'>('hidden');
@@ -135,6 +137,18 @@ function App() {
     activeFileRef.current = activeFile;
     window.dispatchEvent(new CustomEvent('ui:file:active', { detail: { activeFile } }));
   }, [activeFile]);
+
+  // 监听 Problems 面板的文件跳转请求
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.filePath) {
+        handleFileSelect(detail.filePath);
+      }
+    };
+    window.addEventListener('ui:file:open', handler);
+    return () => window.removeEventListener('ui:file:open', handler);
+  }, [handleFileSelect]);
 
   useEffect(() => {
     workspaceRootRef.current = workspaceRoot;
@@ -391,17 +405,56 @@ function App() {
               <HorizontalResizeHandle />
 
               <Panel defaultSize={25} minSize={10} className="bg-[#020202] flex flex-col shrink-0 z-20 min-h-0">
-                <div className="h-[20px] bg-[#080808] flex items-center px-3 text-[8px] font-black uppercase border-b border-white/20 text-white gap-2 tracking-[0.2em]">
-                  <TerminalIcon size={9} className="text-white" /> 终端 (TERMINAL) <span className="text-white/80 font-mono">/ tty_main</span>
-                  <div className="ml-auto flex items-center gap-1.5 opacity-100">
-                    <div className="w-1.5 h-1.5 rounded-full bg-white/60" />
-                    <span className="text-[7px]">就绪 (READY)</span>
-                  </div>
+                {/* 底部面板 Tab 栏 */}
+                <div className="h-[24px] bg-[#0a0a0a] flex items-center border-b border-white/10 shrink-0">
+                  {[
+                    { id: 'terminal' as const, icon: TerminalIcon, label: '终端' },
+                    { id: 'problems' as const, icon: AlertCircle, label: '问题' },
+                  ].map((tab) => {
+                    const isActive = bottomPanelTab === tab.id;
+                    const errorCount = tab.id === 'problems' ? problems.filter(p => p.severity === 'error').length : 0;
+                    const warnCount = tab.id === 'problems' ? problems.filter(p => p.severity === 'warning').length : 0;
+                    return (
+                      <button
+                        key={tab.id}
+                        onClick={() => setBottomPanelTab(tab.id)}
+                        className={`h-full px-3 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-wider transition-colors border-b-[1.5px] shrink-0 ${
+                          isActive
+                            ? 'text-white border-white/80 bg-white/[0.04]'
+                            : 'text-white/35 border-transparent hover:text-white/60 hover:bg-white/[0.02]'
+                        }`}
+                      >
+                        <tab.icon size={11} className={isActive ? 'text-white/90' : 'text-white/35'} />
+                        <span>{tab.label}</span>
+                        {tab.id === 'problems' && problems.length > 0 && (
+                          <span className="text-[8px] ml-0.5">
+                            {errorCount > 0 && <span className="text-red-400">({errorCount})</span>}
+                            {errorCount === 0 && warnCount > 0 && <span className="text-yellow-400/70">({warnCount})</span>}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  <div className="flex-1" />
+                  {bottomPanelTab === 'terminal' && (
+                    <div className="flex items-center gap-1.5 px-2 opacity-60">
+                      <div className="w-1.5 h-1.5 rounded-full bg-white/60" />
+                      <span className="text-[7px] text-white/60">就绪</span>
+                    </div>
+                  )}
                 </div>
+
+                {/* 底部面板内容区 */}
                 <div className="flex-1 overflow-hidden min-h-0">
-                  <Suspense fallback={<PanelFallback label="Loading Terminal" />}>
-                    <Terminal />
-                  </Suspense>
+                  {bottomPanelTab === 'terminal' ? (
+                    <Suspense fallback={<PanelFallback label="Loading Terminal" />}>
+                      <Terminal />
+                    </Suspense>
+                  ) : (
+                    <Suspense fallback={<PanelFallback label="Loading Problems" />}>
+                      <ProblemList />
+                    </Suspense>
+                  )}
                 </div>
               </Panel>
             </PanelGroup>

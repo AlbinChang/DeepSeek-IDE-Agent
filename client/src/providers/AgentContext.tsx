@@ -4,6 +4,21 @@ import { USER_ID, API_BASE } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 import { addRecentWorkspace } from '@/services/RecentWorkspaces';
 
+/**
+ * 前端诊断条目（与 electron.d.ts 中 DiagnosticEntry 对齐，
+ * 额外携带文件路径和时间戳用于 Problems 面板展示）
+ */
+export interface ProblemEntry {
+    filePath: string;       // 工作区相对路径
+    line?: number;
+    column?: number;
+    message: string;
+    severity: 'error' | 'warning' | 'info';
+    code?: string;
+    checker?: string;       // 检查器名称（如 "ts-program"、"json-parse"）
+    timestamp: number;      // Date.now()
+}
+
 export interface ModelProviderConfig {
     id: string;
     name: string;
@@ -36,6 +51,11 @@ interface AgentContextType {
     setWorkspaceRoot: (path: string | null) => void;
     todos: any[];
     setTodos: (todos: any[]) => void;
+    /** 诊断问题列表（语法/类型检查结果，由文件写入后自动填充） */
+    problems: DiagnosticEntry[];
+    setProblems: (problems: DiagnosticEntry[]) => void;
+    addProblems: (entries: DiagnosticEntry[]) => void;
+    clearProblems: () => void;
 }
 
 const AgentContext = createContext<AgentContextType | undefined>(undefined);
@@ -132,6 +152,35 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         return localStorage.getItem('agent-workspace-root');
     });
     const [todos, setTodos] = useState<any[]>([]);
+    const [problems, setProblemsState] = useState<ProblemEntry[]>([]);
+
+    const setProblems = useCallback((entries: ProblemEntry[]) => {
+        setProblemsState(entries);
+    }, []);
+
+    const addProblems = useCallback((entries: ProblemEntry[]) => {
+        setProblemsState(prev => {
+            // 去重：同一文件的同一行同一消息只保留一条
+            const existing = new Map<string, ProblemEntry>();
+            for (const p of prev) {
+                const key = `${p.filePath}:${p.line ?? 0}:${p.message}`;
+                existing.set(key, p);
+            }
+            for (const e of entries) {
+                const key = `${e.filePath}:${e.line ?? 0}:${e.message}`;
+                existing.set(key, e); // 新条目覆盖旧的同位置条目
+            }
+            return Array.from(existing.values()).sort((a, b) => {
+                // 错误优先，警告次之
+                const sevOrder = { error: 0, warning: 1, info: 2 };
+                return (sevOrder[a.severity] ?? 2) - (sevOrder[b.severity] ?? 2);
+            });
+        });
+    }, []);
+
+    const clearProblems = useCallback(() => {
+        setProblemsState([]);
+    }, []);
 
     const syncWorkspaceRootToUrl = useCallback((path: string | null) => {
         try {
@@ -324,6 +373,10 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
             workspaceRoot, setWorkspaceRoot,
             todos,
             setTodos,
+            problems,
+            setProblems,
+            addProblems,
+            clearProblems,
         }}>
             {children}
         </AgentContext.Provider>

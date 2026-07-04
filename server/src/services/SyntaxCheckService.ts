@@ -215,6 +215,7 @@ export class SyntaxCheckService {
     }
 
     private static async checkTypeScriptLike(fullPath: string, relativePath: string, ext: string, start: number): Promise<SyntaxCheckResult> {
+        // JS 文件先尝试 node --check（快速且准确）
         if (['.js', '.mjs', '.cjs'].includes(ext)) {
             const nodeCheck = await this.checkJavaScriptWithNode(fullPath, relativePath, ext, start);
             if (nodeCheck.status === 'ok' || nodeCheck.status === 'error') {
@@ -236,45 +237,120 @@ export class SyntaxCheckService {
             };
         }
 
-        const source = await this.readTextFile(fullPath);
-        const sourceFile = ts.createSourceFile(
-            fullPath,
-            source,
-            ts.ScriptTarget.Latest,
-            true,
-            this.resolveScriptKind(ts, ext)
-        );
+        try {
+            // ── 增强策略：优先搜索 tsconfig.json 做项目级类型检查 ──
+            const dir = path.dirname(fullPath);
+            const tsconfigPath = ts.findConfigFile(dir, ts.sys.fileExists);
 
-        const diagnostics = (sourceFile.parseDiagnostics || []).map((d: any) => {
-            const pos = sourceFile.getLineAndCharacterOfPosition(d.start || 0);
-            const message = ts.flattenDiagnosticMessageText(d.messageText, '\n');
+            if (tsconfigPath) {
+                // 🚀 项目级类型检查（ts.createProgram — 等价于 tsc --noEmit）
+                const configFile = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+                const parsedConfig = ts.parseJsonConfigFileContent(
+                    configFile.config, ts.sys, dir, {}, tsconfigPath
+                );
+                // 确保目标文件在编译范围内
+                const fileNames = parsedConfig.fileNames.length > 0
+                    ? parsedConfig.fileNames
+                    : [fullPath];
+                const program = ts.createProgram({
+                    rootNames: fileNames.includes(fullPath) ? fileNames : [...fileNames, fullPath],
+                    options: { ...parsedConfig.options, noEmit: true },
+                    host: ts.createCompilerHost(parsedConfig.options),
+                });
+
+                const allDiagnostics = ts.getPreEmitDiagnostics(program)
+                    .filter((d: any) => {
+                        if (!d.file) return false;
+                        return path.normalize(d.file.fileName) === path.normalize(fullPath);
+                    });
+
+                const diagnostics = allDiagnostics
+                    .slice(0, 30)
+                    .map((d: any) => {
+                        const pos = d.file?.getLineAndCharacterOfPosition?.(d.start || 0) || { line: 0, character: 0 };
+                        const message = ts.flattenDiagnosticMessageText(d.messageText, '\n');
+                        const severity = d.category === 0 ? 'warning' : 'error';
+                        return {
+                            line: pos.line + 1,
+                            column: pos.character + 1,
+                            message: severity === 'warning' ? `[warning] ${message}` : message
+                        } as SyntaxCheckDiagnostic;
+                    });
+
+                if (diagnostics.length === 0) {
+                    return {
+                        path: relativePath,
+                        extension: ext,
+                        checker: 'ts-program',
+                        status: 'ok',
+                        message: `TypeScript 项目级类型检查通过（tsconfig: ${path.basename(tsconfigPath)}）。`,
+                        durationMs: Date.now() - start
+                    };
+                }
+
+                const errorCount = allDiagnostics.filter((d: any) => d.category !== 0).length;
+                const warnCount = allDiagnostics.filter((d: any) => d.category === 0).length;
+                return {
+                    path: relativePath,
+                    extension: ext,
+                    checker: 'ts-program',
+                    status: 'error',
+                    message: `TypeScript 类型检查发现 ${errorCount} 个错误${warnCount > 0 ? `、${warnCount} 个警告` : ''}。`,
+                    diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+                    durationMs: Date.now() - start
+                };
+            }
+
+            // ── 回退：无 tsconfig → 单文件语法解析（保留原逻辑） ──
+            const source = await this.readTextFile(fullPath);
+            const sourceFile = ts.createSourceFile(
+                fullPath,
+                source,
+                ts.ScriptTarget.Latest,
+                true,
+                this.resolveScriptKind(ts, ext)
+            );
+
+            const parseDiags = (sourceFile.parseDiagnostics || []).slice(0, 30).map((d: any) => {
+                const pos = sourceFile.getLineAndCharacterOfPosition(d.start || 0);
+                const message = ts.flattenDiagnosticMessageText(d.messageText, '\n');
+                return {
+                    line: pos.line + 1,
+                    column: pos.character + 1,
+                    message
+                } as SyntaxCheckDiagnostic;
+            });
+
+            if (parseDiags.length > 0) {
+                return {
+                    path: relativePath,
+                    extension: ext,
+                    checker: 'ts-parse',
+                    status: 'error',
+                    message: parseDiags[0].message,
+                    diagnostics: parseDiags,
+                    durationMs: Date.now() - start
+                };
+            }
+
             return {
-                line: pos.line + 1,
-                column: pos.character + 1,
-                message
-            } as SyntaxCheckDiagnostic;
-        });
-
-        if (diagnostics.length > 0) {
+                path: relativePath,
+                extension: ext,
+                checker: 'ts-parse',
+                status: 'ok',
+                message: 'TS/JS 语法检查通过（无 tsconfig，仅语法解析）。',
+                durationMs: Date.now() - start
+            };
+        } catch (e: any) {
             return {
                 path: relativePath,
                 extension: ext,
                 checker: 'typescript-parser',
                 status: 'error',
-                message: diagnostics[0].message,
-                diagnostics,
+                message: e?.message || 'TS/JS 类型检查过程发生异常。',
                 durationMs: Date.now() - start
             };
         }
-
-        return {
-            path: relativePath,
-            extension: ext,
-            checker: 'typescript-parser',
-            status: 'ok',
-            message: 'TS/JS 语法检查通过。',
-            durationMs: Date.now() - start
-        };
     }
 
     private static async checkJavaScriptWithNode(fullPath: string, relativePath: string, ext: string, start: number): Promise<SyntaxCheckResult> {

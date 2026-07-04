@@ -126,11 +126,6 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                                 const res = part.params?.result;
                                 const isErr = !!part.params?.error || res?.status === 'error';
                                 const toolName = part.params?.toolName;
-                                const withPhaseTag = toolName === 'file_write';
-                                const rawErrorPhase = String(res?.errorPhase || '').toLowerCase();
-                                const singleWritePhaseLabel = withPhaseTag && isErr
-                                    ? (rawErrorPhase === 'syntax_check' ? '语法检查失败' : '写入失败')
-                                    : '';
                                 return (
                                     <div className={`my-2 overflow-hidden rounded border ${isErr ? 'border-red-500/20 bg-red-500/5' : 'border-white/10 bg-emerald-500/5'}`}>
                                         <div className={`flex items-center gap-2 px-3 py-1 border-b border-white/5 ${isErr ? 'bg-red-500/10' : 'bg-emerald-500/10'}`}>
@@ -138,13 +133,8 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                                                 ? <XCircle className='w-3 h-3 text-red-400/70' />
                                                 : <CheckCircle2 className='w-3 h-3 text-emerald-500/60' />}
                                             <span className={`text-[8pt] font-bold tracking-tighter ${isErr ? 'text-red-400/70' : 'text-emerald-500/60'}`}>
-                                                {isErr ? '执行失败' : '执行成功'}: {part.params?.toolName}
+                                                {isErr ? '执行失败' : '执行成功'}: {toolName}
                                             </span>
-                                            {singleWritePhaseLabel && (
-                                                <span className='ml-1 inline-flex items-center rounded border border-red-400/30 bg-red-500/10 px-1.5 py-[1px] text-[7pt] font-black tracking-tight text-red-300'>
-                                                    {singleWritePhaseLabel}
-                                                </span>
-                                            )}
                                         </div>
                                     </div>
                                 );
@@ -574,13 +564,7 @@ export const AgentChat: React.FC = () => {
                     const payload = hasError
                         ? (part.params?.error || part.params?.result || part.content)
                         : (part.params?.result ?? part.content);
-                    const resultPayload = part.params?.result || {};
-                    const errorPhase = String(resultPayload?.errorPhase || '').toLowerCase();
-                    const withPhaseTag = toolName === 'file_write';
-                    const phaseLabel = withPhaseTag && statusText === 'ERROR'
-                        ? (errorPhase === 'syntax_check' ? '[语法检查失败]' : '[写入失败]')
-                        : '';
-                    return `[TOOL_RESULT:${statusText}] ${toolName}${phaseLabel ? ` ${phaseLabel}` : ''}\n${stringifyPayload(payload)}`;
+                    return `[TOOL_RESULT:${statusText}] ${toolName}\n${stringifyPayload(payload)}`;
                 }
                 if (part.method === 'tool/error') {
                     return `[TOOL_RESULT:ERROR] ${toolName}\n${stringifyPayload(part.params?.error || part.content)}`;

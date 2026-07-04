@@ -259,7 +259,7 @@ const sanitizeMessageForClient = (message: any): any => ({
 });
 
 export function useAgentSSE() {
-    const { locale, workspaceRoot, setTodos, provider, model, settings } = useAgentContext();
+    const { locale, workspaceRoot, setTodos, provider, model, settings, addProblems } = useAgentContext();
     const [messages, setMessages] = useState<Message[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [input, setInput] = useState("");
@@ -570,6 +570,25 @@ export function useAgentSSE() {
                             params: sanitizedAnnotationParams,
                             timestamp: Date.now()
                         });
+
+                        // 从 tool/result 注解中提取语法检查结果 → Problems 面板
+                        if (chunk.method === 'tool/result' && sanitizedAnnotationParams?.result?.syntaxCheck) {
+                            const sc = sanitizedAnnotationParams.result.syntaxCheck;
+                            const diags = sc.diagnostics || [];
+                            if (diags.length > 0) {
+                                const entries = diags.map((d: any) => ({
+                                    filePath: sc.path || '',
+                                    line: d.line,
+                                    column: d.column,
+                                    message: d.message || '未知错误',
+                                    severity: (sc.status === 'ok' ? 'info' : 'error') as 'error' | 'warning' | 'info',
+                                    code: sc.checker,
+                                    checker: sc.checker,
+                                    timestamp: Date.now(),
+                                }));
+                                addProblems(entries);
+                            }
+                        }
                         break;
                     case "error":
                         last.parts.push({ 

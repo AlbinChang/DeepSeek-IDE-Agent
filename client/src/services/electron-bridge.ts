@@ -251,4 +251,12 @@ export const electronBridge = {
     get isDesktop(): boolean {
         return true;
     },
+
+    // ═══ Diagnostics ═══
+    async getDiagnostics(params: { filePath: string }) {
+        return callIpc('getDiagnostics', [params]);
+    },
+    async getDiagnosticsBatch(params: { filePaths: string[] }) {
+        return callIpc('getDiagnosticsBatch', [params]);
+    },
 };

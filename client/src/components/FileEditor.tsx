@@ -567,6 +567,28 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     };
   }, [isLocked]);
 
+  // 监听 Problems 面板的行跳转请求
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail?.line || !editorRef.current) return;
+      const targetFile = detail.filePath?.replace(/\\/g, '/');
+      const currentFile = activeFileRef.current?.replace(/\\/g, '/');
+      if (targetFile !== currentFile) return;
+      try {
+        const line = Math.max(1, Number(detail.line) || 1);
+        const column = Math.max(1, Number(detail.column) || 1);
+        editorRef.current.revealLineInCenter(line);
+        editorRef.current.setPosition({ lineNumber: line, column });
+        editorRef.current.focus();
+      } catch {
+        // 编辑器可能尚未就绪，静默忽略
+      }
+    };
+    window.addEventListener('ui:file:open', handler);
+    return () => window.removeEventListener('ui:file:open', handler);
+  }, []);
+
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     setEditorReady(true);

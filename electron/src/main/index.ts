@@ -63,6 +63,7 @@ async function registerIpcHandlers() {
     const { registerSettingsIpc } = await import('./ipc/settings-handlers.js');
     const { registerContextIpc, registerCompletionIpc } = await import('./ipc/context-handlers.js');
     const { registerAppIpc } = await import('./ipc/app-handlers.js');
+    const { registerDiagnosticsIpc } = await import('./ipc/diagnostics-handlers.js');
 
     registerAgentIpc(ipcMain, mainWindow!);
     registerFileIpc(ipcMain);
@@ -72,6 +73,7 @@ async function registerIpcHandlers() {
     registerContextIpc(ipcMain, mainWindow!);
     registerCompletionIpc(ipcMain, mainWindow!);
     registerAppIpc(ipcMain, mainWindow!);
+    registerDiagnosticsIpc(ipcMain);
 
     console.log('[Electron] All IPC handlers registered.');
 }
