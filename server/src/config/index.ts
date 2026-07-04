@@ -124,6 +124,8 @@ export const config = {
     agent: {
         maxTurns: parsePositiveInt(process.env.AGENT_MAX_TURNS, 1000, 1),
         apiRetryLimit: parsePositiveInt(process.env.AGENT_API_RETRY_LIMIT, 3, 0),
+        maxHistoryBytes: parsePositiveInt(process.env.AGENT_MAX_HISTORY_BYTES, 1024 * 1024, 1),
+        lowWatermarkBytes: parsePositiveInt(process.env.AGENT_LOW_WATERMARK_BYTES, 128 * 1024, 1),
     },
 
     // read_file 工具限制

@@ -19,7 +19,6 @@ import { createRequire } from 'node:module';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { ToolDefinition } from '@/services/ToolManager.js';
-import { buildSaveWebpageToolDefinition } from '@/services/WebPageSaver.js';
 import { getBeijingLogTimePrefix } from '@/utils/TimeUtils.js';
 
 const getTS = () => getBeijingLogTimePrefix();
@@ -383,12 +382,6 @@ export class BrowserMcpAdapter {
             });
         }
 
-        // 复合工具：save_webpage（服务端聚合多次原生调用直接落盘，绕过 LLM 上下文体积限制）
-        // 依赖 browser_evaluate / browser_navigate 原生工具存在
-        if (state.tools.some((t) => t.name === 'browser_evaluate')) {
-            definitions.push(buildSaveWebpageToolDefinition(this, userId, workspaceRoot));
-        }
-
         console.log(`${getTS()} [BrowserMcpAdapter] Built ${definitions.length} Playwright bridge tool definitions`);
         return definitions;
     }
@@ -420,18 +413,6 @@ export class BrowserMcpAdapter {
                 },
             };
         });
-
-        if (state.tools.some((t) => t.name === 'browser_evaluate')) {
-            const saveDef = buildSaveWebpageToolDefinition(this, userId, workspaceRoot);
-            metadata.push({
-                type: 'function' as const,
-                function: {
-                    name: saveDef.name,
-                    description: saveDef.description,
-                    parameters: saveDef.parameters,
-                },
-            });
-        }
 
         return metadata;
     }
@@ -525,10 +506,10 @@ export class BrowserMcpAdapter {
     }
 
     /**
-     * 直接调用 Playwright MCP 原生工具（供服务端复合工具编排使用，如 save_webpage）。
+     * 直接调用 Playwright MCP 原生工具（供服务端编排使用）。
      * 与 executeTool 的区别：
      * - 返回原始文本（不做 formatResult 包装），供服务端解析
-     * - 失败时抛出异常（由复合工具统一捕获、汇总为精简摘要）
+     * - 失败时抛出异常
      * - 支持自定义超时（导航类操作需要更长时间）
      */
     public async callNativeTool(
@@ -654,22 +635,22 @@ export class BrowserMcpAdapter {
             lines.push(`- **\`${agentName}\`**: ${desc}`);
         }
 
-        lines.push('- **`save_webpage`**: 【复合工具】将网页正文完整保存为 Markdown + 独立 HTML 并自动下载正文图片到本地（服务端直接落盘，内容不占用对话上下文）。');
         lines.push('');
         lines.push('**使用策略**：');
         lines.push('- 优先使用 `playwright__browser_snapshot` 获取页面可访问性快照，了解页面结构。');
-        lines.push('- 使用 `playwright__browser_evaluate` 进行定向数据抽取（返回 JavaScript 表达式结果）。');
+        lines.push('- 使用 `playwright__browser_evaluate` 进行定向数据抽取（返回 JavaScript 表达式结果），返回内容不做大小限制，可获取完整页面数据。');
         lines.push('- 使用 `playwright__browser_take_screenshot` 仅用于视觉留存，不用于数据采集。');
         lines.push('- 交互前先获取最新快照确认元素引用（ref）仍然有效。');
         lines.push('');
-        lines.push('**📥 网页完整保存 (FULL PAGE SAVE — save_webpage)**：');
-        lines.push('- 需要"下载/保存/收藏网页文章（含图片）"时，**必须**使用 `save_webpage` 复合工具：它在服务端完成正文提取 → 生成 Markdown + 独立 HTML → 下载正文图片并改写为本地相对路径，内容不经过对话上下文，任意长度长文都能完整保存。');
-        lines.push('- 典型调用：`save_webpage` 参数 `{ "url": "https://...", "outputDir": "articles" }`；批量下载多篇文章时逐篇调用即可。');
-        lines.push('- `outputDir` 为**必填参数**：保存目录由你根据用户意图与工作区目录结构决定（用户指定了位置则严格遵从）；最终交付物禁止写入 .temp/。');
-        lines.push('- 正文自动识别失败或提示过大时，传入 `selector` 参数指定正文根元素（如 `#content_views`）。');
-        lines.push('- **付费墙/登录墙**：返回值含 `accessRestricted: true` 时表示页面存在付费/登录限制、仅保存了可见部分。必须在回复中**明确告知用户**内容不完整及原因（禁止用"可能"等模糊表述），并建议用户自行登录该网站（或开通会员）阅读全文，或寻找其他免费转载来源；不要反复重试下载同一受限页面。');
-        lines.push('- **禁止**用 `playwright__browser_take_screenshot` 全页截图代替文章内容下载——截图不可检索、不可复制、体积巨大，仅用于视觉留存。');
-        lines.push('- **禁止**用 `playwright__browser_evaluate` 分段读取 HTML 再手工写文件——这会撑爆上下文且极易失败，直接调用 `save_webpage`。');
+        lines.push('**📥 网页内容保存（长文 / 技术文章下载）**：');
+        lines.push('- 使用 `playwright__browser_evaluate` 提取页面正文内容（如 `document.body.innerText` 或 `document.querySelector("article")?.innerHTML`），返回内容无大小限制。');
+        lines.push('- 提取后使用 `file_write` 工具将内容写入工作区文件（.md / .html）。');
+        lines.push('- 使用 `playwright__browser_navigate` 导航到目标 URL 后再提取。');
+        lines.push('');
+        lines.push('**🚫 截图禁令 (SCREENSHOT PROHIBITION FOR CONTENT DOWNLOAD)**：');
+        lines.push('- **绝对禁止**用 `playwright__browser_take_screenshot` 截图方式"保存/下载/收藏"网页文章——用户极度反感截图交付，截图无法检索、不可复制文字、体积巨大、完全不可用。');
+        lines.push('- 截图仅允许用于：① UI 视觉验收（用户明确要求看页面长什么样）；② 调试布局/样式问题；③ 用户明确说"截个图给我看"。');
+        lines.push('- 任何形式的内容采集（文章、文档、教程、博客、新闻、论文等）**必须**用 `browser_evaluate` 提取文字后用 `file_write` 写入文件，严禁以截图代替。');
         lines.push('');
         lines.push('**本地文件预览 (LOCAL HTML FILE PREVIEW)**：');
         lines.push('- ✅ 支持通过 `file://` 协议打开本地 HTML 文件进行预览（已启用 `--allow-unrestricted-file-access`）。');

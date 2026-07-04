@@ -1,4 +1,5 @@
 import { extractReasoningText, hasReasoningField } from "../utils/ReasoningUtils.js";
+import { config as globalConfig } from "@/config/index.js";
 
 export interface MessagePreparationOptions {
     systemPrompt: string;
@@ -24,8 +25,8 @@ export class MessagePreparationService {
             incomingMessages,
             pinnedUserPrefix = "**当前用户意图**: \n",
             minMessagesBeforeTrim = 10,
-            maxBytes = Number(process.env.AGENT_MAX_HISTORY_BYTES) || 1024 * 1024,
-            lowWatermarkBytes = Number(process.env.AGENT_LOW_WATERMARK_BYTES) || 128 * 1024,
+            maxBytes = globalConfig.agent.maxHistoryBytes,
+            lowWatermarkBytes = globalConfig.agent.lowWatermarkBytes,
         } = options;
 
         const result: any[] = [{ role: "system", content: systemPrompt }];

@@ -31,6 +31,15 @@ export const LOG_DIR = path.join(PROJECT_ROOT, 'logs');
 /** Preload 脚本路径（编译后在 electron/dist/preload.cjs）。Electron preload 在 type=module 包内需要 .cjs。 */
 const PRELOAD_PATH = path.join(ELECTRON_ROOT, 'dist', 'preload.cjs');
 
+// ── 路径环境变量注入（必须在任何 server 模块被 import 之前执行） ──
+// server/src/utils/PathUtils.ts 在模块初始化时读取这些变量并冻结为常量。
+// 若在 bundle 中先经由其他路径（如 agent:clear → AgentChatComponent）触发 PathUtils 初始化，
+// 而环境变量尚未设置，CONFIG_ROOT 会错误回退到 electron/src/config（不存在）。
+// 因此在入口模块顶层无条件注入，消除对 import 时序的依赖。
+process.env.SERVER_ROOT = SERVER_SRC;
+process.env.PROJECT_ROOT = PROJECT_ROOT;
+process.env.CONFIG_ROOT = CONFIG_ROOT;
+
 // ── 加载 .env ──
 // 使用动态 import 避免顶层 dotenv 副作用
 let dotenv: any;

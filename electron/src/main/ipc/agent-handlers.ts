@@ -22,7 +22,8 @@ let agentChatComponentInstance: any = null;
 async function getAgentService(): Promise<any> {
     if (agentServiceInstance) return agentServiceInstance;
     
-    // 设置环境变量让 PathUtils 正确解析路径（必须在 import 之前设置）
+    // 双保险：入口模块（main/index.ts）顶层已注入这些环境变量；
+    // 此处再次设置，防止未来重构改变入口初始化顺序（PathUtils 在首次 import 时冻结路径常量）
     process.env.SERVER_ROOT = SERVER_SRC;
     process.env.PROJECT_ROOT = PROJECT_ROOT;
     process.env.CONFIG_ROOT = CONFIG_ROOT;
@@ -35,6 +36,10 @@ async function getAgentService(): Promise<any> {
 
 async function getAgentChatComponent(): Promise<any> {
     if (agentChatComponentInstance) return agentChatComponentInstance;
+    
+    // 先初始化 AgentService，确保路径环境变量已注入后再触发 server 模块链的初始化
+    // （AgentChatComponent 静态导入 AgentService → PathUtils，若跳过此步会以错误路径冻结 CONFIG_ROOT）
+    await getAgentService();
     
     const { AgentChatComponent } = await import('@/services/AgentChatComponent.js');
     agentChatComponentInstance = AgentChatComponent.getInstance();
