@@ -711,11 +711,24 @@ export const AgentChat: React.FC = () => {
         }
     };
 
-    // 清空历史会话
-    const handleClearHistory = useCallback(async () => {
+    // 清空历史会话（自定义弹窗确认，替代原生 window.confirm：
+    // Electron 中原生对话框关闭后会破坏窗口键盘焦点，导致输入框长时间无法聚焦）
+    const [isClearConfirmOpen, setIsClearConfirmOpen] = useState(false);
+
+    const handleClearHistory = useCallback(() => {
+        setIsClearConfirmOpen(true);
+    }, []);
+
+    const confirmClearHistory = useCallback(async () => {
+        setIsClearConfirmOpen(false);
         await clearHistory();
-        // 焦点恢复交给 useEffect 声明式处理，不在此处手动 rAF
+        // 焦点恢复交给 useEffect 声明式处理
     }, [clearHistory]);
+
+    const cancelClearHistory = useCallback(() => {
+        setIsClearConfirmOpen(false);
+        textareaRef.current?.focus();
+    }, []);
 
     // 清空历史后自动将焦点归还给输入框。
     // 使用 useEffect 而非 requestAnimationFrame：
@@ -965,6 +978,48 @@ export const AgentChat: React.FC = () => {
             </form>
             
             <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+
+            {/* 清空历史确认弹窗（React 自定义弹窗，替代 Electron 下有焦点副作用的 window.confirm） */}
+            {isClearConfirmOpen && (
+                <div
+                    className='fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm'
+                    onClick={cancelClearHistory}
+                    onKeyDown={(e) => { if (e.key === 'Escape') cancelClearHistory(); }}
+                >
+                    <div
+                        role='alertdialog'
+                        aria-modal='true'
+                        aria-labelledby='clear-history-title'
+                        className='w-[320px] rounded-xl border border-white/10 bg-[#0b0b0b] p-4 shadow-[0_16px_60px_rgba(0,0,0,0.75)]'
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div id='clear-history-title' className='flex items-center gap-2 mb-2'>
+                            <Trash2 className='w-3.5 h-3.5 text-red-400' />
+                            <span className='text-[11px] font-black tracking-[0.12em] text-white/90 uppercase'>清空历史会话</span>
+                        </div>
+                        <p className='text-[11px] text-white/50 leading-relaxed mb-4'>
+                            确定清空当前工作区的会话历史吗？此操作不可撤销。
+                        </p>
+                        <div className='flex items-center justify-end gap-2'>
+                            <button
+                                type='button'
+                                autoFocus
+                                onClick={cancelClearHistory}
+                                className='px-3 py-1.5 rounded-lg text-[11px] text-white/60 hover:text-white hover:bg-white/10 border border-white/10 transition-colors'
+                            >
+                                取消
+                            </button>
+                            <button
+                                type='button'
+                                onClick={confirmClearHistory}
+                                className='px-3 py-1.5 rounded-lg text-[11px] font-bold text-white bg-red-600/80 hover:bg-red-500 transition-colors'
+                            >
+                                确认清空
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

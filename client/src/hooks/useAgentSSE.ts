@@ -844,8 +844,9 @@ export function useAgentSSE() {
 
     const clearHistory = useCallback(async () => {
         if (!workspaceRoot) return;
-        if (!window.confirm("确定清空当前工作区的会话历史吗？")) return;
-        
+        // 注意：确认交互由 UI 层的自定义弹窗完成。
+        // 禁止在此使用 window.confirm —— Electron 中原生对话框关闭后会破坏渲染窗口的
+        // 键盘焦点状态，导致输入框长时间无法聚焦（Chromium 已知 bug）。
         try {
             if (!electronBridge.isElectron) {
                 await fetch(`${API_BASE}/api/chat/clear`, {
