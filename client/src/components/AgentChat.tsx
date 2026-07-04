@@ -692,15 +692,40 @@ export const AgentChat: React.FC = () => {
         }
     };
 
-    // 清空历史会话：操作完成后自动将焦点归还给输入框
+    // 清空历史会话
     const handleClearHistory = useCallback(async () => {
         await clearHistory();
-        // window.confirm 会强制抢占焦点，confirm 关闭后焦点回到 body
-        // 延迟一帧确保 DOM 稳定后再聚焦
-        requestAnimationFrame(() => {
-            textareaRef.current?.focus();
-        });
+        // 焦点恢复交给 useEffect 声明式处理，不在此处手动 rAF
     }, [clearHistory]);
+
+    // 清空历史后自动将焦点归还给输入框。
+    // 使用 useEffect 而非 requestAnimationFrame：
+    //   - useEffect 保证在 React DOM commit 之后执行，ref 处于稳定状态
+    //   - 双层 setTimeout 将 focus 推迟到浏览器布局/绘制完成后
+    const prevMessageCountRef = useRef(messages.length);
+    const focusRestoreTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+        const wasNonEmpty = prevMessageCountRef.current > 0;
+        prevMessageCountRef.current = messages.length;
+
+        if (messages.length === 0 && wasNonEmpty && !isLoading) {
+            // 第一层 setTimeout：等 React commit 微任务队列清空
+            focusRestoreTimerRef.current = setTimeout(() => {
+                // 第二层 setTimeout：确保浏览器布局/绘制完成
+                focusRestoreTimerRef.current = setTimeout(() => {
+                    textareaRef.current?.focus();
+                    focusRestoreTimerRef.current = null;
+                }, 0);
+            }, 0);
+        }
+
+        return () => {
+            if (focusRestoreTimerRef.current !== null) {
+                clearTimeout(focusRestoreTimerRef.current);
+                focusRestoreTimerRef.current = null;
+            }
+        };
+    }, [messages.length, isLoading]);
 
     return (
         <div className='flex flex-col h-full bg-black text-white font-sans'>

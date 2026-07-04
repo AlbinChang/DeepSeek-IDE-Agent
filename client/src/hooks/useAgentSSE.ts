@@ -851,6 +851,7 @@ export function useAgentSSE() {
             // Electron 模式：仅清空本地 IndexedDB
             await db.chatHistory.where("workspaceRoot").equals(workspaceRoot).delete();
             setMessages([]);
+            setInput("");
             setData([]);
             setStreamProgress(null);
             setTodos([]);
