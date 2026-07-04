@@ -12,7 +12,7 @@ import { FileTree } from '@/components/FileTree';
 import { Header } from '@/components/Header';
 import { StatusBar } from '@/components/StatusBar';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
-import { useAgentContext } from '@/providers/AgentContext';
+import { useAgentContext, useProblemContext } from '@/providers/AgentContext';
 import { GATEWAY_EVENT, LEGACY_WS_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 import { getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspaceEntry } from '@/services/RecentWorkspaces';
@@ -57,7 +57,8 @@ function App() {
   const historyIndexRef = useRef(-1);
   const [activeSidebarView, setActiveSidebarView] = useState<'explorer' | 'git' | 'search' | 'extensions' | 'todo'>('explorer');
   const [bottomPanelTab, setBottomPanelTab] = useState<'terminal' | 'problems'>('terminal');
-  const { workspaceRoot, setWorkspaceRoot, problems } = useAgentContext();
+  const { workspaceRoot, setWorkspaceRoot } = useAgentContext();
+  const { problems } = useProblemContext();
   const workspaceRootRef = useRef<string | null>(workspaceRoot);
   const [isSwitchingWorkspace, setIsSwitchingWorkspace] = useState(false);
   const [workspaceSwitchModal, setWorkspaceSwitchModal] = useState<'hidden' | 'confirm' | 'input' | 'switching'>('hidden');

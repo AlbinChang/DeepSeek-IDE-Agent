@@ -1,4 +1,4 @@
-﻿import React, { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+﻿import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAgentSSE } from '@/hooks/useAgentSSE';
@@ -6,7 +6,7 @@ import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, 
 import { TodoList } from './TodoList';
 import { SettingsModal } from '@/components/SettingsModal';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
-import { useAgentContext } from '@/providers/AgentContext';
+import { useAgentContext, useTodoContext } from '@/providers/AgentContext';
 import { USER_ID, API_BASE } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 import type { Message, MessagePart, StreamProgress } from '@/hooks/useAgentSSE';
@@ -166,11 +166,35 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
             </div>
         </div>
     );
+}, (prevProps, nextProps) => {
+    // 自定义比较：避免已完成的 message 因数组引用变化而重渲染
+    // 仅当以下条件之一满足时才重渲染：
+    // 1. message id 变化（不同消息）
+    if (prevProps.message.id !== nextProps.message.id) return false;
+    // 2. isLastItem / isLoading 变化
+    if (prevProps.isLastItem !== nextProps.isLastItem) return false;
+    if (prevProps.isLoading !== nextProps.isLoading) return false;
+    // 3. isThinkingExpanded / onToggleThinking 变化
+    if (prevProps.isThinkingExpanded !== nextProps.isThinkingExpanded) return false;
+    if (prevProps.onToggleThinking !== nextProps.onToggleThinking) return false;
+    // 4. 对于已完成的消息 (isFinal)，永不重渲染
+    if (nextProps.message.isFinal && prevProps.message.isFinal) return true;
+    // 5. 对于流式消息，比较 parts 长度和最后一个 part 的 content
+    const prevLen = prevProps.message.parts?.length ?? 0;
+    const nextLen = nextProps.message.parts?.length ?? 0;
+    if (prevLen !== nextLen) return false;
+    // 比较 content 摘要（对于长 content 来说很轻量）
+    if (prevProps.message.content !== nextProps.message.content) return false;
+    // markdownComponents 引用比较（useMemo 保证了稳定性）
+    if (prevProps.markdownComponentsWithCode !== nextProps.markdownComponentsWithCode) return false;
+    if (prevProps.markdownComponentsTextOnly !== nextProps.markdownComponentsTextOnly) return false;
+    return true;
 });
 
 export const AgentChat: React.FC = () => {
     const { messages, input, setInput, handleInputChange, handleSubmit, isLoading, stop, data, streamProgress, clearHistory } = useAgentSSE();
-    const { todos, workspaceRoot, provider, model, settings, setProvider } = useAgentContext();
+    const { todos } = useTodoContext();
+    const { workspaceRoot, provider, model, settings, setProvider } = useAgentContext();
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isThinkingExpanded, setIsThinkingExpanded] = useState(true);
     const [isProviderMenuOpen, setIsProviderMenuOpen] = useState(false);
@@ -450,7 +474,9 @@ export const AgentChat: React.FC = () => {
     };
 
     // 监听实时消息流（messages 内部 content 的变化）
-    useLayoutEffect(() => {
+    // 使用 useEffect 而非 useLayoutEffect：scheduleScrollToBottom 内部已用 rAF 异步调度，
+    // 无需同步阻塞布局计算，避免高频 streaming 时阻塞主线程绘制。
+    useEffect(() => {
         if (isLoading || isAutoScrollingRef.current) {
             scheduleScrollToBottom(false);
         }

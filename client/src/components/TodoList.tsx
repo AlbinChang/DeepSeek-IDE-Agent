@@ -2,11 +2,12 @@ import React, { useEffect } from 'react';
 import { CheckCircle2, Circle, Clock } from 'lucide-react';
 import axios from 'axios';
 import { USER_ID, API_BASE, GATEWAY_EVENT } from '@/config';
-import { useAgentContext } from '@/providers/AgentContext';
+import { useAgentContext, useTodoContext } from '@/providers/AgentContext';
 import { electronBridge } from '@/services/electron-bridge';
 
 export const TodoList: React.FC = () => {
-    const { workspaceRoot, todos: contextTodos, setTodos: setContextTodos } = useAgentContext();
+    const { workspaceRoot } = useAgentContext();
+    const { todos: contextTodos, setTodos: setContextTodos } = useTodoContext();
 
     const formatTodoId = (id: string) => {
         if (!id) return 'unknown';

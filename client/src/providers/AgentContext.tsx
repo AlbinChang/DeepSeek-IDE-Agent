@@ -49,9 +49,16 @@ interface AgentContextType {
     refreshSettings: () => Promise<void>;
     workspaceRoot: string | null;
     setWorkspaceRoot: (path: string | null) => void;
+}
+
+/** 任务清单上下文：高频更新（每秒可能多次），独立上下文避免拖累其他组件 */
+interface TodoContextType {
     todos: any[];
     setTodos: (todos: any[]) => void;
-    /** 诊断问题列表（语法/类型检查结果，由文件写入后自动填充） */
+}
+
+/** 诊断问题上下文：中频更新，独立上下文 */
+interface ProblemContextType {
     problems: ProblemEntry[];
     setProblems: (problems: ProblemEntry[]) => void;
     addProblems: (entries: ProblemEntry[]) => void;
@@ -59,6 +66,8 @@ interface AgentContextType {
 }
 
 const AgentContext = createContext<AgentContextType | undefined>(undefined);
+const TodoContext = createContext<TodoContextType | undefined>(undefined);
+const ProblemContext = createContext<ProblemContextType | undefined>(undefined);
 
 export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const DEFAULT_PROVIDER: ModelProviderConfig = {
@@ -371,14 +380,12 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
             locale, setLocale,
             settings, updateSettings, refreshSettings,
             workspaceRoot, setWorkspaceRoot,
-            todos,
-            setTodos,
-            problems,
-            setProblems,
-            addProblems,
-            clearProblems,
         }}>
-            {children}
+            <TodoContext.Provider value={{ todos, setTodos }}>
+                <ProblemContext.Provider value={{ problems, setProblems, addProblems, clearProblems }}>
+                    {children}
+                </ProblemContext.Provider>
+            </TodoContext.Provider>
         </AgentContext.Provider>
     );
 };
@@ -387,6 +394,22 @@ export const useAgentContext = () => {
     const context = useContext(AgentContext);
     if (!context) {
         throw new Error('useAgentContext must be used within an AgentProvider');
+    }
+    return context;
+};
+
+export const useTodoContext = () => {
+    const context = useContext(TodoContext);
+    if (!context) {
+        throw new Error('useTodoContext must be used within an AgentProvider');
+    }
+    return context;
+};
+
+export const useProblemContext = () => {
+    const context = useContext(ProblemContext);
+    if (!context) {
+        throw new Error('useProblemContext must be used within an AgentProvider');
     }
     return context;
 };

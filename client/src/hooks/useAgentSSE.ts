@@ -1,7 +1,7 @@
-﻿import { useState, useCallback, useEffect, useRef, startTransition } from "react";
+﻿import { useState, useCallback, useEffect, useRef } from "react";
 import Dexie from "dexie";
 import { USER_ID, API_BASE } from "@/config";
-import { useAgentContext } from "@/providers/AgentContext";
+import { useAgentContext, useTodoContext, useProblemContext } from "@/providers/AgentContext";
 import { db } from "@/services/db";
 import { createClientId } from "@/utils/id";
 import { electronBridge } from "@/services/electron-bridge";
@@ -259,7 +259,9 @@ const sanitizeMessageForClient = (message: any): any => ({
 });
 
 export function useAgentSSE() {
-    const { locale, workspaceRoot, setTodos, provider, model, settings, addProblems } = useAgentContext();
+    const { locale, workspaceRoot, provider, model, settings } = useAgentContext();
+    const { setTodos } = useTodoContext();
+    const { addProblems } = useProblemContext();
     const [messages, setMessages] = useState<Message[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [input, setInput] = useState("");
@@ -384,119 +386,225 @@ export function useAgentSSE() {
         };
         setMessages(prev => trimMessagesForMemory([...prev, userMsg]));
 
-        // 【性能优化】批量累积 text/reasoning delta，通过 rAF 合并多次 setMessages 调用
-        // 避免每个 SSE chunk（每秒可能 20-50 个）都触发完整的 React 状态更新
-        // 注意：这些变量必须在 try 块之前声明，因为 catch/finally 块需要访问它们
+        // ═══════════════════════════════════════════════════════════════
+        // 【性能优化 v2】统一 rAF 批量提交：将所有类型的 chunk 合并到
+        // 同一个 pending buffer，每个 rAF 周期内只触发一次 React 状态更新。
+        // 消除之前 text/reasoning 与 annotation/init/error/done 之间的
+        // 双重 setMessages + setData 调用，大幅减少重渲染次数。
+        // ═══════════════════════════════════════════════════════════════
         const currentAssistantMsgId = createClientId();
-        type PendingDelta = 
-            | { type: 'text'; content: string; turn?: number }
-            | { type: 'reasoning'; content: string; turn?: number };
-        const pendingDeltasRef: { current: PendingDelta[] } = { current: [] };
+
+        // 统一的 pending 缓冲区：累积 text/reasoning delta、annotation、stage、progress、todo
+        type PendingChunk =
+            | { kind: 'text'; content: string; turn?: number }
+            | { kind: 'reasoning'; content: string; turn?: number }
+            | { kind: 'annotation'; content: string; method: string; params: any }
+            | { kind: 'stage'; message: string }
+            | { kind: 'progress'; progress: StreamProgress }
+            | { kind: 'todo'; todos: any[] }
+            | { kind: 'init'; traceId: string }
+            | { kind: 'error'; content: string }
+            | { kind: 'done' }
+            | { kind: 'diagnostics'; entries: import('@/providers/AgentContext').ProblemEntry[] };
+
+        const pendingBufferRef: { current: PendingChunk[] } = { current: [] };
         let rafId: number | null = null;
+        // 标记是否需要在本次 flush 前取消已有 rAF（用于 terminal 事件立即刷新）
+        let needsImmediateFlush = false;
 
-        const flushPendingDeltas = () => {
+        const flushAllPending = () => {
             rafId = null;
-            const deltas = pendingDeltasRef.current;
-            if (deltas.length === 0) return;
-            pendingDeltasRef.current = [];
+            const buffer = pendingBufferRef.current;
+            if (buffer.length === 0) return;
+            pendingBufferRef.current = [];
 
-            // 合并连续的同类 delta 为大块，减少 parts 内的段数
-            const merged: PendingDelta[] = [];
-            for (const d of deltas) {
-                const last = merged[merged.length - 1];
-                if (last && last.type === d.type && last.turn === d.turn) {
-                    last.content += d.content;
-                } else {
-                    merged.push({ ...d });
+            // ── 分离不同类型 ──
+            const textDeltas: { content: string; turn?: number }[] = [];
+            const reasoningDeltas: { content: string; turn?: number }[] = [];
+            const annotations: { content: string; method: string; params: any }[] = [];
+            const stages: { message: string }[] = [];
+            let latestProgress: StreamProgress | null = null;
+            let latestTodos: any[] | null = null;
+            let initTraceId: string | null = null;
+            let errorContent: string | null = null;
+            let isDone = false;
+            const diagnosticsEntries: import('@/providers/AgentContext').ProblemEntry[] = [];
+
+            for (const chunk of buffer) {
+                switch (chunk.kind) {
+                    case 'text': textDeltas.push(chunk); break;
+                    case 'reasoning': reasoningDeltas.push(chunk); break;
+                    case 'annotation': annotations.push(chunk); break;
+                    case 'stage': stages.push(chunk); break;
+                    case 'progress': latestProgress = chunk.progress; break;
+                    case 'todo': latestTodos = chunk.todos; break;
+                    case 'init': initTraceId = chunk.traceId; break;
+                    case 'error': errorContent = chunk.content; break;
+                    case 'done': isDone = true; break;
+                    case 'diagnostics': diagnosticsEntries.push(...chunk.entries); break;
                 }
             }
 
-            // 构建单个 setMessages 更新函数
-            setMessages(prev => {
-                const next = [...prev];
-                let lastIndex = next.length - 1;
-                let last = next[lastIndex];
+            // ── 提交 messages（合并 text/reasoning/annotation/init/error/done） ──
+            const hasMessageChanges = textDeltas.length > 0 || reasoningDeltas.length > 0
+                || annotations.length > 0 || initTraceId !== null || errorContent !== null || isDone;
 
-                if (!last || last.role !== "assistant" || last.isFinal) {
-                    last = { 
-                        id: currentAssistantMsgId, 
-                        role: "assistant", 
-                        content: "", 
-                        parts: [], 
-                        timestamp: Date.now(),
-                    };
-                    next.push(last);
-                    lastIndex = next.length - 1;
-                } else {
-                    last = { ...last, parts: [...(last.parts || [])] };
-                    next[lastIndex] = last;
-                }
+            if (hasMessageChanges) {
+                setMessages(prev => {
+                    const next = [...prev];
+                    let lastIndex = next.length - 1;
+                    let last = next[lastIndex];
 
-                for (const delta of merged) {
-                    if (delta.type === 'reasoning') {
+                    if (!last || last.role !== "assistant" || last.isFinal) {
+                        last = {
+                            id: currentAssistantMsgId,
+                            role: "assistant",
+                            content: "",
+                            parts: [],
+                            timestamp: Date.now(),
+                        };
+                        next.push(last);
+                        lastIndex = next.length - 1;
+                    } else {
+                        last = { ...last, parts: [...(last.parts || [])] };
+                        next[lastIndex] = last;
+                    }
+
+                    // init
+                    if (initTraceId) last.traceId = initTraceId;
+
+                    // 合并连续的同类 delta 为大块，减少 parts 内的段数
+                    const mergedTextDeltas: { content: string; turn?: number }[] = [];
+                    for (const d of textDeltas) {
+                        const prev = mergedTextDeltas[mergedTextDeltas.length - 1];
+                        if (prev && prev.turn === d.turn) { prev.content += d.content; }
+                        else { mergedTextDeltas.push({ ...d }); }
+                    }
+                    const mergedReasoningDeltas: { content: string; turn?: number }[] = [];
+                    for (const d of reasoningDeltas) {
+                        const prev = mergedReasoningDeltas[mergedReasoningDeltas.length - 1];
+                        if (prev && prev.turn === d.turn) { prev.content += d.content; }
+                        else { mergedReasoningDeltas.push({ ...d }); }
+                    }
+
+                    // reasoning deltas
+                    for (const delta of mergedReasoningDeltas) {
                         const partIndex = last.parts.length - 1;
                         const currentPart = last.parts[partIndex];
-                        const nextContent = delta.content;
-
                         if (!currentPart || currentPart.type !== 'reasoning' || (delta.turn !== undefined && (currentPart as any).turn !== delta.turn)) {
-                            const limited = appendLimitedLiveText('', nextContent, '推理文本', LIVE_REASONING_PART_LIMIT);
+                            const limited = appendLimitedLiveText('', delta.content, '推理文本', LIVE_REASONING_PART_LIMIT);
                             const nextPart: MessagePart = { id: createClientId(), type: 'reasoning', content: limited.content, params: { liveText: limited.meta }, timestamp: Date.now() };
                             (nextPart as any).turn = delta.turn;
                             last.parts.push(nextPart);
                         } else {
-                            const limited = appendLimitedLiveText(currentPart.content || '', nextContent, '推理文本', LIVE_REASONING_PART_LIMIT, currentPart.params?.liveText);
+                            const limited = appendLimitedLiveText(currentPart.content || '', delta.content, '推理文本', LIVE_REASONING_PART_LIMIT, currentPart.params?.liveText);
                             last.parts[partIndex] = { ...currentPart, content: limited.content, params: { ...(currentPart.params || {}), liveText: limited.meta } };
                         }
                         last.reasoning_content = undefined;
-                    } else {
-                        // text
+                    }
+
+                    // text deltas
+                    for (const delta of mergedTextDeltas) {
                         const partIndex = last.parts.length - 1;
                         const currentPart = last.parts[partIndex];
-                        const nextContent = delta.content;
-
                         if (!currentPart || currentPart.type !== 'text' || (delta.turn !== undefined && (currentPart as any).turn !== delta.turn)) {
-                            const limited = appendLimitedLiveText('', nextContent, '回复正文', LIVE_TEXT_PART_LIMIT);
+                            const limited = appendLimitedLiveText('', delta.content, '回复正文', LIVE_TEXT_PART_LIMIT);
                             const nextPart: MessagePart = { id: createClientId(), type: 'text', content: limited.content, params: { liveText: limited.meta }, timestamp: Date.now() };
                             (nextPart as any).turn = delta.turn;
                             last.parts.push(nextPart);
                         } else {
-                            const limited = appendLimitedLiveText(currentPart.content || '', nextContent, '回复正文', LIVE_TEXT_PART_LIMIT, currentPart.params?.liveText);
+                            const limited = appendLimitedLiveText(currentPart.content || '', delta.content, '回复正文', LIVE_TEXT_PART_LIMIT, currentPart.params?.liveText);
                             last.parts[partIndex] = { ...currentPart, content: limited.content, params: { ...(currentPart.params || {}), liveText: limited.meta } };
                         }
-
-                        const contentLimited = appendLimitedLiveText(last.content || '', nextContent, '回复正文', LIVE_TEXT_PART_LIMIT, (last as any).contentMeta);
+                        const contentLimited = appendLimitedLiveText(last.content || '', delta.content, '回复正文', LIVE_TEXT_PART_LIMIT, (last as any).contentMeta);
                         last.content = contentLimited.content;
                         (last as any).contentMeta = contentLimited.meta;
                     }
-                }
 
-                return trimMessagesForMemory(next);
-            });
+                    // annotations
+                    for (const ann of annotations) {
+                        last.parts.push({
+                            id: createClientId(),
+                            type: 'annotation',
+                            content: ann.content,
+                            method: ann.method,
+                            params: ann.params,
+                            timestamp: Date.now(),
+                        });
+                    }
+
+                    // error
+                    if (errorContent) {
+                        last.parts.push({ id: createClientId(), type: 'error', content: errorContent, timestamp: Date.now() });
+                        last.isFinal = true;
+                    }
+
+                    // done
+                    if (isDone) {
+                        last.isFinal = true;
+                        db.chatHistory.put({ ...sanitizeMessageForClient(userMsg), workspaceRoot }).catch(console.error);
+                        db.chatHistory.put({ ...sanitizeMessageForClient(last), workspaceRoot }).catch(console.error);
+                    }
+
+                    return trimMessagesForMemory(next);
+                });
+            }
+
+            // ── 提交 stages ──
+            if (stages.length > 0) {
+                setData(prev => {
+                    const next = [...prev];
+                    for (const s of stages) {
+                        next.push({ type: 'stage', message: s.message, timestamp: Date.now() });
+                    }
+                    return next.slice(-MAX_STAGE_ITEMS);
+                });
+            }
+
+            // ── 提交 progress ──
+            if (latestProgress) {
+                setStreamProgress(latestProgress);
+            }
+
+            // ── 提交 todos ──
+            if (latestTodos) {
+                setTodos(latestTodos);
+            }
+
+            // ── 提交 diagnostics ──
+            if (diagnosticsEntries.length > 0) {
+                addProblems(diagnosticsEntries);
+            }
         };
 
         const scheduleFlush = () => {
-            if (rafId === null) {
-                rafId = requestAnimationFrame(flushPendingDeltas);
+            if (rafId === null && !needsImmediateFlush) {
+                rafId = requestAnimationFrame(flushAllPending);
             }
         };
 
         // ── 统一的 Chunk 处理器（Electron IPC 和 Web SSE 共用） ──
         const processStreamChunk = (chunk: any) => {
+            // terminal 事件：init / error / done → 立即刷新所有 pending + 本次数据
+            const isTerminal = chunk.type === 'init' || chunk.type === 'error' || chunk.type === 'done';
+
+            if (isTerminal) {
+                if (rafId !== null) {
+                    cancelAnimationFrame(rafId);
+                    rafId = null;
+                }
+                needsImmediateFlush = true;
+            }
+
+            // ── 路由到 pending buffer ──
             if (chunk.type === 'stage') {
-                startTransition(() => {
-                    setData(prev => [...prev, { type: 'stage', message: chunk.content, timestamp: chunk.timestamp || Date.now() }].slice(-MAX_STAGE_ITEMS));
-                });
-                return;
-            }
-
-            if (chunk.method === 'todo/update' && chunk.params?.todos) {
-                startTransition(() => setTodos(chunk.params.todos));
-                return;
-            }
-
-            if (chunk.type === 'progress') {
-                startTransition(() => {
-                    setStreamProgress({
+                pendingBufferRef.current.push({ kind: 'stage', message: chunk.content });
+            } else if (chunk.method === 'todo/update' && chunk.params?.todos) {
+                pendingBufferRef.current.push({ kind: 'todo', todos: chunk.params.todos });
+            } else if (chunk.type === 'progress') {
+                pendingBufferRef.current.push({
+                    kind: 'progress',
+                    progress: {
                         receivedChars: Number(chunk.receivedChars) || 0,
                         contentChars: Number(chunk.contentChars) || 0,
                         reasoningChars: Number(chunk.reasoningChars) || 0,
@@ -505,109 +613,56 @@ export function useAgentSSE() {
                         channel: chunk.channel,
                         toolName: chunk.toolName,
                         turn: chunk.turn,
-                        updatedAt: chunk.timestamp || Date.now()
-                    });
+                        updatedAt: chunk.timestamp || Date.now(),
+                    },
                 });
-                return;
+            } else if (chunk.type === 'text') {
+                pendingBufferRef.current.push({ kind: 'text', content: chunk.content || '', turn: chunk.turn });
+            } else if (chunk.type === 'reasoning') {
+                pendingBufferRef.current.push({ kind: 'reasoning', content: chunk.content || '', turn: chunk.turn });
+            } else if (chunk.type === 'annotation') {
+                const sanitized = sanitizeAnnotationParams(chunk.method, chunk.params);
+                pendingBufferRef.current.push({
+                    kind: 'annotation',
+                    content: chunk.content || chunk.method || '',
+                    method: chunk.method,
+                    params: sanitized,
+                });
+                // 提取语法检查结果 → diagnostics
+                if (chunk.method === 'tool/result' && sanitized?.result?.syntaxCheck) {
+                    const sc = sanitized.result.syntaxCheck;
+                    const diags = sc.diagnostics || [];
+                    if (diags.length > 0) {
+                        const entries = diags.map((d: any) => ({
+                            filePath: sc.path || '',
+                            line: d.line,
+                            column: d.column,
+                            message: d.message || '未知错误',
+                            severity: (sc.status === 'ok' ? 'info' : 'error') as 'error' | 'warning' | 'info',
+                            code: sc.checker,
+                            checker: sc.checker,
+                            timestamp: Date.now(),
+                        }));
+                        pendingBufferRef.current.push({ kind: 'diagnostics', entries });
+                    }
+                }
+            } else if (chunk.type === 'init') {
+                pendingBufferRef.current.push({ kind: 'init', traceId: chunk.traceId });
+            } else if (chunk.type === 'error') {
+                pendingBufferRef.current.push({ kind: 'error', content: chunk.content || chunk.message || 'An internal error occurred' });
+            } else if (chunk.type === 'done') {
+                pendingBufferRef.current.push({ kind: 'done' });
             }
 
-            // text/reasoning 事件：累积到 pendingDeltasRef，通过 rAF 批量刷新
-            if (chunk.type === 'text' || chunk.type === 'reasoning') {
-                if (rafId !== null) {
-                    cancelAnimationFrame(rafId);
-                    flushPendingDeltas();
-                }
-                pendingDeltasRef.current.push({
-                    type: chunk.type,
-                    content: chunk.content || "",
-                    turn: chunk.turn,
-                });
+            // ── 刷新策略 ──
+            if (isTerminal) {
+                // terminal 事件：立即刷新
+                flushAllPending();
+                needsImmediateFlush = false;
+            } else {
+                // 非 terminal 事件：通过 rAF 延迟批量刷新
                 scheduleFlush();
-                return;
             }
-
-            // 非 text/reasoning 事件：先刷新 pending deltas
-            if (rafId !== null) {
-                cancelAnimationFrame(rafId);
-                flushPendingDeltas();
-            }
-
-            const sanitizedAnnotationParams = chunk.type === 'annotation'
-                ? sanitizeAnnotationParams(chunk.method, chunk.params)
-                : undefined;
-
-            setMessages(prev => {
-                const next = [...prev];
-                let lastIndex = next.length - 1;
-                let last = next[lastIndex];
-
-                if (!last || last.role !== "assistant" || (last.isFinal && chunk.type !== 'done' && chunk.type !== 'error' && chunk.type !== 'init')) {
-                    last = { 
-                        id: currentAssistantMsgId, 
-                        role: "assistant", 
-                        content: "", 
-                        parts: [], 
-                        timestamp: Date.now(),
-                        traceId: chunk.traceId
-                    };
-                    next.push(last);
-                    lastIndex = next.length - 1;
-                } else {
-                    last = { ...last, parts: [...(last.parts || [])] };
-                    next[lastIndex] = last;
-                }
-
-                switch (chunk.type) {
-                    case "init":
-                        last.traceId = chunk.traceId;
-                        break;
-                    case "annotation":
-                        last.parts.push({
-                            id: createClientId(),
-                            type: 'annotation',
-                            content: chunk.content || chunk.method || "",
-                            method: chunk.method,
-                            params: sanitizedAnnotationParams,
-                            timestamp: Date.now()
-                        });
-
-                        // 从 tool/result 注解中提取语法检查结果 → Problems 面板
-                        if (chunk.method === 'tool/result' && sanitizedAnnotationParams?.result?.syntaxCheck) {
-                            const sc = sanitizedAnnotationParams.result.syntaxCheck;
-                            const diags = sc.diagnostics || [];
-                            if (diags.length > 0) {
-                                const entries = diags.map((d: any) => ({
-                                    filePath: sc.path || '',
-                                    line: d.line,
-                                    column: d.column,
-                                    message: d.message || '未知错误',
-                                    severity: (sc.status === 'ok' ? 'info' : 'error') as 'error' | 'warning' | 'info',
-                                    code: sc.checker,
-                                    checker: sc.checker,
-                                    timestamp: Date.now(),
-                                }));
-                                addProblems(entries);
-                            }
-                        }
-                        break;
-                    case "error":
-                        last.parts.push({ 
-                            id: createClientId(), 
-                            type: 'error', 
-                            content: chunk.content || chunk.message || "An internal error occurred", 
-                            timestamp: Date.now() 
-                        });
-                        last.isFinal = true;
-                        break;
-                    case "done":
-                        last.isFinal = true;
-                        db.chatHistory.put({ ...sanitizeMessageForClient(userMsg), workspaceRoot }).catch(console.error);
-                        db.chatHistory.put({ ...sanitizeMessageForClient(last), workspaceRoot }).catch(console.error);
-                        break;
-                }
-
-                return trimMessagesForMemory(next);
-            });
         };
 
         // 构建用户指令：若有打开文件且有文本选中，附加文件路径与行列区间
@@ -655,12 +710,12 @@ export function useAgentSSE() {
                     controller.signal
                 );
                 
-                // 流结束后刷新 pending deltas
+                // 流结束后刷新 pending
                 if (rafId !== null) {
                     cancelAnimationFrame(rafId);
                     rafId = null;
                 }
-                flushPendingDeltas();
+                flushAllPending();
             } else {
 
             // ═══════════════════════════════════════
@@ -746,20 +801,20 @@ export function useAgentSSE() {
                 }
             }
 
-            // 【性能优化】流式结束后刷新所有尚未提交的 delta
+            // 流式结束后刷新所有尚未提交的 pending
             if (rafId !== null) {
                 cancelAnimationFrame(rafId);
                 rafId = null;
             }
-            flushPendingDeltas();
+            flushAllPending();
             } // 结束 else 块（Web SSE 路径）
         } catch (e: any) { 
-            // 异常时也刷新剩余的 delta
+            // 异常时也刷新剩余的 pending
             if (rafId !== null) {
                 cancelAnimationFrame(rafId);
                 rafId = null;
             }
-            flushPendingDeltas();
+            flushAllPending();
 
             if (e.name === 'AbortError') {
                 console.log("SSE Request Aborted");

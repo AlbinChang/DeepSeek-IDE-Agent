@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { AlertCircle, AlertTriangle, Info, X, ChevronDown, FileText } from 'lucide-react';
-import { useAgentContext, type ProblemEntry } from '@/providers/AgentContext';
+import { useAgentContext, useProblemContext, type ProblemEntry } from '@/providers/AgentContext';
 
 /**
  * Problems 面板 — VS Code 风格的问题列表
@@ -40,7 +40,8 @@ function getDirName(filePath: string): string {
 }
 
 export const ProblemList: React.FC = () => {
-    const { problems, clearProblems, workspaceRoot } = useAgentContext();
+    const { workspaceRoot } = useAgentContext();
+    const { problems, clearProblems } = useProblemContext();
     const [collapsedGroups, setCollapsedGroups] = React.useState<Set<string>>(new Set());
 
     // 按文件分组
