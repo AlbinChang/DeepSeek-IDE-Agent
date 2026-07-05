@@ -83,8 +83,8 @@
   <!-- Terminal -->
   <rect x="520" y="122" width="190" height="52" rx="8" fill="#0d9488" fill-opacity="0.08" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.3" filter="url(#shadow2)"/>
   <text x="615" y="142" text-anchor="middle" fill="#ccfbf1" font-size="12" font-weight="600">💻 集成终端</text>
-  <text x="615" y="158" text-anchor="middle" fill="#5eead4" font-size="9">xterm.js · PTY 真终端</text>
-  <text x="615" y="170" text-anchor="middle" fill="#2dd4bf" font-size="8">WebSocket 实时通信</text>
+  <text x="615" y="158" text-anchor="middle" fill="#5eead4" font-size="9">xterm.js · node-pty</text>
+  <text x="615" y="170" text-anchor="middle" fill="#2dd4bf" font-size="8">IPC 直连 · 零网络延迟</text>
 
   <!-- Search -->
   <rect x="730" y="122" width="190" height="52" rx="8" fill="#0d9488" fill-opacity="0.08" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.3" filter="url(#shadow2)"/>
@@ -116,12 +116,12 @@
   <text x="667" y="218" text-anchor="middle" fill="#2dd4bf" font-size="8">StatusBar 信息</text>
 
   <rect x="760" y="188" width="155" height="38" rx="6" fill="#0d9488" fill-opacity="0.04" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="837" y="204" text-anchor="middle" fill="#5eead4" font-size="10">🔄 内联补全</text>
-  <text x="837" y="218" text-anchor="middle" fill="#2dd4bf" font-size="8">Inline Completions</text>
+  <text x="837" y="204" text-anchor="middle" fill="#5eead4" font-size="10">📄 PDF / 图片预览</text>
+  <text x="837" y="218" text-anchor="middle" fill="#2dd4bf" font-size="8">原生渲染 · 零依赖</text>
 
   <rect x="930" y="188" width="195" height="38" rx="6" fill="#0d9488" fill-opacity="0.04" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="1027" y="204" text-anchor="middle" fill="#5eead4" font-size="10">🎨 可拖拽面板布局</text>
-  <text x="1027" y="218" text-anchor="middle" fill="#2dd4bf" font-size="8">resizable-panels</text>
+  <text x="1027" y="204" text-anchor="middle" fill="#5eead4" font-size="10">⚠️ 问题诊断面板</text>
+  <text x="1027" y="218" text-anchor="middle" fill="#2dd4bf" font-size="8">ProblemList · 按文件分组</text>
 
   <!-- Arrow from IDE to Agent -->
   <line x1="600" y1="240" x2="600" y2="460" stroke="#14b8a6" stroke-width="1.5" stroke-dasharray="6,3" opacity="0.4"/>
@@ -134,14 +134,14 @@
 
   <rect x="78" y="318" width="304" height="38" rx="6" fill="#f59e0b" fill-opacity="0.06" stroke="#f97316" stroke-width="1" stroke-opacity="0.2"/>
   <text x="230" y="333" text-anchor="middle" fill="#fef3c7" font-size="11" font-weight="600">🧠 思维链 (CoT) 推理</text>
-  <text x="230" y="349" text-anchor="middle" fill="#fcd34d" font-size="9">reasoning_content 流式可见</text>
+  <text x="230" y="349" text-anchor="middle" fill="#fcd34d" font-size="9">reasoning_content · IPC 事件流</text>
 
   <rect x="78" y="364" width="304" height="38" rx="6" fill="#f59e0b" fill-opacity="0.06" stroke="#f97316" stroke-width="1" stroke-opacity="0.2"/>
   <text x="230" y="379" text-anchor="middle" fill="#fef3c7" font-size="11" font-weight="600">📨 多轮对话管理</text>
   <text x="230" y="395" text-anchor="middle" fill="#fcd34d" font-size="9">AgentTurnEngine 工具循环</text>
 
   <rect x="78" y="410" width="145" height="24" rx="5" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="150" y="426" text-anchor="middle" fill="#fbbf24" font-size="9">SSE 流式输出</text>
+  <text x="150" y="426" text-anchor="middle" fill="#fbbf24" font-size="9">IPC 事件流</text>
 
   <rect x="237" y="410" width="145" height="24" rx="5" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
   <text x="309" y="426" text-anchor="middle" fill="#fbbf24" font-size="9">历史消息回放</text>
@@ -188,19 +188,19 @@
   <!-- Tool groups -->
   <rect x="78" y="658" width="195" height="32" rx="6" fill="#8b5cf6" fill-opacity="0.06" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.2"/>
   <text x="175" y="672" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">📁 FileTools</text>
-  <text x="175" y="686" text-anchor="middle" fill="#c4b5fd" font-size="8">读写 · 搜索 · 列表</text>
+  <text x="175" y="686" text-anchor="middle" fill="#c4b5fd" font-size="8">读写 · 搜索 · file_edit 精修</text>
 
   <rect x="285" y="658" width="180" height="32" rx="6" fill="#8b5cf6" fill-opacity="0.06" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.2"/>
-  <text x="375" y="672" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">💻 SystemTools</text>
-  <text x="375" y="686" text-anchor="middle" fill="#c4b5fd" font-size="8">终端命令执行</text>
+  <text x="375" y="672" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">✅ SyntaxCheck</text>
+  <text x="375" y="686" text-anchor="middle" fill="#c4b5fd" font-size="8">15+ 语言 · 自动触发</text>
 
   <rect x="78" y="700" width="195" height="32" rx="6" fill="#8b5cf6" fill-opacity="0.06" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.2"/>
   <text x="175" y="714" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">📋 TodoTools</text>
-  <text x="175" y="728" text-anchor="middle" fill="#c4b5fd" font-size="8">任务 CRUD</text>
+  <text x="175" y="728" text-anchor="middle" fill="#c4b5fd" font-size="8">任务 CRUD · SSOT</text>
 
   <rect x="285" y="700" width="180" height="32" rx="6" fill="#8b5cf6" fill-opacity="0.06" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.2"/>
-  <text x="375" y="714" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">🌐 BrowserTools</text>
-  <text x="375" y="728" text-anchor="middle" fill="#c4b5fd" font-size="8">Playwright 自动化</text>
+  <text x="375" y="714" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">💻 SystemTools</text>
+  <text x="375" y="728" text-anchor="middle" fill="#c4b5fd" font-size="8">PowerShell · CMD</text>
 
   <rect x="78" y="742" width="195" height="32" rx="6" fill="#8b5cf6" fill-opacity="0.06" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.2"/>
   <text x="175" y="756" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">🔌 MCP 自定义工具</text>
@@ -245,18 +245,18 @@
   <text x="980" y="686" text-anchor="middle" fill="#86efac" font-size="8">SourceControl · Diff · Commit</text>
 
   <rect x="838" y="700" width="285" height="32" rx="6" fill="#22c55e" fill-opacity="0.06" stroke="#4ade80" stroke-width="1" stroke-opacity="0.2"/>
-  <text x="980" y="714" text-anchor="middle" fill="#bbf7d0" font-size="10" font-weight="600">🔌 MCP 协议桥接</text>
-  <text x="980" y="728" text-anchor="middle" fill="#86efac" font-size="8">McpService · 外部工具扩展</text>
+  <text x="980" y="714" text-anchor="middle" fill="#bbf7d0" font-size="10" font-weight="600">📦 桌面打包</text>
+  <text x="980" y="728" text-anchor="middle" fill="#86efac" font-size="8">electron-builder · NSIS 安装包</text>
 
   <rect x="838" y="742" width="285" height="32" rx="6" fill="#22c55e" fill-opacity="0.06" stroke="#4ade80" stroke-width="1" stroke-opacity="0.2"/>
-  <text x="980" y="756" text-anchor="middle" fill="#bbf7d0" font-size="10" font-weight="600">🌐 浏览器自动化</text>
-  <text x="980" y="770" text-anchor="middle" fill="#86efac" font-size="8">Playwright MCP · 网页操作</text>
+  <text x="980" y="756" text-anchor="middle" fill="#bbf7d0" font-size="10" font-weight="600">🔌 MCP 协议桥接</text>
+  <text x="980" y="770" text-anchor="middle" fill="#86efac" font-size="8">McpService · 外部工具扩展</text>
 
   <rect x="838" y="784" width="135" height="24" rx="5" fill="#22c55e" fill-opacity="0.04" stroke="#4ade80" stroke-width="1" stroke-opacity="0.15"/>
   <text x="905" y="800" text-anchor="middle" fill="#86efac" font-size="9">多 Provider 切换</text>
 
   <rect x="986" y="784" width="137" height="24" rx="5" fill="#22c55e" fill-opacity="0.04" stroke="#4ade80" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="1054" y="800" text-anchor="middle" fill="#86efac" font-size="9">遥测与监控</text>
+  <text x="1054" y="800" text-anchor="middle" fill="#86efac" font-size="9">跨平台打包</text>
 
   <!-- ==================== CONNECTING ARROWS ==================== -->
 
@@ -293,7 +293,7 @@
   <g>
     <rect x="330" y="868" width="235" height="32" rx="6" fill="#f59e0b" fill-opacity="0.08" stroke="#f97316" stroke-width="0.5" stroke-opacity="0.15"/>
     <text x="447" y="882" text-anchor="middle" fill="#fcd34d" font-size="10">💭 思维链可见: reasoning_content</text>
-    <text x="447" y="895" text-anchor="middle" fill="#fbbf24" font-size="8">实时流式推理过程展示</text>
+    <text x="447" y="895" text-anchor="middle" fill="#fbbf24" font-size="8">IPC 事件流实时推理展示</text>
   </g>
 
   <g>
@@ -304,18 +304,18 @@
 
   <g>
     <rect x="830" y="868" width="295" height="32" rx="6" fill="#3b82f6" fill-opacity="0.08" stroke="#6366f1" stroke-width="0.5" stroke-opacity="0.15"/>
-    <text x="977" y="882" text-anchor="middle" fill="#93c5fd" font-size="10">📦 多模型支持: DeepSeek / OpenAI / MCP</text>
+    <text x="977" y="882" text-anchor="middle" fill="#93c5fd" font-size="10">📦 多模型支持: DeepSeek / OpenAI / 兼容</text>
     <text x="977" y="895" text-anchor="middle" fill="#60a5fa" font-size="8">AIProviderFactory 统一路由</text>
   </g>
 
   <g>
     <rect x="80" y="910" width="235" height="24" rx="4" fill="#22c55e" fill-opacity="0.06" stroke="#4ade80" stroke-width="0.5" stroke-opacity="0.1"/>
-    <text x="197" y="926" text-anchor="middle" fill="#86efac" font-size="9">🌐 浏览器自动化 (Playwright)</text>
+    <text x="197" y="926" text-anchor="middle" fill="#86efac" font-size="9">📄 PDF / 图片原生预览</text>
   </g>
 
   <g>
     <rect x="330" y="910" width="235" height="24" rx="4" fill="#22c55e" fill-opacity="0.06" stroke="#4ade80" stroke-width="0.5" stroke-opacity="0.1"/>
-    <text x="447" y="926" text-anchor="middle" fill="#86efac" font-size="9">📋 任务清单 SSOT 管理</text>
+    <text x="447" y="926" text-anchor="middle" fill="#86efac" font-size="9">✅ 保存时自动语法检查</text>
   </g>
 
   <g>
@@ -325,6 +325,6 @@
 
   <g>
     <rect x="830" y="910" width="295" height="24" rx="4" fill="#22c55e" fill-opacity="0.06" stroke="#4ade80" stroke-width="0.5" stroke-opacity="0.1"/>
-    <text x="977" y="926" text-anchor="middle" fill="#86efac" font-size="9">🖥️ 完整 IDE: 编辑器 + 终端 + Git</text>
+    <text x="977" y="926" text-anchor="middle" fill="#86efac" font-size="9">🖥️ 完整 IDE: 编辑器 + 终端 + Git + AI</text>
   </g>
 </svg>

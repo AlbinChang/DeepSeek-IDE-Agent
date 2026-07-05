@@ -57,11 +57,11 @@
   <text x="600" y="42" text-anchor="middle" fill="url(#titleGrad)" font-size="24" font-weight="700" filter="url(#glow)">DeepSeek IDE Agent — 技术架构图</text>
   <line x1="350" y1="55" x2="850" y2="55" stroke="#14b8a6" stroke-width="1" opacity="0.3"/>
 
-  <!-- ==================== LAYER 1: CLIENT ==================== -->
+  <!-- ==================== LAYER 1: RENDERER (Electron) ==================== -->
   <rect x="40" y="75" width="1120" height="150" rx="12" fill="#0d9488" fill-opacity="0.08" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.3"/>
   <rect x="40" y="75" width="1120" height="28" rx="12" fill="#0d9488" fill-opacity="0.15"/>
   <rect x="40" y="91" width="1120" height="12" fill="#0d9488" fill-opacity="0.15"/>
-  <text x="60" y="95" fill="#14b8a6" font-size="13" font-weight="700">🖥️ 客户端层 — Browser (React 19 + Vite 7 + TypeScript)</text>
+  <text x="60" y="95" fill="#14b8a6" font-size="13" font-weight="700">🖥️ 渲染进程 — Electron Renderer (React 19 + Vite 7 + TypeScript)</text>
 
   <!-- Client boxes row 1 -->
   <rect x="65" y="115" width="200" height="46" rx="8" fill="#0d9488" fill-opacity="0.12" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.4"/>
@@ -74,7 +74,7 @@
 
   <rect x="505" y="115" width="200" height="46" rx="8" fill="#0d9488" fill-opacity="0.12" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.4"/>
   <text x="605" y="134" text-anchor="middle" fill="#ccfbf1" font-size="11" font-weight="600">Agent 对话</text>
-  <text x="605" y="150" text-anchor="middle" fill="#5eead4" font-size="9">AgentChat · Markdown · 流式</text>
+  <text x="605" y="150" text-anchor="middle" fill="#5eead4" font-size="9">AgentChat · Markdown · IPC</text>
 
   <rect x="725" y="115" width="200" height="46" rx="8" fill="#0d9488" fill-opacity="0.12" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.4"/>
   <text x="825" y="134" text-anchor="middle" fill="#ccfbf1" font-size="11" font-weight="600">版本 &amp; 搜索</text>
@@ -82,16 +82,16 @@
 
   <rect x="945" y="115" width="195" height="46" rx="8" fill="#0d9488" fill-opacity="0.12" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.4"/>
   <text x="1042" y="134" text-anchor="middle" fill="#ccfbf1" font-size="11" font-weight="600">Hooks &amp; 服务</text>
-  <text x="1042" y="150" text-anchor="middle" fill="#5eead4" font-size="9">useAgentSSE · WorkerManager</text>
+  <text x="1042" y="150" text-anchor="middle" fill="#5eead4" font-size="9">useAgentSSE · electronBridge</text>
 
-  <!-- Client row 2 - Workers & Services -->
+  <!-- Client row 2 - IPC Bridge & Services -->
   <rect x="65" y="172" width="180" height="40" rx="6" fill="#0d9488" fill-opacity="0.06" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.2"/>
-  <text x="155" y="189" text-anchor="middle" fill="#5eead4" font-size="10">socket.worker.ts</text>
-  <text x="155" y="203" text-anchor="middle" fill="#2dd4bf" font-size="8">WebSocket Worker</text>
+  <text x="155" y="189" text-anchor="middle" fill="#5eead4" font-size="10">electron-bridge.ts</text>
+  <text x="155" y="203" text-anchor="middle" fill="#2dd4bf" font-size="8">IPC 桥接层</text>
 
   <rect x="260" y="172" width="180" height="40" rx="6" fill="#0d9488" fill-opacity="0.06" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.2"/>
-  <text x="350" y="189" text-anchor="middle" fill="#5eead4" font-size="10">WorkspaceConnectionService</text>
-  <text x="350" y="203" text-anchor="middle" fill="#2dd4bf" font-size="8">工作区管理</text>
+  <text x="350" y="189" text-anchor="middle" fill="#5eead4" font-size="10">useAgentSSE.ts</text>
+  <text x="350" y="203" text-anchor="middle" fill="#2dd4bf" font-size="8">Agent IPC 事件消费</text>
 
   <rect x="455" y="172" width="180" height="40" rx="6" fill="#0d9488" fill-opacity="0.06" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.2"/>
   <text x="545" y="189" text-anchor="middle" fill="#5eead4" font-size="10">db.ts (IndexedDB)</text>
@@ -102,37 +102,36 @@
   <text x="740" y="203" text-anchor="middle" fill="#2dd4bf" font-size="8">全局状态管理</text>
 
   <rect x="845" y="172" width="180" height="40" rx="6" fill="#0d9488" fill-opacity="0.06" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.2"/>
-  <text x="935" y="189" text-anchor="middle" fill="#5eead4" font-size="10">WorkspaceSwitchService</text>
-  <text x="935" y="203" text-anchor="middle" fill="#2dd4bf" font-size="8">多工作区切换</text>
+  <text x="935" y="189" text-anchor="middle" fill="#5eead4" font-size="10">preload.ts</text>
+  <text x="935" y="203" text-anchor="middle" fill="#2dd4bf" font-size="8">contextBridge API</text>
 
-  <!-- ==================== LAYER 2: COMMUNICATION ==================== -->
-  <!-- Arrows client->comm -->
+  <!-- ==================== LAYER 2: COMMUNICATION (Electron IPC) ==================== -->
   <line x1="600" y1="225" x2="600" y2="258" stroke="#6366f1" stroke-width="2" stroke-dasharray="6,3"/>
 
   <rect x="40" y="262" width="1120" height="62" rx="12" fill="#6366f1" fill-opacity="0.06" stroke="#8b5cf6" stroke-width="1" stroke-opacity="0.3"/>
   <rect x="40" y="262" width="1120" height="26" rx="12" fill="#6366f1" fill-opacity="0.12"/>
   <rect x="40" y="278" width="1120" height="10" fill="#6366f1" fill-opacity="0.12"/>
-  <text x="60" y="281" fill="#a5b4fc" font-size="13" font-weight="700">🔗 通信层 — Server-Sent Events / WebSocket / HTTP REST</text>
+  <text x="60" y="281" fill="#a5b4fc" font-size="13" font-weight="700">🔗 通信层 — Electron IPC (contextBridge + ipcMain/ipcRenderer)</text>
 
-  <rect x="65" y="295" width="250" height="22" rx="5" fill="#6366f1" fill-opacity="0.1" stroke="#818cf8" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="190" y="310" text-anchor="middle" fill="#c7d2fe" font-size="10">📡 SSE — ChatSSERoute · 三路并发流(思维/回答/状态)</text>
+  <rect x="65" y="295" width="260" height="22" rx="5" fill="#6366f1" fill-opacity="0.1" stroke="#818cf8" stroke-width="1" stroke-opacity="0.3"/>
+  <text x="195" y="310" text-anchor="middle" fill="#c7d2fe" font-size="10">📡 Agent IPC — AgentChat 事件流 · 双向通道</text>
 
-  <rect x="335" y="295" width="290" height="22" rx="5" fill="#6366f1" fill-opacity="0.1" stroke="#818cf8" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="480" y="310" text-anchor="middle" fill="#c7d2fe" font-size="10">🔌 WebSocket — ContextWS · CompletionWS · Terminal</text>
+  <rect x="345" y="295" width="270" height="22" rx="5" fill="#6366f1" fill-opacity="0.1" stroke="#818cf8" stroke-width="1" stroke-opacity="0.3"/>
+  <text x="480" y="310" text-anchor="middle" fill="#c7d2fe" font-size="10">📁 File IPC — file:read · file:write · file:search</text>
 
-  <rect x="645" y="295" width="230" height="22" rx="5" fill="#6366f1" fill-opacity="0.1" stroke="#818cf8" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="760" y="310" text-anchor="middle" fill="#c7d2fe" font-size="10">🌐 REST — FileIO · Settings · Git · Tools</text>
+  <rect x="635" y="295" width="260" height="22" rx="5" fill="#6366f1" fill-opacity="0.1" stroke="#818cf8" stroke-width="1" stroke-opacity="0.3"/>
+  <text x="765" y="310" text-anchor="middle" fill="#c7d2fe" font-size="10">💻 Terminal IPC — terminal:* · node-pty</text>
 
-  <rect x="895" y="295" width="245" height="22" rx="5" fill="#6366f1" fill-opacity="0.1" stroke="#818cf8" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="1017" y="310" text-anchor="middle" fill="#c7d2fe" font-size="10">🔄 WebSocket — terminal-server 独立进程</text>
+  <rect x="915" y="295" width="225" height="22" rx="5" fill="#6366f1" fill-opacity="0.1" stroke="#818cf8" stroke-width="1" stroke-opacity="0.3"/>
+  <text x="1027" y="310" text-anchor="middle" fill="#c7d2fe" font-size="10">🔧 Git/Settings/Diag IPC</text>
 
-  <!-- ==================== LAYER 3: SERVER ==================== -->
+  <!-- ==================== LAYER 3: MAIN PROCESS (Electron) ==================== -->
   <line x1="600" y1="324" x2="600" y2="358" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6,3"/>
 
   <rect x="40" y="362" width="1120" height="200" rx="12" fill="#f59e0b" fill-opacity="0.06" stroke="#f97316" stroke-width="1" stroke-opacity="0.3"/>
   <rect x="40" y="362" width="1120" height="28" rx="12" fill="#f59e0b" fill-opacity="0.12"/>
   <rect x="40" y="378" width="1120" height="12" fill="#f59e0b" fill-opacity="0.12"/>
-  <text x="60" y="382" fill="#fbbf24" font-size="13" font-weight="700">⚙️ 服务端层 — Node.js + Fastify 5 + TypeScript</text>
+  <text x="60" y="382" fill="#fbbf24" font-size="13" font-weight="700">⚙️ Electron 主进程 — Node.js + Agent 引擎 + IPC Handler</text>
 
   <!-- Server core services -->
   <rect x="65" y="400" width="210" height="50" rx="8" fill="#f59e0b" fill-opacity="0.1" stroke="#f97316" stroke-width="1" stroke-opacity="0.4"/>
@@ -181,26 +180,26 @@
   <text x="1067" y="495" text-anchor="middle" fill="#fbbf24" font-size="8">实时上下文同步</text>
 
   <!-- Server tools row -->
-  <rect x="65" y="516" width="130" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="130" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">tools/ 工具链</text>
+  <rect x="65" y="516" width="140" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="135" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">tools/ 工具链</text>
 
-  <rect x="210" y="516" width="130" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="275" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">GitService</text>
+  <rect x="220" y="516" width="145" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="292" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">SyntaxCheckService</text>
 
-  <rect x="355" y="516" width="140" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="425" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">SettingsService</text>
+  <rect x="380" y="516" width="120" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="440" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">GitService</text>
 
-  <rect x="510" y="516" width="140" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="580" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">TodoService</text>
+  <rect x="515" y="516" width="130" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="580" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">SettingsService</text>
 
-  <rect x="665" y="516" width="140" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="735" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">UserService</text>
+  <rect x="660" y="516" width="130" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="725" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">TodoService</text>
 
-  <rect x="820" y="516" width="150" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="895" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">TelemetryService</text>
+  <rect x="805" y="516" width="120" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="865" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">McpService</text>
 
-  <rect x="985" y="516" width="145" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
-  <text x="1057" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">CompletionService</text>
+  <rect x="940" y="516" width="145" height="36" rx="6" fill="#f59e0b" fill-opacity="0.04" stroke="#f97316" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="1012" y="538" text-anchor="middle" fill="#fbbf24" font-size="10">CompletionService</text>
 
   <!-- ==================== LAYER 4: AI PROVIDERS ==================== -->
   <line x1="600" y1="562" x2="600" y2="598" stroke="#ef4444" stroke-width="2" stroke-dasharray="6,3"/>
@@ -212,10 +211,10 @@
 
   <!-- AI provider boxes -->
   <rect x="65" y="638" width="260" height="28" rx="6" fill="#ef4444" fill-opacity="0.08" stroke="#f87171" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="195" y="656" text-anchor="middle" fill="#fecaca" font-size="11">🔴 DeepSeek (主) — deepseek-reasoner · deepseek-chat</text>
+  <text x="195" y="656" text-anchor="middle" fill="#fecaca" font-size="11">🔴 DeepSeek — deepseek-reasoner · deepseek-chat · V3.2</text>
 
   <rect x="345" y="638" width="230" height="28" rx="6" fill="#ef4444" fill-opacity="0.08" stroke="#f87171" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="460" y="656" text-anchor="middle" fill="#fecaca" font-size="11">🔵 OpenAI — GPT-4o · GPT-4.1</text>
+  <text x="460" y="656" text-anchor="middle" fill="#fecaca" font-size="11">🔵 OpenAI — GPT-4o · GPT-4.1 · o1/o3</text>
 
   <rect x="595" y="638" width="260" height="28" rx="6" fill="#ef4444" fill-opacity="0.08" stroke="#f87171" stroke-width="1" stroke-opacity="0.3"/>
   <text x="725" y="656" text-anchor="middle" fill="#fecaca" font-size="11">🟣 OpenAI-Compatible — 任意兼容 API</text>
@@ -232,24 +231,24 @@
   <text x="60" y="738" fill="#93c5fd" font-size="13" font-weight="700">💾 存储 &amp; 外部系统</text>
 
   <rect x="65" y="750" width="200" height="24" rx="5" fill="#3b82f6" fill-opacity="0.08" stroke="#60a5fa" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="165" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">📁 File System (工作区)</text>
+  <text x="165" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">📁 File System (fs 直调)</text>
 
   <rect x="285" y="750" width="200" height="24" rx="5" fill="#3b82f6" fill-opacity="0.08" stroke="#60a5fa" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="385" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">🗄️ IndexedDB (前端缓存)</text>
+  <text x="385" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">💾 electron-store (设置)</text>
 
   <rect x="505" y="750" width="200" height="24" rx="5" fill="#3b82f6" fill-opacity="0.08" stroke="#60a5fa" stroke-width="1" stroke-opacity="0.3"/>
   <text x="605" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">🐙 Git Repository</text>
 
   <rect x="725" y="750" width="200" height="24" rx="5" fill="#3b82f6" fill-opacity="0.08" stroke="#60a5fa" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="825" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">🐚 System Shell (PTY)</text>
+  <text x="825" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">🐚 node-pty (终端)</text>
 
   <rect x="945" y="750" width="195" height="24" rx="5" fill="#3b82f6" fill-opacity="0.08" stroke="#60a5fa" stroke-width="1" stroke-opacity="0.3"/>
-  <text x="1042" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">🌍 Browser (Playwright)</text>
+  <text x="1042" y="766" text-anchor="middle" fill="#bfdbfe" font-size="10">🗄️ IndexedDB (前端缓存)</text>
 
-  <!-- ==================== RIGHT SIDE: DATA FLOW INDICATOR ==================== -->
+  <!-- ==================== BOTTOM: DATA FLOW ==================== -->
   <rect x="10" y="790" width="1180" height="100" rx="10" fill="#ffffff" fill-opacity="0.02" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.1"/>
 
-  <text x="30" y="815" fill="#ccfbf1" font-size="12" font-weight="700">📊 数据流</text>
+  <text x="30" y="815" fill="#ccfbf1" font-size="12" font-weight="700">📊 数据流 (Electron IPC)</text>
 
   <!-- Flow arrows -->
   <g>
@@ -259,7 +258,7 @@
   <text x="190" y="847" fill="#14b8a6" font-size="14">→</text>
   <g>
     <rect x="210" y="830" width="150" height="24" rx="4" fill="#6366f1" fill-opacity="0.15"/>
-    <text x="285" y="846" text-anchor="middle" fill="#a5b4fc" font-size="9">SSE / WS / REST</text>
+    <text x="285" y="846" text-anchor="middle" fill="#a5b4fc" font-size="9">IPC 事件通道</text>
   </g>
   <text x="370" y="847" fill="#8b5cf6" font-size="14">→</text>
   <g>
@@ -279,12 +278,8 @@
   <text x="930" y="847" fill="#6366f1" font-size="14">→</text>
   <g>
     <rect x="950" y="830" width="180" height="24" rx="4" fill="#14b8a6" fill-opacity="0.15"/>
-    <text x="1040" y="846" text-anchor="middle" fill="#5eead4" font-size="9">流式响应 / UI 渲染</text>
+    <text x="1040" y="846" text-anchor="middle" fill="#5eead4" font-size="9">IPC 回流 → UI 渲染</text>
   </g>
 
   <text x="30" y="880" fill="#64748b" font-size="9">推理模式: 思维链(CoT) → reasoning_content 流 → text 流 → stage 状态流 → 工具调用循环 → 评估 Agent 核验 → 循环迭代 / 目标达成</text>
-
-  <!-- Terminal server bridge -->
-  <rect x="990" y="862" width="170" height="22" rx="4" fill="#a855f7" fill-opacity="0.1" stroke="#c084fc" stroke-width="1" stroke-opacity="0.2"/>
-  <text x="1075" y="877" text-anchor="middle" fill="#d8b4fe" font-size="8">terminal-server (独立进程)</text>
 </svg>
