@@ -41,6 +41,27 @@ const COMMAND_TIMEOUT_MS = 15_000;
 /** 诊断结果中保留的最大错误条数 */
 const MAX_DIAGNOSTICS = 30;
 
+/** 非代码文件扩展名（二进制/媒体/文档），无需诊断检查 */
+const NON_CODE_EXTENSIONS = new Set([
+    // 文档
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    // 图片
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.ico', '.tiff', '.tif',
+    // 压缩包
+    '.zip', '.tar', '.gz', '.rar', '.7z', '.bz2', '.xz',
+    // 音视频
+    '.mp3', '.mp4', '.avi', '.mov', '.wav', '.flac', '.ogg', '.webm', '.mkv',
+    // 字体
+    '.ttf', '.otf', '.woff', '.woff2', '.eot',
+    // 二进制 / 可执行
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.class', '.jar', '.war',
+    '.pyc', '.o', '.obj', '.lib', '.a',
+    // 数据库
+    '.db', '.sqlite', '.sqlite3',
+    // 其他
+    '.DS_Store',
+]);
+
 // ── 工具函数 ──
 function offsetToLineColumn(source: string, offset: number): { line: number; column: number } {
     const lines = source.substring(0, offset).split('\n');
@@ -386,9 +407,191 @@ async function checkJava(filePath: string): Promise<DiagnosticsResult> {
     };
 }
 
+/** HTML 标签平衡检查 */
+async function checkHtml(filePath: string): Promise<DiagnosticsResult> {
+    const start = Date.now();
+    const ext = '.html';
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const diagnostics: DiagnosticEntry[] = [];
+
+        const voidElements = new Set([
+            'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+            'link', 'meta', 'param', 'source', 'track', 'wbr'
+        ]);
+
+        const tagStack: { name: string; line: number }[] = [];
+        const tagRegex = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\/?\s*([a-zA-Z][a-zA-Z0-9_-]*)\s*[^>]*>/g;
+        let match: RegExpExecArray | null;
+
+        while ((match = tagRegex.exec(content)) !== null) {
+            if (!match[1]) continue;
+            const tagName = match[1].toLowerCase();
+            const fullMatch = match[0];
+            const isClosing = fullMatch.startsWith('</');
+            const isVoid = voidElements.has(tagName);
+            const line = content.slice(0, match.index).split('\n').length;
+
+            if (isClosing) {
+                if (tagStack.length === 0) {
+                    diagnostics.push({ line, column: 1, message: `多余的闭合标签 </${tagName}>。`, severity: 'warning' });
+                } else {
+                    const top = tagStack[tagStack.length - 1];
+                    if (top.name === tagName) {
+                        tagStack.pop();
+                    } else {
+                        diagnostics.push({ line, column: 1, message: `标签不匹配：期望 </${top.name}>（第 ${top.line} 行），遇到 </${tagName}>。`, severity: 'warning' });
+                        let foundIdx = -1;
+                        for (let k = tagStack.length - 1; k >= 0; k--) {
+                            if (tagStack[k].name === tagName) { foundIdx = k; break; }
+                        }
+                        if (foundIdx >= 0) tagStack.splice(foundIdx);
+                    }
+                }
+            } else if (!isClosing && !isVoid && !fullMatch.endsWith('/>')) {
+                tagStack.push({ name: tagName, line });
+            }
+        }
+
+        for (const unclosed of tagStack) {
+            diagnostics.push({ line: unclosed.line, column: 1, message: `未闭合的标签 <${unclosed.name}>。`, severity: 'warning' });
+        }
+
+        return {
+            success: true, filePath, extension: ext, checker: 'html-tag-balance',
+            passed: diagnostics.length === 0,
+            summary: diagnostics.length === 0 ? 'HTML 标签结构检查通过。' : `HTML 结构检查发现 ${diagnostics.length} 个问题。`,
+            diagnostics, durationMs: Date.now() - start
+        };
+    } catch (e: any) {
+        return { success: false, filePath, extension: ext, checker: 'html-tag-balance', passed: false, summary: `HTML 检查异常：${e?.message}`, diagnostics: [], durationMs: Date.now() - start };
+    }
+}
+
+/** CSS 大括号平衡检查 */
+async function checkCss(filePath: string): Promise<DiagnosticsResult> {
+    const start = Date.now();
+    const ext = '.css';
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const diagnostics: DiagnosticEntry[] = [];
+        const stripped = content.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+        let braceDepth = 0;
+        const lines = stripped.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+            for (let j = 0; j < lines[i].length; j++) {
+                if (lines[i][j] === '{') braceDepth++;
+                if (lines[i][j] === '}') {
+                    braceDepth--;
+                    if (braceDepth < 0) {
+                        diagnostics.push({ line: i + 1, column: j + 1, message: '多余的右大括号 "}"。', severity: 'error' });
+                        braceDepth = 0;
+                    }
+                }
+            }
+        }
+        if (braceDepth > 0) {
+            diagnostics.push({ line: lines.length, column: 1, message: `缺少 ${braceDepth} 个右大括号 "}"。`, severity: 'error' });
+        }
+
+        return {
+            success: true, filePath, extension: ext, checker: 'css-brace-balance',
+            passed: diagnostics.length === 0,
+            summary: diagnostics.length === 0 ? 'CSS 大括号结构检查通过。' : `CSS 结构检查发现 ${diagnostics.length} 个问题。`,
+            diagnostics, durationMs: Date.now() - start
+        };
+    } catch (e: any) {
+        return { success: false, filePath, extension: ext, checker: 'css-brace-balance', passed: false, summary: `CSS 检查异常：${e?.message}`, diagnostics: [], durationMs: Date.now() - start };
+    }
+}
+
+/** XML 良构性检查 */
+async function checkXml(filePath: string): Promise<DiagnosticsResult> {
+    const start = Date.now();
+    const ext = '.xml';
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const diagnostics: DiagnosticEntry[] = [];
+        const cleaned = content.replace(/<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length)).replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, (m) => ' '.repeat(m.length));
+
+        const tagRegex = /<\/?\s*([a-zA-Z_][\w.\-]*)\s*([^>]*?)>/g;
+        const tagStack: { name: string; line: number }[] = [];
+        let match: RegExpExecArray | null;
+
+        while ((match = tagRegex.exec(cleaned)) !== null) {
+            const tagName = match[1];
+            const fullMatch = match[0];
+            const isClosing = fullMatch.startsWith('</');
+            const isSelfClosing = fullMatch.endsWith('/>');
+            const line = content.slice(0, match.index).split('\n').length;
+            if (fullMatch.startsWith('<?') || fullMatch.startsWith('<!')) continue;
+
+            if (isClosing) {
+                if (tagStack.length === 0) {
+                    diagnostics.push({ line, column: 1, message: `多余的闭合标签 </${tagName}>。`, severity: 'error' });
+                } else {
+                    const top = tagStack[tagStack.length - 1];
+                    if (top.name === tagName) { tagStack.pop(); }
+                    else {
+                        diagnostics.push({ line, column: 1, message: `XML 标签不匹配：期望 </${top.name}>（第 ${top.line} 行），遇到 </${tagName}>。`, severity: 'error' });
+                        let foundIdx = -1;
+                        for (let k = tagStack.length - 1; k >= 0; k--) {
+                            if (tagStack[k].name === tagName) { foundIdx = k; break; }
+                        }
+                        if (foundIdx >= 0) tagStack.splice(foundIdx);
+                    }
+                }
+            } else if (!isSelfClosing) {
+                tagStack.push({ name: tagName, line });
+            }
+        }
+
+        for (const unclosed of tagStack) {
+            diagnostics.push({ line: unclosed.line, column: 1, message: `XML 元素 <${unclosed.name}> 未闭合。`, severity: 'error' });
+        }
+
+        return {
+            success: true, filePath, extension: ext, checker: 'xml-wellformed',
+            passed: diagnostics.length === 0,
+            summary: diagnostics.length === 0 ? 'XML 良构性检查通过。' : `XML 良构性检查发现 ${diagnostics.length} 个问题。`,
+            diagnostics, durationMs: Date.now() - start
+        };
+    } catch (e: any) {
+        return { success: false, filePath, extension: ext, checker: 'xml-wellformed', passed: false, summary: `XML 检查异常：${e?.message}`, diagnostics: [], durationMs: Date.now() - start };
+    }
+}
+
+/** Markdown 基础检查（Markdown 是宽容格式，仅验证可读性） */
+async function checkMarkdown(filePath: string): Promise<DiagnosticsResult> {
+    const start = Date.now();
+    const ext = '.md';
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        return {
+            success: true, filePath, extension: ext, checker: 'md-basic',
+            passed: true,
+            summary: content.trim().length === 0 ? 'Markdown 文件内容为空。' : 'Markdown 语法检查通过（纯文本标记语言，无严格语法约束）。',
+            diagnostics: [], durationMs: Date.now() - start
+        };
+    } catch (e: any) {
+        return { success: false, filePath, extension: ext, checker: 'md-basic', passed: false, summary: `Markdown 检查异常：${e?.message}`, diagnostics: [], durationMs: Date.now() - start };
+    }
+}
+
 // ── 主入口：单文件诊断调度 ──
 async function checkOne(absolutePath: string): Promise<DiagnosticsResult> {
     const ext = path.extname(absolutePath).toLowerCase();
+
+    // 非代码文件（PDF、PNG 等）无需诊断检查，直接跳过
+    if (NON_CODE_EXTENSIONS.has(ext)) {
+        return {
+            success: true, filePath: absolutePath, extension: ext,
+            checker: 'non-code', passed: true,
+            summary: `非代码文件 (${ext})，无需语法检查。`,
+            diagnostics: [], durationMs: 0
+        };
+    }
 
     try {
         // 确保文件存在
@@ -420,6 +623,17 @@ async function checkOne(absolutePath: string): Promise<DiagnosticsResult> {
                 return checkPython(absolutePath);
             case '.java':
                 return checkJava(absolutePath);
+            case '.html':
+            case '.htm':
+                return checkHtml(absolutePath);
+            case '.css':
+                return checkCss(absolutePath);
+            case '.xml':
+            case '.pom':
+                return checkXml(absolutePath);
+            case '.md':
+            case '.markdown':
+                return checkMarkdown(absolutePath);
             default:
                 return {
                     success: true, filePath: absolutePath, extension: ext,
