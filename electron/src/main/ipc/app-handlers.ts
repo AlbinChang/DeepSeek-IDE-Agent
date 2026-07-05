@@ -70,6 +70,7 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
     // ── 应用信息 ──
     ipcMain.handle('app:info', async () => {
         const { app } = await import('electron');
+        const os = await import('os');
         return {
             version: app.getVersion(),
             platform: process.platform,
@@ -78,6 +79,7 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
             nodeVersion: process.versions.node,
             chromeVersion: process.versions.chrome,
             isDev: !app.isPackaged,
+            username: process.env.USERNAME || os.userInfo().username || 'unknown',
         };
     });
 

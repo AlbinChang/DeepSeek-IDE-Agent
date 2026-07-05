@@ -156,6 +156,7 @@ interface AppInfo {
     electronVersion: string;
     nodeVersion: string;
     isDev: boolean;
+    username: string;
 }
 
 interface SystemEvent {

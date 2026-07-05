@@ -1,5 +1,5 @@
 ﻿import React, { useEffect, useState } from 'react';
-import { GitBranch, Hash, Activity, User, Cpu, Code2 } from 'lucide-react';
+import { GitBranch, Hash, Activity, User, Code2 } from 'lucide-react';
 import { USER_ID, API_BASE, GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { electronBridge } from '@/services/electron-bridge';
@@ -68,9 +68,19 @@ export const StatusBar: React.FC = () => {
             try {
                 // Electron 模式：跳过 HTTP 轮询，使用本地系统信息
                 if (electronBridge.isElectron) {
+                    // 获取真实 Windows 用户名
+                    let username = 'Electron';
+                    try {
+                        const appInfo = await electronBridge.getAppInfo();
+                        if (appInfo?.username) {
+                            username = appInfo.username;
+                        }
+                    } catch {
+                        // 获取失败时回退到默认值
+                    }
                     setStatus(prev => ({
                         ...prev,
-                        user: { id: USER_ID, name: 'Electron' },
+                        user: { id: username, name: username },
                         model: { provider: prev?.model?.provider || 'local', id: prev?.model?.id || 'electron' },
                         git: prev?.git || { branch: '', isDirty: false, initialized: false },
                         tokens: prev?.tokens || { total: 0 },
@@ -168,24 +178,13 @@ export const StatusBar: React.FC = () => {
 
     return (
         <div data-testid="status-bar" className="h-[24px] w-full bg-[#0a0a0a] flex items-center justify-between px-3 text-white select-none font-medium tracking-tight border-t border-white/10">
-            {/* 左侧：用户信息 & 模型信息 (对齐 36.1 节新规) */}
+            {/* 左侧：用户信息 & Git 分支 */}
             <div className="flex items-center gap-4 h-full">
                 <div className="flex items-center gap-1.5 px-1 hover:bg-white/5 rounded-sm transition-colors h-full" title={`用户 ID: ${status?.user?.id || '?'}`}>
                     <div className="w-1.5 h-1.5 rounded-full bg-white opacity-40 animate-pulse" />
                     <User size={10} className="text-white opacity-60" />
                     <span className="font-black uppercase tracking-[0.1em] text-[8px] truncate max-w-[80px] text-white underline decoration-white/20 underline-offset-2">{status?.user?.name || USER_ID}</span>
                 </div>
-
-                {status?.model && status.model.provider && (
-                    <div 
-                        className="flex items-center gap-1.5 border-l border-white/10 pl-3 h-[10px] cursor-help"
-                        title={`当前算力模型: ${status.model.provider} (${status.model.id})`}
-                    >
-                        <Cpu size={10} className="text-white opacity-40" />
-                        <span className="font-black uppercase tracking-[0.1em] text-[8px] text-white underline decoration-white/30 underline-offset-2">{status.model.provider}</span>
-                        <span className="opacity-100 truncate max-w-[100px] text-[7px] font-mono ml-1 text-white">{status.model.id}</span>
-                    </div>
-                )}
 
                 <div 
                     className="flex items-center gap-1.5 border-l border-white/10 pl-3 group h-[10px] cursor-help"
