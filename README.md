@@ -47,7 +47,7 @@
 ### 2.1 克隆仓库
 
 ```powershell
-git clone https://github.com/your-org/web-ide-agent.git
+git clone https://github.com/AlbinChang/DeepSeek-IDE-Agent.git
 cd web-ide-agent
 ```
 
