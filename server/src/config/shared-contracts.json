@@ -55,6 +55,18 @@
         "素材不足时必须继续探索新材料或标注待确认，禁止靠重复编造填充篇幅"
       ]
     },
+    "document_encoding_integrity": {
+      "id": "document-encoding-integrity",
+      "description": "【P1】文档编码完整性 — 生成/转换文档时乱码属于 P1 级事故，绝对禁止发生",
+      "rules": [
+        "【P1-铁律】任何文档生成、转换、导出操作（MD→PDF、MD→HTML、HTML→PDF、DOCX 生成、PPT 生成等），输出文件出现乱码字符即判定为 P1 级质量事故，必须立即修复。乱码定义：用户无法正常阅读的字符（如问号替代中文、方块、�、åˆ†æž、未解码的 Unicode 转义序列等）",
+        "【UTF-8 端到端】整个文档管线必须强制使用 UTF-8 编码，不得在任何环节退化：① file_write 创建 .md/.html/.css/.txt 等文本文件时，必须显式传入 encoding: \"utf-8\"；② 使用 Pandoc 转换时必须加 --from markdown+smart --to html5 --standalone 并确保输入文件已存为 UTF-8；③ HTML 模板/中间产物开头必须包含 <meta charset=\"UTF-8\">；④ wkhtmltopdf/pdfkit 调用时 encoding 选项必须设为 'UTF-8'；⑤ WeasyPrint 渲染 HTML 时 HTML 对象须指定 encoding='utf-8'；⑥ 任何 subprocess/exec 调用外部转换工具时必须设置环境变量 PYTHONIOENCODING=utf-8 或对应工具的编码参数",
+        "【中文 Windows 特别约束】Windows 中文环境下的编码陷阱（极易出错）：① PowerShell 的 Out-File/Set-Content 默认编码为 UTF-16 LE，必须显式加 -Encoding UTF8；② cmd.exe 的 type/echo 重定向 > 默认使用 GBK（代码页 936），含中文输出必须用 chcp 65001 切换到 UTF-8；③ Python open() 在 Windows 上默认使用 GBK 读取/写入文本文件，必须显式指定 encoding='utf-8'；④ Node.js fs.writeFileSync 默认 UTF-8 但需确认内容字符串本身是合法的 UTF-8；⑤ 任何涉及中文的文件 I/O 在 Windows 上必须显式声明 UTF-8 而非依赖系统默认编码",
+        "【交付前自检】文档产出后必须逐项核验：① 用 file_read 读回文件内容，确认中文可正常显示（无乱码）；② 若为 PDF，尝试用文本提取工具或肉眼确认中文渲染正常；③ 若为 HTML，确认浏览器打开后中文无乱码。任一乱码发现后必须在原文件上修复编码后重新生成，禁止将乱码文档作为最终交付物",
+        "【转换工具编码自检】每次调用外部文档转换工具（Pandoc、wkhtmltopdf、WeasyPrint、markdown-pdf、LibreOffice 等）前，必须在终端命令中显式设置编码参数（如 --metadata charset=UTF-8、--encoding UTF-8、-V CJKmainfont 等），禁止依赖工具的默认编码假设。工具执行后必须验证输出文件无乱码再继续下一步",
+        "【评估Agent 核验】评估 Agent 在核验文档类产出时，必须将编码完整性作为 P1 级优先检查项：打开文档内容 → 肉眼确认中文可读 → 若存在乱码立即标记为 P1 问题并纳入可直接修复清单。即使文档其他方面质量达标，只要存在乱码即判定为未达标"
+      ]
+    },
     "code_debt_cleanup": {
       "id": "code-debt-cleanup",
       "description": "代码历史债务清理 & 文档一致性约束",
