@@ -717,19 +717,26 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       // 判断是否有实际的文本选中（非零宽光标）
       const sel = e.selection;
       const hasSelection = sel.startLineNumber !== sel.endLineNumber || sel.startColumn !== sel.endColumn;
+      // 获取选中文本内容（用于附加到用户指令上下文）
+      const rawSelectedText: string = hasSelection ? (editor.getModel()?.getValueInRange(sel) || '') : '';
+      const MAX_SELECTION_CHARS = 5000;
+      const selectedText = rawSelectedText.length > MAX_SELECTION_CHARS
+          ? rawSelectedText.slice(0, MAX_SELECTION_CHARS) + `\n...(选中内容过长，已截断前 ${MAX_SELECTION_CHARS} 字符，原始共 ${rawSelectedText.length} 字符)`
+          : rawSelectedText;
 
       window.dispatchEvent(new CustomEvent('ui:cursor:update', {
         detail: {
             line: sel.positionLineNumber,
             column: sel.positionColumn,
             totalLines: editor.getModel()?.getLineCount() || 0,
-            selection: editor.getModel()?.getValueInRange(sel).length || 0,
-            // 选中行列区间（用于附加到用户指令）
+            selection: rawSelectedText.length || 0,
+            // 选中行列区间与文本内容（用于附加到用户指令）
             hasSelection,
             startLine: sel.startLineNumber,
             startColumn: sel.startColumn,
             endLine: sel.endLineNumber,
             endColumn: sel.endColumn,
+            selectedText,
         }
       }));
     });

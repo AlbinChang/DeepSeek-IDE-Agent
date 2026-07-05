@@ -277,6 +277,7 @@ export function useAgentSSE() {
         startColumn: number;
         endLine: number;
         endColumn: number;
+        selectedText: string;
     }>({
         activeFile: '',
         hasSelection: false,
@@ -284,6 +285,7 @@ export function useAgentSSE() {
         startColumn: 0,
         endLine: 0,
         endColumn: 0,
+        selectedText: '',
     });
 
     useEffect(() => {
@@ -293,12 +295,13 @@ export function useAgentSSE() {
             editorContextRef.current = {
                 ...editorContextRef.current,
                 activeFile: nextFile,
-                // 文件切换时重置选中状态，避免旧文件的选中信息污染新文件
+                // 文件切换时重置选中状态与文本，避免旧文件的选中信息污染新文件
                 hasSelection: false,
                 startLine: 0,
                 startColumn: 0,
                 endLine: 0,
                 endColumn: 0,
+                selectedText: '',
             };
         };
 
@@ -312,6 +315,7 @@ export function useAgentSSE() {
                 startColumn: detail.startColumn ?? 0,
                 endLine: detail.endLine ?? 0,
                 endColumn: detail.endColumn ?? 0,
+                selectedText: detail.selectedText || '',
             };
         };
 
@@ -671,11 +675,34 @@ export function useAgentSSE() {
             }
         };
 
-        // 构建用户指令：若有打开文件且有文本选中，附加文件路径与行列区间
+        // 构建用户指令：附带编辑器上下文（活动文件 + 光标/选中区域 + 选中文本）
         const ctx = editorContextRef.current;
-        const hasAttachedContext = !!(ctx.activeFile && ctx.hasSelection);
-        const userInstruct = hasAttachedContext
-            ? `${msg.content}\n\n[当前文件: ${ctx.activeFile} | 选中: L${ctx.startLine}:${ctx.startColumn}-L${ctx.endLine}:${ctx.endColumn}]`
+        let editorContext = '';
+        if (ctx.activeFile) {
+            if (ctx.hasSelection && ctx.selectedText) {
+                // 有文本选中：附带文件路径、选中行列区间、以及实际选中的文本内容
+                editorContext = [
+                    '',
+                    '[附加信息 — 编辑器上下文]',
+                    `文件: ${ctx.activeFile}`,
+                    `选中区域: 第${ctx.startLine}行第${ctx.startColumn}列 至 第${ctx.endLine}行第${ctx.endColumn}列`,
+                    '选中文本:',
+                    '```',
+                    ctx.selectedText,
+                    '```',
+                ].join('\n');
+            } else {
+                // 仅有光标（无选中）：附带文件路径与光标位置
+                editorContext = [
+                    '',
+                    '[附加信息 — 编辑器上下文]',
+                    `文件: ${ctx.activeFile}`,
+                    `光标位置: 第${ctx.startLine}行第${ctx.startColumn}列`,
+                ].join('\n');
+            }
+        }
+        const userInstruct = editorContext
+            ? `${msg.content}${editorContext}`
             : msg.content;
 
         try {
