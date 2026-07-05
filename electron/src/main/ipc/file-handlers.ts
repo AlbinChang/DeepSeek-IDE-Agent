@@ -237,6 +237,7 @@ export function registerFileIpc(ipcMain: IpcMain) {
             const searchPattern = params.pattern.toLowerCase();
             
             const results: Array<{ path: string; line: number; content: string }> = [];
+            const seenPaths = new Set<string>(); // 按路径去重，避免内容搜索产生大量重复
             
             function searchInDir(dir: string) {
                 if (results.length >= maxResults) return;
@@ -255,9 +256,13 @@ export function registerFileIpc(ipcMain: IpcMain) {
                                 searchInDir(fullPath);
                             }
                         } else if (entry.isFile()) {
+                            if (seenPaths.has(fullPath)) continue;
+                            
                             // 文件名匹配
                             if (entry.name.toLowerCase().includes(searchPattern)) {
+                                seenPaths.add(fullPath);
                                 results.push({ path: fullPath, line: 0, content: `[文件名匹配] ${entry.name}` });
+                                continue; // 文件名已命中则跳过内容搜索
                             }
                             
                             // 内容搜索（仅文本文件，限制大小）
@@ -269,11 +274,13 @@ export function registerFileIpc(ipcMain: IpcMain) {
                                 const lines = content.split('\n');
                                 for (let i = 0; i < lines.length && results.length < maxResults; i++) {
                                     if (lines[i].toLowerCase().includes(searchPattern)) {
+                                        seenPaths.add(fullPath);
                                         results.push({
                                             path: fullPath,
                                             line: i + 1,
                                             content: lines[i].trim().substring(0, 200),
                                         });
+                                        break; // 首个命中即停止，不再逐行追加
                                     }
                                 }
                             } catch {
