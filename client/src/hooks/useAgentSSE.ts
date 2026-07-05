@@ -380,7 +380,33 @@ export function useAgentSSE() {
         abortControllerRef.current = controller;
         const currentTraceId = createClientId(); // 1. 前端强制生成 TraceID
 
-        const userVisibleContent = capRenderedText(msg.content, '用户输入');
+        // 构建编辑器上下文（附加到用户消息，前端聊天窗口可见 + 后端 Agent 可感知）
+        const ctx = editorContextRef.current;
+        let editorContext = '';
+        if (ctx.activeFile) {
+            if (ctx.hasSelection && ctx.selectedText) {
+                editorContext = [
+                    '',
+                    '[附加信息 — 编辑器上下文]',
+                    `文件: ${ctx.activeFile}`,
+                    `选中区域: 第${ctx.startLine}行第${ctx.startColumn}列 至 第${ctx.endLine}行第${ctx.endColumn}列`,
+                    '选中文本:',
+                    '```',
+                    ctx.selectedText,
+                    '```',
+                ].join('\n');
+            } else {
+                editorContext = [
+                    '',
+                    '[附加信息 — 编辑器上下文]',
+                    `文件: ${ctx.activeFile}`,
+                    `光标位置: 第${ctx.startLine}行第${ctx.startColumn}列`,
+                ].join('\n');
+            }
+        }
+        const userInstruct = msg.content + (editorContext || '');
+
+        const userVisibleContent = capRenderedText(userInstruct, '用户输入');
         const userMsg: Message = { 
             ...msg, 
             content: userVisibleContent,
@@ -674,36 +700,6 @@ export function useAgentSSE() {
                 scheduleFlush();
             }
         };
-
-        // 构建用户指令：附带编辑器上下文（活动文件 + 光标/选中区域 + 选中文本）
-        const ctx = editorContextRef.current;
-        let editorContext = '';
-        if (ctx.activeFile) {
-            if (ctx.hasSelection && ctx.selectedText) {
-                // 有文本选中：附带文件路径、选中行列区间、以及实际选中的文本内容
-                editorContext = [
-                    '',
-                    '[附加信息 — 编辑器上下文]',
-                    `文件: ${ctx.activeFile}`,
-                    `选中区域: 第${ctx.startLine}行第${ctx.startColumn}列 至 第${ctx.endLine}行第${ctx.endColumn}列`,
-                    '选中文本:',
-                    '```',
-                    ctx.selectedText,
-                    '```',
-                ].join('\n');
-            } else {
-                // 仅有光标（无选中）：附带文件路径与光标位置
-                editorContext = [
-                    '',
-                    '[附加信息 — 编辑器上下文]',
-                    `文件: ${ctx.activeFile}`,
-                    `光标位置: 第${ctx.startLine}行第${ctx.startColumn}列`,
-                ].join('\n');
-            }
-        }
-        const userInstruct = editorContext
-            ? `${msg.content}${editorContext}`
-            : msg.content;
 
         try {
             const activeProvider = settings?.providers?.find(p => p.id === provider) || settings?.providers?.[0];
