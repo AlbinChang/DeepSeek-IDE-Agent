@@ -55,6 +55,7 @@ export const DiffModal: React.FC<DiffModalProps> = ({
             case 'json': return 'json';
             case 'html': return 'html';
             case 'css': return 'css';
+            case 'pdf': return 'pdf';
             default: return 'plaintext';
         }
     };

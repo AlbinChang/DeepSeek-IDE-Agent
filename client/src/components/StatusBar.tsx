@@ -56,6 +56,7 @@ export const StatusBar: React.FC = () => {
             case 'html': return 'HTML';
             case 'css': return 'CSS';
             case 'xml': return 'XML';
+            case 'pdf': return 'PDF';
             default: return 'TEXT';
         }
     };
@@ -71,7 +72,7 @@ export const StatusBar: React.FC = () => {
                         ...prev,
                         user: { id: USER_ID, name: 'Electron' },
                         model: { provider: prev?.model?.provider || 'local', id: prev?.model?.id || 'electron' },
-                        git: prev?.git || { branch: 'master', isDirty: false },
+                        git: prev?.git || { branch: '', isDirty: false, initialized: false },
                         tokens: prev?.tokens || { total: 0 },
                     }));
                     return;

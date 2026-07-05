@@ -13,6 +13,10 @@ interface PdfPreviewProps {
  * - 原生缩放、搜索、页码导航、打印
  * - 零坐标对齐问题
  * - 极简代码，无第三方 PDF 渲染库依赖
+ *
+ * 注意：iframe 不使用 sandbox 属性，因为 Electron/Chromium 的
+ * sandbox 会阻止内置 PDF 查看器扩展访问 blob: URL，导致
+ * ERR_BLOCKED_BY_CLIENT。Blob 内容来自自有 base64 数据，无 XSS 风险。
  */
 const PdfPreview: React.FC<PdfPreviewProps> = ({ base64 }) => {
     const [error, setError] = useState<string | null>(null);
@@ -88,9 +92,9 @@ const PdfPreview: React.FC<PdfPreviewProps> = ({ base64 }) => {
                 className="h-full w-full border-0 bg-white"
                 title="PDF 预览"
                 onLoad={() => setIframeReady(true)}
-                // allow-same-origin 允许 iframe 访问同源 Blob URL；
-                // allow-scripts 允许浏览器 PDF 插件运行。
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                onError={() => {
+                    setError('PDF 预览加载失败（可能是浏览器不支持原生 PDF 阅读器）');
+                }}
             />
         </div>
     );

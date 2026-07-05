@@ -171,11 +171,12 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       case 'css': return 'css';
       case 'xml': case 'pom': return 'xml';
       case 'md': case 'markdown': return 'markdown';
+      case 'pdf': return 'pdf';
       default: return 'plaintext';
     }
   }, [activeFile]);
 
-  // 修改：当文件改变且非 Markdown 时速度重置为 editor 模式
+  // 修改：当文件改变时，将不匹配的 viewMode 重置为 editor（或 Markdown 的 preview）
   useEffect(() => {
     if (activeFile && !activeFile.toLowerCase().endsWith('.md') && viewMode === 'preview') {
       console.log(`[Editor] Auto-switching from preview to editor because ${activeFile} is not Markdown`);
@@ -185,6 +186,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     if (activeFile && !isImage && viewMode === 'image') {
       console.log(`[Editor] Auto-switching from image to editor because ${activeFile} is not an image`);
       setViewMode('editor');
+    }
+    // 当文件改变且非 PDF 时，从 pdf 模式切回 editor（或 Markdown 的 preview）
+    if (activeFile && !isPdf && viewMode === 'pdf') {
+      console.log(`[Editor] Auto-switching from pdf to ${activeFile.toLowerCase().endsWith('.md') ? 'preview' : 'editor'} because ${activeFile} is not a PDF`);
+      setViewMode(activeFile.toLowerCase().endsWith('.md') ? 'preview' : 'editor');
     }
   }, [activeFile]);
 
