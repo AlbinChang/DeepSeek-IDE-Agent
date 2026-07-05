@@ -75,6 +75,31 @@ export class MemoryService {
     }
 
     /**
+     * 确保所有 .memory/ 文件都存在（不存在则播种为空数组）。
+     * 在每次对话启动时调用，保证用户能看到文件落地，Agent 也能在提示词中感知到。
+     */
+    static async ensureMemoryFiles(workspaceRoot: string): Promise<void> {
+        await this.ensureMemoryDir(workspaceRoot);
+        const files = [
+            this.getMemoryFile(workspaceRoot),
+            this.getNeverMistakeFile(workspaceRoot),
+            this.getUserPreferenceFile(workspaceRoot),
+        ];
+        for (const filePath of files) {
+            try {
+                await fs.access(filePath);
+            } catch {
+                // 文件不存在，播种空数组
+                try {
+                    await fs.writeFile(filePath, '[]', 'utf8');
+                } catch (e) {
+                    // 权限不足或磁盘问题，静默跳过
+                }
+            }
+        }
+    }
+
+    /**
      * 获取全部记录
      */
     static async getInstructions(workspaceRoot: string): Promise<UserInstructionRecord[]> {

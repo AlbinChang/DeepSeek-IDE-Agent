@@ -172,9 +172,10 @@ export class AgentChatComponent {
                 return;
             }
 
-            // 写入长期记忆机制
+            // 写入长期记忆机制 + 播种缺失的 memory 文件
             const { MemoryService } = await import('./MemoryService.js');
             await MemoryService.recordUserInstruction(root, lastUserMsgRecord.content);
+            await MemoryService.ensureMemoryFiles(root);
 
             // 如果存在非终态任务，不清理历史，继续推进；仅在全部任务都为终态时才清理。
             const todosAtStart = await TodoService.getTodos(root, userId).catch(() => [] as any[]);
