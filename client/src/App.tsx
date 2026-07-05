@@ -67,6 +67,11 @@ function App() {
   const workspaceSwitchInputRef = useRef<HTMLInputElement>(null);
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceEntry[]>([]);
 
+  // 启动时加载最近工作区列表
+  useEffect(() => {
+    setRecentWorkspaces(getRecentWorkspaces());
+  }, []);
+
   // 处理文件切换并记录历史 (对齐 3.1 节)
   const navigateToFile = useCallback((file: string, updateHistory = true) => {
     if (!file) return;
@@ -280,10 +285,48 @@ function App() {
       <div className="h-[24px] shrink-0 z-50 bg-[#080808] border-b border-white/50 shadow-[0_1px_4px_rgba(0,0,0,0.5)]">
         <Header 
           activeFile={activeFile} 
+          workspaceRoot={workspaceRoot}
+          recentWorkspaces={recentWorkspaces}
           onBack={goBack} 
           onForward={goForward} 
           canBack={historyIndex > 0} 
-          canForward={historyIndex < history.length - 1} 
+          canForward={historyIndex < history.length - 1}
+          onOpenWorkspace={() => {
+            if (electronBridge.isElectron) {
+              electronBridge.selectWorkspace().then((selectedPath) => {
+                if (selectedPath) {
+                  setWorkspaceSwitchInput(selectedPath);
+                  setWorkspaceSwitchError(null);
+                  setWorkspaceSwitchModal('input');
+                  setRecentWorkspaces(getRecentWorkspaces());
+                }
+              }).catch(() => {});
+            }
+          }}
+          onSwitchWorkspace={(newPath: string) => {
+            setWorkspaceSwitchInput(newPath);
+            setWorkspaceSwitchError(null);
+            setWorkspaceSwitchModal('switching');
+            setIsSwitchingWorkspace(true);
+            void (async () => {
+              try {
+                const result = await switchWorkspace(newPath, workspaceRootRef.current);
+                if (!result || result.status !== 'success') {
+                  throw new Error('工作区切换未返回有效结果');
+                }
+                setWorkspaceSwitchModal('hidden');
+                setWorkspaceRoot(result.workspaceRoot);
+                setActiveFile('');
+              } catch (e: any) {
+                const errMsg = e?.message || String(e || '未知错误');
+                console.error('[WorkspaceSwitch] 切换失败:', errMsg);
+                setWorkspaceSwitchModal('input');
+                setWorkspaceSwitchError(`切换失败: ${errMsg}`);
+              } finally {
+                setIsSwitchingWorkspace(false);
+              }
+            })();
+          }}
         />
       </div>
 
