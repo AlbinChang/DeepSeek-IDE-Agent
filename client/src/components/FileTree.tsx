@@ -34,6 +34,16 @@ const shouldSkipAutoRefreshPath = (targetPath: string) => {
   return segments.some(segment => AUTO_REFRESH_SKIP_SEGMENTS.has(segment));
 };
 
+/** 目录在前，文件在后；同组内按名称字母序排列（忽略大小写） */
+const sortFileNodes = (nodes: FileNode[]): FileNode[] => {
+  return [...nodes].sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) {
+      return a.isDirectory ? -1 : 1;
+    }
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+};
+
 export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) => {
   const { workspaceRoot, setWorkspaceRoot } = useAgentContext();
   const [nodes, setNodes] = useState<FileNode[]>([]);
@@ -348,7 +358,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         } else {
           const target = findNodeInMutableTree(next, parentPath);
           if (target) {
-            target.children = filesData;
+            target.children = sortFileNodes(filesData);
           }
           return next;
         }
@@ -388,7 +398,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     for (const o of oldNodes) {
       oldNodeByPath.set(o.path, o);
     }
-    return newNodes.map(newNode => {
+    return sortFileNodes(newNodes.map(newNode => {
       const oldNode = oldNodeByPath.get(newNode.path);
       if (oldNode) {
         newNode.isOpen = oldNode.isOpen;
@@ -398,7 +408,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         }
       }
       return newNode;
-    });
+    }));
   };
 
   const toggleFolder = async (node: FileNode) => {
@@ -444,11 +454,12 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
           childData = res.data;
         }
         
+        const sortedChildData = sortFileNodes(childData);
         setNodes(currentNodes => {
           const updateChildren = (nodes: FileNode[]): FileNode[] => {
             return nodes.map(n => {
               if (n.path === node.path) {
-                return { ...n, children: childData };
+                return { ...n, children: sortedChildData };
               }
               if (n.children) {
                 return { ...n, children: updateChildren(n.children) };
