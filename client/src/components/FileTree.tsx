@@ -64,6 +64,12 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   const pollInFlightRef = useRef(false);
   const pollAbortRef = useRef<AbortController | null>(null);
 
+  // ── 拖拽移动状态 ──
+  const [dragNodePath, setDragNodePath] = useState<string | null>(null);
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  const [isMoving, setIsMoving] = useState(false);
+  const dragCounterRef = useRef<Map<string, number>>(new Map()); // 处理嵌套元素的 dragenter/dragleave 冒泡
+
   const renderGlobalOverlay = (node: React.ReactNode) => {
     if (typeof document === 'undefined') return null;
     return createPortal(node, document.body);
@@ -157,6 +163,141 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
       // Optional: could show a brief toast/notification here
     } catch (err) {
       console.error('Failed to copy', err);
+    }
+  };
+
+  // ── 拖拽移动处理 ──
+
+  /** 判断 targetPath 是否是 sourcePath 的子路径（防止将文件夹拖入自身或子文件夹） */
+  const isDescendantOf = (sourcePath: string, targetPath: string): boolean => {
+    const normalizedSource = sourcePath.replace(/\\/g, '/').replace(/\/$/, '');
+    const normalizedTarget = targetPath.replace(/\\/g, '/').replace(/\/$/, '');
+    if (normalizedSource === normalizedTarget) return true;
+    return normalizedTarget.startsWith(normalizedSource + '/');
+  };
+
+  const handleDragStart = (e: React.DragEvent, node: FileNode) => {
+    if (isMoving) return;
+    e.dataTransfer.setData('text/plain', node.path);
+    e.dataTransfer.effectAllowed = 'move';
+    setDragNodePath(node.path);
+    // 延迟设置拖拽样式，让浏览器捕获拖拽图像
+    requestAnimationFrame(() => {
+      const el = e.currentTarget as HTMLElement;
+      el.style.opacity = '0.4';
+    });
+  };
+
+  const handleDragEnd = (e: React.DragEvent) => {
+    setDragNodePath(null);
+    setDragOverPath(null);
+    dragCounterRef.current.clear();
+    // 恢复透明度
+    const el = e.currentTarget as HTMLElement;
+    el.style.opacity = '';
+  };
+
+  const handleDragOver = (e: React.DragEvent, node: FileNode) => {
+    if (!node.isDirectory) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+
+    if (dragOverPath !== node.path) {
+      setDragOverPath(node.path);
+    }
+  };
+
+  const handleDragEnter = (e: React.DragEvent, node: FileNode) => {
+    if (!node.isDirectory) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // 使用计数器处理嵌套元素冒泡
+    const count = (dragCounterRef.current.get(node.path) || 0) + 1;
+    dragCounterRef.current.set(node.path, count);
+    if (dragOverPath !== node.path) {
+      setDragOverPath(node.path);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent, node: FileNode) => {
+    if (!node.isDirectory) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const count = (dragCounterRef.current.get(node.path) || 1) - 1;
+    dragCounterRef.current.set(node.path, count);
+    if (count <= 0) {
+      dragCounterRef.current.delete(node.path);
+      if (dragOverPath === node.path) {
+        setDragOverPath(null);
+      }
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent, targetNode: FileNode) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const sourcePath = e.dataTransfer.getData('text/plain');
+    if (!sourcePath || !targetNode.isDirectory || !workspaceRoot) {
+      setDragNodePath(null);
+      setDragOverPath(null);
+      dragCounterRef.current.clear();
+      return;
+    }
+
+    // 不允许拖入自身或自身的子目录
+    if (isDescendantOf(sourcePath, targetNode.path)) {
+      console.warn('[FileTree] Cannot move into itself or a child directory');
+      setDragNodePath(null);
+      setDragOverPath(null);
+      dragCounterRef.current.clear();
+      return;
+    }
+
+    // 提取源文件名
+    const sourceName = sourcePath.replace(/\\/g, '/').split('/').pop() || '';
+    const newPath = targetNode.path.replace(/\\/g, '/').replace(/\/$/, '') + '/' + sourceName;
+
+    // 目标已存在同名文件/目录
+    const targetChildren = targetNode.children;
+    if (targetChildren && targetChildren.some(c => c.name === sourceName)) {
+      console.warn(`[FileTree] Target directory already contains "${sourceName}"`);
+      setDragNodePath(null);
+      setDragOverPath(null);
+      dragCounterRef.current.clear();
+      return;
+    }
+
+    setIsMoving(true);
+    setDragNodePath(null);
+    setDragOverPath(null);
+    dragCounterRef.current.clear();
+
+    try {
+      if (electronBridge.isElectron) {
+        const result = await electronBridge.renameFile({ oldPath: sourcePath, newPath, root: workspaceRoot });
+        if (!result.success) throw new Error(result.error || 'Move failed');
+      } else {
+        await axios.post(`${API_BASE}/api/files/rename`, {
+          path: sourcePath,
+          newPath,
+          root: workspaceRoot,
+          isMove: true,
+        });
+      }
+
+      // 如果移动的是当前激活文件，更新路径
+      if (activeFile === sourcePath) {
+        onFileSelect(newPath);
+      }
+
+      // 刷新目录树
+      refreshPath('.');
+    } catch (e: any) {
+      console.error('[FileTree] Move failed:', e);
+    } finally {
+      setIsMoving(false);
     }
   };
 
@@ -502,30 +643,42 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
 
   const renderNode = (node: FileNode, depth: number = 0) => {
     const isActive = activeFile === node.path;
-    
+    const isDragging = dragNodePath === node.path;
+    const isDragOver = dragOverPath === node.path && node.isDirectory;
+    const isDropTarget = node.isDirectory && dragNodePath && !isDescendantOf(dragNodePath, node.path) && !isMoving;
+
     return (
       <div key={node.path}>
         <div 
+          draggable
           onClick={() => toggleFolder(node)}
           onContextMenu={(e) => handleContextMenu(e, node)}
+          onDragStart={(e) => handleDragStart(e, node)}
+          onDragEnd={handleDragEnd}
+          onDragOver={(e) => isDropTarget ? handleDragOver(e, node) : e.preventDefault()}
+          onDragEnter={(e) => isDropTarget ? handleDragEnter(e, node) : undefined}
+          onDragLeave={(e) => isDropTarget ? handleDragLeave(e, node) : undefined}
+          onDrop={(e) => isDropTarget ? handleDrop(e, node) : undefined}
           data-testid={`file-node-${node.path}`}
           style={{ paddingLeft: `${depth * 10 + 6}px` }}
-          className={`flex items-center gap-1.5 py-0.5 px-2 cursor-pointer transition-colors group ${
+          className={`flex items-center gap-1.5 py-0.5 px-2 cursor-pointer transition-all duration-150 group ${
             isActive ? 'bg-white/10 text-white font-black' : 'hover:bg-white/5 text-white'
+          } ${isDragOver ? 'bg-[#3B82F6]/20 ring-1 ring-[#3B82F6]/50' : ''} ${
+            isDragging ? 'opacity-40' : ''
           }`}
         >
           <div className="flex items-center gap-1.5 min-w-0 flex-1">
             {node.isDirectory ? (
               <>
                 {node.isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                <Folder size={11} className={`${node.isOpen ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0`} />
+                <Folder size={11} className={`${node.isOpen ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`} />
               </>
             ) : (
               <>
                 <File size={10} className={`${isActive ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0`} />
               </>
             )}
-            <span className={`text-[10px] truncate tracking-tighter ${isActive ? 'translate-x-0.5 transition-transform' : 'opacity-40 group-hover:opacity-100'}`}>
+            <span className={`text-[10px] truncate tracking-tighter ${isActive ? 'translate-x-0.5 transition-transform' : 'opacity-40 group-hover:opacity-100'} ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`}>
               {node.name}
             </span>
           </div>

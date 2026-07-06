@@ -312,39 +312,53 @@ export class FileIO {
     /**
      * 重命名文件或目录（原地重命名，不跨目录移动）
      * @param unsafePath 原路径（绝对或相对工作区）
-     * @param newName 新名称（仅文件名/目录名，不含路径分隔符）
+     * @param newName 新名称（仅文件名/目录名，不含路径分隔符）；若提供 newPath 则优先使用完整路径
      * @param workspaceRoot 工作区根目录
+     * @param newPath 可选：完整新路径，用于跨目录移动
      */
-    static async renamePath(unsafePath: string, newName: string, workspaceRoot: string): Promise<string> {
-        if (!newName || typeof newName !== 'string' || newName.trim().length === 0) {
-            throw new Error('New name must be a non-empty string');
-        }
-        // 禁止在名称中使用路径分隔符，防止路径穿越
-        if (/[\/\\]/.test(newName)) {
-            throw new Error('New name cannot contain path separators');
-        }
-        const trimmedName = newName.trim();
-
+    static async renamePath(unsafePath: string, newName: string, workspaceRoot: string, newPath?: string): Promise<string> {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
-        const parentDir = path.dirname(fullPath);
-        const newFullPath = PathUtils.normalizePath(path.join(parentDir, trimmedName));
+        let targetPath: string;
+
+        if (newPath && typeof newPath === 'string' && newPath.trim().length > 0) {
+            // 跨目录移动：使用完整新路径
+            targetPath = PathUtils.resolveWritePath(newPath.trim(), workspaceRoot);
+        } else {
+            // 同目录重命名
+            if (!newName || typeof newName !== 'string' || newName.trim().length === 0) {
+                throw new Error('New name must be a non-empty string');
+            }
+            if (/[\/\\]/.test(newName)) {
+                throw new Error('New name cannot contain path separators');
+            }
+            const parentDir = path.dirname(fullPath);
+            targetPath = PathUtils.normalizePath(path.join(parentDir, newName.trim()));
+        }
 
         // 若新旧路径完全相同（仅大小写变化在同一文件系统可能被视为相同），则不执行
-        if (fullPath === newFullPath) {
-            return newFullPath;
+        if (fullPath === targetPath) {
+            return targetPath;
         }
 
         // 检查目标路径是否已存在
         try {
-            await fs.access(newFullPath);
-            throw new Error(`A file or directory named "${trimmedName}" already exists in this location`);
+            await fs.access(targetPath);
+            throw new Error(`A file or directory already exists at "${targetPath}"`);
         } catch (e: any) {
             if (e.code !== 'ENOENT') throw e;
             // ENOENT 表示不存在，可以继续重命名
         }
 
-        await fs.rename(fullPath, newFullPath);
-        return newFullPath;
+        // 确保目标父目录存在
+        const targetDir = path.dirname(targetPath);
+        try {
+            await fs.access(targetDir);
+        } catch {
+            await fs.mkdir(targetDir, { recursive: true });
+        }
+
+        await fs.rename(fullPath, targetPath);
+        return targetPath;
     }
 
     /**

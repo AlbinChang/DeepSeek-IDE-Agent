@@ -459,14 +459,16 @@ async function bootstrap() {
          * 文件/目录重命名接口 (2026.05 右键重命名功能)
          */
         server.post('/api/files/rename', async (request, reply) => {
-            const { path: filePath, newName, root } = request.body as {
+            const { path: filePath, newName, newPath, root } = request.body as {
                 path: string,
-                newName: string,
+                newName?: string,
+                newPath?: string,
                 root?: string,
             };
             if (!filePath) return reply.status(400).send({ error: 'Missing path' });
-            if (!newName || typeof newName !== 'string' || !newName.trim()) {
-                return reply.status(400).send({ error: 'Missing or invalid newName' });
+            // newPath 用于跨目录移动；newName 用于同目录重命名。两者至少提供一个
+            if (!newPath && (!newName || typeof newName !== 'string' || !newName.trim())) {
+                return reply.status(400).send({ error: 'Missing or invalid newName or newPath' });
             }
 
             const workspaceRoot = root ? PathUtils.normalizePath(root) : undefined;
@@ -474,7 +476,12 @@ async function bootstrap() {
 
             try {
                 const normalizedPath = PathUtils.normalizePath(filePath);
-                const newFullPath = await FileIO.renamePath(normalizedPath, newName.trim(), workspaceRoot);
+                const newFullPath = await FileIO.renamePath(
+                    normalizedPath,
+                    newName?.trim() || '',
+                    workspaceRoot,
+                    newPath,
+                );
 
                 return reply.send({ status: 'success', oldPath: normalizedPath, newPath: newFullPath });
             } catch (error: any) {
