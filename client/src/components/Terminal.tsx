@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Terminal — xterm.js + node-pty 透明管道
  *
  * 架构原则：Terminal 组件只做三件事：
@@ -10,10 +10,10 @@
  * 这才是真实终端的行为——不同来源的输出天然可能交叠，xterm 和 PTY 自己会处理。
  */
 
-import React, { useEffect, useRef } from 'react';
-import { Terminal as XTerm } from 'xterm';
-import { FitAddon } from 'xterm-addon-fit';
-import 'xterm/css/xterm.css';
+import React, { useLayoutEffect, useRef } from 'react';
+import { Terminal as XTerm } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 import { useAgentContext } from '@/providers/AgentContext';
 import { USER_ID } from '@/config';
 import { Lock } from 'lucide-react';
@@ -46,7 +46,7 @@ export const Terminal: React.FC = () => {
         return b.viewportY >= b.baseY - 1;
     };
 
-    useEffect(() => {
+    useLayoutEffect(() => {
         const container = containerRef.current;
         if (!container || !workspaceRoot) return;
 
@@ -59,7 +59,7 @@ export const Terminal: React.FC = () => {
             fontSize: 12,
             lineHeight: 1.3,
             scrollback: 5000,
-            windowsMode: isWindows, // ConPTY 折行模型对齐
+            windowsPty: isWindows ? { backend: 'conpty' } : undefined, // ConPTY 折行模型对齐
         });
 
         const fitAddon = new FitAddon();
