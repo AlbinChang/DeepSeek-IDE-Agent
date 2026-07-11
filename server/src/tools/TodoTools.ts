@@ -24,9 +24,9 @@ export class TodoTools {
         return Array.isArray(raw) ? raw : [raw];
     }
 
-    private async buildResult(operation: string, userId: string, detail?: Record<string, any>) {
+    private async totalCount(userId: string): Promise<number> {
         const todos = await TodoService.getTodos(this.workspaceRoot, userId);
-        return { operation, todos, ...(detail || {}) };
+        return todos.length;
     }
 
     // ─── 原子操作实现 ───────────────────────────────────────
@@ -34,7 +34,8 @@ export class TodoTools {
     async listTodos(context: any) {
         this.guardBackgroundService(context);
         const userId = context?.userId || 'system';
-        return await this.buildResult('list', userId);
+        const todos = await TodoService.getTodos(this.workspaceRoot, userId);
+        return { todos, total: todos.length };
     }
 
     async appendTodo(params: any, context: any) {
@@ -43,10 +44,8 @@ export class TodoTools {
         const normalizedTodos = this.normalizeTodos(params.todos);
         if (!normalizedTodos.length) throw new Error('append_todo 需要提供 todos 数组，每项至少包含 title');
         const appended = await TodoService.appendTodos(this.workspaceRoot, userId, normalizedTodos);
-        return await this.buildResult('append', userId, {
-            appended,
-            appendedCount: Array.isArray(appended) ? appended.length : 0,
-        });
+        const total = await this.totalCount(userId);
+        return { status: 'ok', appended, total };
     }
 
     async updateTodo(params: any, context: any) {
@@ -61,10 +60,8 @@ export class TodoTools {
             const result = await TodoService.updateTodo(this.workspaceRoot, userId, id, updates);
             updated.push(result);
         }
-        return await this.buildResult('update', userId, {
-            updated: updated.length === 1 ? updated[0] : updated,
-            updatedCount: updated.length,
-        });
+        const total = await this.totalCount(userId);
+        return { status: 'ok', updated: updated.length === 1 ? updated[0] : updated, total };
     }
 
     async deleteTodo(params: any, context: any) {
@@ -75,7 +72,9 @@ export class TodoTools {
         const ids: string[] = !rawIds ? [] : Array.isArray(rawIds) ? rawIds : [rawIds];
         if (!ids.length) throw new Error('delete_todo 需要提供 ids（任务 ID 字符串或字符串数组）');
         const deletion = await TodoService.deleteTodo(this.workspaceRoot, userId, ids);
-        return await this.buildResult('delete', userId, { deletion });
+        const total = await this.totalCount(userId);
+        const deletedCount = Array.isArray(deletion) ? deletion.length : (deletion ? 1 : 0);
+        return { status: 'ok', deleted: deletedCount, total };
     }
 
     // ─── 原子工具定义 ───────────────────────────────────────
@@ -93,7 +92,7 @@ export class TodoTools {
             },
             {
                 name: 'append_todo',
-                description: '向任务清单追加新任务。每项提供 title（必填）、status（可选，默认 not-started）、description（可选）。系统自动分配 id。返回完整的最新清单。',
+                description: '向任务清单追加新任务。每项提供 title（必填）、status（可选，默认 not-started）、description（可选）。系统自动分配 id。返回追加的任务摘要及总数，需完整清单时调用 list_todos。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -116,7 +115,7 @@ export class TodoTools {
             },
             {
                 name: 'update_todo',
-                description: '⚠️ todos 为必填参数，不可省略！更新已有任务的状态或描述。每项必须提供 id 及待更新字段（status/description）。每项独立更新，不同结论自然拆分为不同数组元素。返回完整的最新清单。',
+                description: '⚠️ todos 为必填参数，不可省略！更新已有任务的状态或描述。每项必须提供 id 及待更新字段（status/description）。每项独立更新，不同结论自然拆分为不同数组元素。返回更新摘要及总数，需完整清单时调用 list_todos。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -139,7 +138,7 @@ export class TodoTools {
             },
             {
                 name: 'delete_todo',
-                description: '⚠️ ids 为必填参数，不可省略！删除指定任务。通过 ids 参数传入一个或多个任务 ID。返回完整的最新清单。',
+                description: '⚠️ ids 为必填参数，不可省略！删除指定任务。通过 ids 参数传入一个或多个任务 ID。返回删除数量及剩余总数，需完整清单时调用 list_todos。',
                 parameters: {
                     type: 'object',
                     properties: {

@@ -26,13 +26,17 @@ describe('TodoTools atomic tool contract', () => {
                 ]
             }, { userId });
 
-            expect(result.updatedCount).toBe(2);
             expect(Array.isArray(result.updated)).toBe(true);
-            expect(result.todos.find((todo: any) => todo.id === 'first')?.status).toBe('completed');
-            expect(result.todos.find((todo: any) => todo.id === 'first')?.description).toBe('第一项完成');
-            expect(result.todos.find((todo: any) => todo.id === 'second')?.status).toBe('failed');
-            expect(result.todos.find((todo: any) => todo.id === 'second')?.description).toBe('第二项失败');
-            expect(result.todos.find((todo: any) => todo.id === 'third')?.status).toBe('not-started');
+            expect(result.updated.length).toBe(2);
+            expect(result.total).toBe(3);
+
+            // 验证数据实际已持久化
+            const savedTodos = await TodoService.getTodos(workspaceRoot, userId);
+            expect(savedTodos.find((todo: any) => todo.id === 'first')?.status).toBe('completed');
+            expect(savedTodos.find((todo: any) => todo.id === 'first')?.description).toBe('第一项完成');
+            expect(savedTodos.find((todo: any) => todo.id === 'second')?.status).toBe('failed');
+            expect(savedTodos.find((todo: any) => todo.id === 'second')?.description).toBe('第二项失败');
+            expect(savedTodos.find((todo: any) => todo.id === 'third')?.status).toBe('not-started');
         } finally {
             await fs.rm(workspaceRoot, { recursive: true, force: true });
         }
@@ -53,10 +57,10 @@ describe('TodoTools atomic tool contract', () => {
                 ]
             }, { userId });
 
-            expect(result.updatedCount).toBe(1);
+            expect(result.total).toBe(1);
             expect(result.updated.id).toBe('single');
-            expect(result.todos[0].status).toBe('failed');
-            expect(result.todos[0].description).toBe('单项失败结论');
+            expect(result.updated.status).toBe('failed');
+            expect(result.updated.description).toBe('单项失败结论');
         } finally {
             await fs.rm(workspaceRoot, { recursive: true, force: true });
         }
@@ -77,9 +81,13 @@ describe('TodoTools atomic tool contract', () => {
                 ids: ['a', 'b']
             }, { userId });
 
-            expect(result.todos).toHaveLength(1);
-            expect(result.todos[0].id).toBe('c');
-            expect(result.deletion.deletedCount).toBe(2);
+            expect(result.deleted).toBe(2);
+            expect(result.total).toBe(1);
+
+            // 验证数据实际已持久化
+            const savedTodos = await TodoService.getTodos(workspaceRoot, userId);
+            expect(savedTodos).toHaveLength(1);
+            expect(savedTodos[0].id).toBe('c');
         } finally {
             await fs.rm(workspaceRoot, { recursive: true, force: true });
         }
@@ -99,8 +107,13 @@ describe('TodoTools atomic tool contract', () => {
                 ids: 'x'
             }, { userId });
 
-            expect(result.todos).toHaveLength(1);
-            expect(result.todos[0].id).toBe('y');
+            expect(result.deleted).toBe(1);
+            expect(result.total).toBe(1);
+
+            // 验证数据实际已持久化
+            const savedTodos = await TodoService.getTodos(workspaceRoot, userId);
+            expect(savedTodos).toHaveLength(1);
+            expect(savedTodos[0].id).toBe('y');
         } finally {
             await fs.rm(workspaceRoot, { recursive: true, force: true });
         }
