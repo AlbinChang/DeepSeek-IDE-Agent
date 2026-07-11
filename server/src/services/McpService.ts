@@ -454,16 +454,9 @@ export class McpService {
 
         // MCP 标准响应格式: { content: [{ type: "text", text: "..." }, ...] }
         if (raw.content && Array.isArray(raw.content)) {
-            const textParts: string[] = [];
-            for (const item of raw.content) {
-                if (item.type === 'text' && typeof item.text === 'string') {
-                    textParts.push(item.text);
-                }
-            }
             return {
                 status: 'success',
                 content: raw.content,
-                text: textParts.join('\n'),
                 isError: Boolean(raw.isError),
             };
         }

@@ -574,16 +574,9 @@ export class BrowserMcpAdapter {
 
         // MCP 标准响应格式: { content: [{ type: "text", text: "..." }, ...] }
         if (result.content && Array.isArray(result.content)) {
-            const textParts: string[] = [];
-            for (const item of result.content as Array<Record<string, unknown>>) {
-                if (item.type === 'text' && typeof item.text === 'string') {
-                    textParts.push(item.text);
-                }
-            }
             return {
                 status: 'success',
                 content: result.content,
-                text: textParts.join('\n'),
                 isError: Boolean(result.isError),
             };
         }
