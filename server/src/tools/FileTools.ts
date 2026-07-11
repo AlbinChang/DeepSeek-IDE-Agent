@@ -461,7 +461,7 @@ export class FileTools {
             }
             return { status: 'error', error: 'WRITE_ERROR', message: err.message };
         }
-        return { status: 'success', path: unsafePath, mode: 'overwrite', encoding: targetEncoding };
+        return { status: 'success', path: unsafePath };
     }
 
     /**
@@ -962,13 +962,9 @@ export class FileTools {
 
             return {
                 status: 'success',
-                mode: 'replace_all',
                 path: fullPath,
-                encoding,
                 occurrences: occurrences.length,
                 replacedLines: replacementLineNumbers,
-                oldTextLength: oldText.length,
-                newTextLength: newText.length,
                 newTotalLines: newLines.length,
                 contextSnapshot
             };

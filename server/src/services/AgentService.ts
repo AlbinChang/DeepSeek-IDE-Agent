@@ -209,7 +209,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_write...');
         this.toolManager.registerTool({
             name: 'file_write',
-            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_edit。返回 path / newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
+            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_edit。返回 path，语法错误时附加 syntax 字段。',
             parameters: {
                 type: 'object',
                 properties: {
