@@ -475,8 +475,7 @@ export class FileTools {
             if (!Number.isInteger(startLine) || startLine < 1) {
                 return {
                     status: 'error',
-                    mode: 'line_patch',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'START_LINE_INVALID',
                     message: `startLine(${startLine}) 必须是 >= 1 的整数。`
                 };
@@ -484,8 +483,7 @@ export class FileTools {
             if (!Number.isInteger(lineCount) || lineCount < 0) {
                 return {
                     status: 'error',
-                    mode: 'line_patch',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'LINECOUNT_INVALID',
                     message: `lineCount(${lineCount}) 必须是 >= 0 的整数；0 表示纯插入。`
                 };
@@ -505,8 +503,7 @@ export class FileTools {
             if (stats.size > MAX_UI_READ_SIZE) {
                 return { 
                     status: 'error', 
-                    mode: 'line_patch', 
-                    path: fullPath, 
+                    path: unsafePath, 
                     error: 'FILE_TOO_LARGE',
                     message: `文件大小超限 (${(stats.size / 1024 / 1024).toFixed(1)}MB > 5MB)，拒绝行级精修。` 
                 };
@@ -519,8 +516,7 @@ export class FileTools {
             } catch (e) {
                 return { 
                     status: 'error', 
-                    mode: 'line_patch', 
-                    path: fullPath, 
+                    path: unsafePath, 
                     error: 'BINARY_FILE_DETECTED',
                     message: '拒绝执行：检测到目标文件可能是二进制文件，禁止精修操作。' 
                 };
@@ -530,8 +526,7 @@ export class FileTools {
             if (content.includes('\u0000')) {
                 return {
                     status: 'error',
-                    mode: 'line_patch',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'NULL_BYTE_IN_CONTENT',
                     message: '写入内容含 null 字节（\\u0000），写入后文件将无法通过二进制检测，操作已拒绝。'
                 };
@@ -542,8 +537,7 @@ export class FileTools {
             if (content.length > MAX_PATCH_CHARS) {
                 return {
                     status: 'error',
-                    mode: 'line_patch',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'CONTENT_TOO_LARGE',
                     message: `写入内容长度 ${(content.length / 1024 / 1024).toFixed(1)}M 字符超过 5M 上限，请拆分后分段写入。`
                 };
@@ -571,8 +565,7 @@ export class FileTools {
             if (startLine < 1) {
                 return {
                     status: 'error',
-                    mode: 'line_patch',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'START_LINE_INVALID',
                     message: `startLine(${startLine}) 必须 >= 1。当前文件共 ${totalLinesBeforeOp} 行。`
                 };
@@ -580,8 +573,7 @@ export class FileTools {
             if (startLine > totalLinesBeforeOp + 1) {
                 return {
                     status: 'error',
-                    mode: 'line_patch',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'START_LINE_OUT_OF_RANGE',
                     totalLines: totalLinesBeforeOp,
                     message: `startLine(${startLine}) 超过文件末尾+1(${totalLinesBeforeOp + 1})。` +
@@ -602,17 +594,13 @@ export class FileTools {
             if (delCount > remainingLines + 50) {
                 return {
                     status: 'error',
-                    mode: 'line_patch',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'LINECOUNT_OUT_OF_RANGE',
                     message: `lineCount(${delCount}) 远大于从第 ${startLine} 行起的剩余行数(${remainingLines})。` +
                         `请检查：lineCount 是"要删除的行数"而非文件总行数。` +
                         `当前文件共 ${lines.length} 行，从第 ${startLine} 行起最多可删除 ${remainingLines} 行。`
                 };
             }
-
-            // 记录实际被删除的行（在 splice 前），供 LLM 立即验证删除范围是否正确
-            const deletedLines = lines.slice(startIdx, startIdx + delCount).join('\n');
 
             lines.splice(startIdx, delCount, ...newLines);
             const finalContent = lines.join(eol);
@@ -621,11 +609,10 @@ export class FileTools {
             const finalBuffer = FileIO.encodeString(finalContent, encoding);
             await FileIO.writeFile(unsafePath, workspaceRoot, finalBuffer);
 
-            // 操作后上下文快照：前后各 3 行，供 LLM 立即验证修改效果
-            // 行号右对齐宽度与 read_file 保持一致，方便 LLM 直接对照
+            // 操作后上下文快照（±2 行，供 LLM 快速验证修改效果）
             const lineNumWidth = String(lines.length).length;
-            const snapshotStart = Math.max(0, startIdx - 3);
-            const snapshotEnd = Math.min(lines.length, startIdx + newLines.length + 3);
+            const snapshotStart = Math.max(0, startIdx - 2);
+            const snapshotEnd = Math.min(lines.length, startIdx + newLines.length + 2);
             const contextSnapshot = lines
                 .slice(snapshotStart, snapshotEnd)
                 .map((l, i) => `${String(snapshotStart + i + 1).padStart(lineNumWidth)}: ${l}`)
@@ -633,22 +620,16 @@ export class FileTools {
 
             return { 
                 status: 'success', 
-                mode: 'line_patch',
-                path: fullPath,
-                encoding,
-                startLine,
-                linesRemoved: delCount,
-                linesAdded: newLines.length,
-                newTotalLines: lines.length,  // 操作后文件总行数，规划下次操作前必须参考此值
-                deletedLines,                 // 实际被删除的内容，立即核实是否删对了范围
-                contextSnapshot               // 操作位置前后各 3 行，立即核对是否符合预期
+                path: unsafePath,
+                newTotalLines: lines.length,
+                contextSnapshot,
             };
         } catch (err: any) {
             console.error(`[FileTools] Patch Error: ${err.message}`);
             if (err.message?.startsWith('[ENCODING_LOSS]')) {
-                return { status: 'error', error: 'ENCODING_LOSS', message: err.message };
+                return { status: 'error', path: unsafePath, error: 'ENCODING_LOSS', message: err.message };
             }
-            return { status: 'error', message: err.message };
+            return { status: 'error', path: unsafePath, message: err.message };
         }
     }
 
@@ -675,8 +656,7 @@ export class FileTools {
             } catch {
                 return {
                     status: 'error',
-                    mode: 'text_replace',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'FILE_NOT_FOUND',
                     message: `文件不存在，无法执行替换操作。新建文件请使用 file_write。`
                 };
@@ -687,8 +667,7 @@ export class FileTools {
             if (stats.size > MAX_SIZE) {
                 return {
                     status: 'error',
-                    mode: 'text_replace',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'FILE_TOO_LARGE',
                     message: `文件大小超限 (${(stats.size / 1024 / 1024).toFixed(1)}MB > 5MB)，拒绝编辑。`
                 };
@@ -701,8 +680,7 @@ export class FileTools {
             } catch {
                 return {
                     status: 'error',
-                    mode: 'text_replace',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'BINARY_FILE_DETECTED',
                     message: '拒绝执行：检测到目标文件可能是二进制文件。'
                 };
@@ -712,8 +690,7 @@ export class FileTools {
             if (oldText.includes('\u0000') || newText.includes('\u0000')) {
                 return {
                     status: 'error',
-                    mode: 'text_replace',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'NULL_BYTE_IN_CONTENT',
                     message: 'oldText 或 newText 含 null 字节（\\u0000），操作已拒绝。'
                 };
@@ -723,8 +700,7 @@ export class FileTools {
             if (!oldText) {
                 return {
                     status: 'error',
-                    mode: 'text_replace',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'OLD_TEXT_EMPTY',
                     message: 'oldText 不能为空。若要插入内容请使用 action: "insert"。若要删除内容请使用 replace 并传入要删除的原文和空 newText。'
                 };
@@ -738,8 +714,7 @@ export class FileTools {
             if (newText.length > MAX_PATCH_CHARS) {
                 return {
                     status: 'error',
-                    mode: 'text_replace',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'CONTENT_TOO_LARGE',
                     message: `newText 长度 ${(newText.length / 1024 / 1024).toFixed(1)}M 字符超过 5M 上限。`
                 };
@@ -758,8 +733,7 @@ export class FileTools {
             if (occurrences.length === 0) {
                 return {
                     status: 'error',
-                    mode: 'text_replace',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'OLD_TEXT_NOT_FOUND',
                     message: `未在文件中找到 oldText。请使用 read_file 确认文件当前内容，确保 oldText 与原文完全一致（含空白、缩进、换行）。`
                 };
@@ -786,8 +760,7 @@ export class FileTools {
                 const linePositions = occurrences.map(offsetToLine);
                 return {
                     status: 'error',
-                    mode: 'text_replace',
-                    path: fullPath,
+                    path: unsafePath,
                     error: 'OLD_TEXT_AMBIGUOUS',
                     occurrences: occurrences.length,
                     message: `oldText 在文件中出现了 ${occurrences.length} 次（行 ${linePositions.join(', ')}），请提供更多上下文使 oldText 唯一。` +
@@ -802,12 +775,12 @@ export class FileTools {
             const finalBuffer = FileIO.encodeString(newContent, encoding);
             await FileIO.writeFile(unsafePath, workspaceRoot, finalBuffer);
 
-            // 构建操作后上下文快照（复用已计算的 lineStarts 二分查找替换行号）
+            // 构建操作后上下文快照（±2 行，供 LLM 快速验证修改效果）
             const newLines = newContent.split(/\r?\n|\r|\u2028|\u2029/);
             const replacementLine = offsetToLine(occurrences[0]);
             const lineNumWidth = String(newLines.length).length;
-            const snapshotStart = Math.max(0, replacementLine - 4);
-            const snapshotEnd = Math.min(newLines.length, replacementLine + newText.split('\n').length + 3);
+            const snapshotStart = Math.max(0, replacementLine - 2);
+            const snapshotEnd = Math.min(newLines.length, replacementLine + newText.split('\n').length + 2);
             const contextSnapshot = newLines
                 .slice(snapshotStart, snapshotEnd)
                 .map((l, i) => `${String(snapshotStart + i + 1).padStart(lineNumWidth)}: ${l}`)
@@ -815,20 +788,16 @@ export class FileTools {
 
             return {
                 status: 'success',
-                mode: 'text_replace',
-                path: fullPath,
-                encoding,
-                oldTextLength: oldText.length,
-                newTextLength: newText.length,
+                path: unsafePath,
                 newTotalLines: newLines.length,
-                contextSnapshot
+                contextSnapshot,
             };
         } catch (err: any) {
             console.error(`[FileTools] editFileByReplace Error: ${err.message}`);
             if (err.message?.startsWith('[ENCODING_LOSS]')) {
-                return { status: 'error', mode: 'text_replace', error: 'ENCODING_LOSS', message: err.message };
+                return { status: 'error', path: unsafePath, error: 'ENCODING_LOSS', message: err.message };
             }
-            return { status: 'error', mode: 'text_replace', message: err.message };
+            return { status: 'error', path: unsafePath, message: err.message };
         }
     }
 

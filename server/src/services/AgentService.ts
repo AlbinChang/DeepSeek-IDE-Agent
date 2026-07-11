@@ -209,7 +209,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_write...');
         this.toolManager.registerTool({
             name: 'file_write',
-            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_edit。返回 syntaxCheck 结果。',
+            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_edit。返回 path / newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -251,15 +251,7 @@ export class AgentService extends EventEmitter {
                 const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                 return {
                     ...writeResult,
-                    syntaxCheck,
-                    syntaxFeedback: {
-                        phase: 'post_write',
-                        mode: 'feedback_only',
-                        pass: gatePass,
-                        message: gatePass
-                            ? '语法检查通过。'
-                            : `语法检查未通过（仅反馈，不影响写入结果）：${syntaxCheck?.message || '未知错误'}`
-                    }
+                    ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
                 };
             }
         });
@@ -308,7 +300,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_edit...');
         this.toolManager.registerTool({
             name: 'file_edit',
-            description: '文件行级精修工具（行业最佳实践）。支持两种精准操作：\n- **replace**：基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险\n- **insert**：在指定行号 startLine 前插入 newText\n\n【replace 操作】必须传入 action: "replace"、oldText、newText。oldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n【insert 操作】必须传入 action: "insert"、startLine（>=1）、newText。startLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 syntaxCheck/contextSnapshot/newTotalLines。',
+            description: '文件行级精修工具（行业最佳实践）。支持两种精准操作：\n- **replace**：基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险\n- **insert**：在指定行号 startLine 前插入 newText\n\n【replace 操作】必须传入 action: "replace"、oldText、newText。oldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n【insert 操作】必须传入 action: "insert"、startLine（>=1）、newText。startLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 path / newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -362,15 +354,7 @@ export class AgentService extends EventEmitter {
                     const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                     return {
                         ...editResult,
-                        syntaxCheck,
-                        syntaxFeedback: {
-                            phase: 'post_edit',
-                            mode: 'feedback_only',
-                            pass: gatePass,
-                            message: gatePass
-                                ? '语法检查通过。'
-                                : `语法检查未通过（仅反馈，不影响编辑结果）：${syntaxCheck?.message || '未知错误'}`
-                        }
+                        ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
                     };
                 }
 
@@ -396,15 +380,7 @@ export class AgentService extends EventEmitter {
                     const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                     return {
                         ...editResult,
-                        syntaxCheck,
-                        syntaxFeedback: {
-                            phase: 'post_edit',
-                            mode: 'feedback_only',
-                            pass: gatePass,
-                            message: gatePass
-                                ? '语法检查通过。'
-                                : `语法检查未通过（仅反馈，不影响编辑结果）：${syntaxCheck?.message || '未知错误'}`
-                        }
+                        ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
                     };
                 }
 
@@ -471,15 +447,7 @@ export class AgentService extends EventEmitter {
                 const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                 return {
                     ...replaceResult,
-                    syntaxCheck,
-                    syntaxFeedback: {
-                        phase: 'post_replace_all',
-                        mode: 'feedback_only',
-                        pass: gatePass,
-                        message: gatePass
-                            ? `语法检查通过。全局替换了 ${replaceResult.occurrences} 处。`
-                            : `语法检查未通过（仅反馈，不影响替换结果）：${syntaxCheck?.message || '未知错误'}`
-                    }
+                    ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
                 };
             }
         });
