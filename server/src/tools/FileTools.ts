@@ -836,7 +836,6 @@ export class FileTools {
             } catch {
                 return {
                     status: 'error',
-                    mode: 'replace_all',
                     path: fullPath,
                     error: 'FILE_NOT_FOUND',
                     message: `文件不存在，无法执行全局替换。新建文件请使用 file_write。`
@@ -848,7 +847,6 @@ export class FileTools {
             if (stats.size > MAX_SIZE) {
                 return {
                     status: 'error',
-                    mode: 'replace_all',
                     path: fullPath,
                     error: 'FILE_TOO_LARGE',
                     message: `文件大小超限 (${(stats.size / 1024 / 1024).toFixed(1)}MB > 5MB)，拒绝编辑。`
@@ -862,7 +860,6 @@ export class FileTools {
             } catch {
                 return {
                     status: 'error',
-                    mode: 'replace_all',
                     path: fullPath,
                     error: 'BINARY_FILE_DETECTED',
                     message: '拒绝执行：检测到目标文件可能是二进制文件。'
@@ -873,7 +870,6 @@ export class FileTools {
             if (oldText.includes('\u0000') || newText.includes('\u0000')) {
                 return {
                     status: 'error',
-                    mode: 'replace_all',
                     path: fullPath,
                     error: 'NULL_BYTE_IN_CONTENT',
                     message: 'oldText 或 newText 含 null 字节（\\u0000），操作已拒绝。'
@@ -884,7 +880,6 @@ export class FileTools {
             if (!oldText) {
                 return {
                     status: 'error',
-                    mode: 'replace_all',
                     path: fullPath,
                     error: 'OLD_TEXT_EMPTY',
                     message: 'oldText 不能为空。若要插入内容请使用 file_edit action: "insert"。'
@@ -899,7 +894,6 @@ export class FileTools {
             if (newText.length > MAX_PATCH_CHARS) {
                 return {
                     status: 'error',
-                    mode: 'replace_all',
                     path: fullPath,
                     error: 'CONTENT_TOO_LARGE',
                     message: `newText 长度 ${(newText.length / 1024 / 1024).toFixed(1)}M 字符超过 5M 上限。`
@@ -919,7 +913,6 @@ export class FileTools {
             if (occurrences.length === 0) {
                 return {
                     status: 'error',
-                    mode: 'replace_all',
                     path: fullPath,
                     error: 'OLD_TEXT_NOT_FOUND',
                     message: `未在文件中找到 oldText。请使用 read_file 确认文件当前内容，确保 oldText 与原文完全一致（含空白、缩进、换行）。`
@@ -960,20 +953,29 @@ export class FileTools {
                 .map((l, i) => `${String(snapshotStart + i + 1).padStart(lineNumWidth)}: ${l}`)
                 .join('\n');
 
+            // 【Token 优化】replacedLines 截断到前 20 项，剩余用描述代替。
+            // 全局替换 50+ 处时，完整行号列表纯属 token 噪音——LLM 只需知道前几处位置做抽查。
+            const MAX_REPLACED_LINES = 20;
+            const truncatedLines = replacementLineNumbers.slice(0, MAX_REPLACED_LINES);
+            const linesNote = replacementLineNumbers.length > MAX_REPLACED_LINES
+                ? `...及其他 ${replacementLineNumbers.length - MAX_REPLACED_LINES} 处`
+                : undefined;
+
             return {
                 status: 'success',
                 path: fullPath,
                 occurrences: occurrences.length,
-                replacedLines: replacementLineNumbers,
+                replacedLines: truncatedLines,
+                ...(linesNote ? { replacedLinesNote: linesNote } : {}),
                 newTotalLines: newLines.length,
                 contextSnapshot
             };
         } catch (err: any) {
             console.error(`[FileTools] replaceAllInFile Error: ${err.message}`);
             if (err.message?.startsWith('[ENCODING_LOSS]')) {
-                return { status: 'error', mode: 'replace_all', error: 'ENCODING_LOSS', message: err.message };
+                return { status: 'error', error: 'ENCODING_LOSS', message: err.message };
             }
-            return { status: 'error', mode: 'replace_all', message: err.message };
+            return { status: 'error', message: err.message };
         }
     }
 
