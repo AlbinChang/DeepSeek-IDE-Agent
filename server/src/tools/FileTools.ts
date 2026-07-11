@@ -104,26 +104,15 @@ export class FileTools {
         if (FileTools.isAgentSystemDirPath(baseRelativePath)) {
             return {
                 status: 'success',
-                dirPath: unsafePath,
-                maxDepth,
-                totalCount: 0,
-                isEmpty: true,
+                path: unsafePath,
+                depth: maxDepth,
+                count: 0,
                 truncated: false,
-                maxItems: FileTools.LIST_FILES_MAX_ITEMS,
-                ignoredSystemDirs: [baseRelativePath],
-                items: []
+                tree: '',
             };
         }
 
-        const items: Array<{
-            name: string;
-            path: string;
-            type: 'directory' | 'file' | 'symlink';
-            isDirectory: boolean;
-            isFile: boolean;
-            isSymbolicLink: boolean;
-            depth: number;
-        }> = [];
+        const treeLines: string[] = [];
         const ignoredSystemDirs = new Set<string>();
         let truncated = false;
 
@@ -155,23 +144,11 @@ export class FileTools {
 
                 const depthFromBase = currentDepth + 1;
                 const isDirectory = entry.isDirectory();
-                const isSymbolicLink = entry.isSymbolicLink();
-                const isFile = entry.isFile();
-                const type: 'directory' | 'file' | 'symlink' = isDirectory
-                    ? 'directory'
-                    : (isSymbolicLink ? 'symlink' : 'file');
 
-                items.push({
-                    name: entry.name,
-                    path: relativePath,
-                    type,
-                    isDirectory,
-                    isFile,
-                    isSymbolicLink,
-                    depth: depthFromBase
-                });
+                // 紧凑格式：目录以 / 结尾，文件直接写路径
+                treeLines.push(isDirectory ? relativePath + '/' : relativePath);
 
-                if (items.length >= FileTools.LIST_FILES_MAX_ITEMS) {
+                if (treeLines.length >= FileTools.LIST_FILES_MAX_ITEMS) {
                     truncated = true;
                     break;
                 }
@@ -187,14 +164,12 @@ export class FileTools {
 
         return {
             status: 'success',
-            dirPath: unsafePath,
-            maxDepth,
-            totalCount: items.length,
-            isEmpty: items.length === 0,
+            path: unsafePath,
+            depth: maxDepth,
+            count: treeLines.length,
             truncated,
-            maxItems: FileTools.LIST_FILES_MAX_ITEMS,
-            ignoredSystemDirs: Array.from(ignoredSystemDirs).sort(),
-            items
+            ...(ignoredSystemDirs.size > 0 ? { ignoredDirs: Array.from(ignoredSystemDirs).sort() } : {}),
+            tree: treeLines.join('\n'),
         };
     }
 

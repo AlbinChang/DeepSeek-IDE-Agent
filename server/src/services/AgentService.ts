@@ -268,7 +268,7 @@ export class AgentService extends EventEmitter {
         // 补全文件系统工具：listFiles, searchFiles, deletePath
         this.toolManager.registerTool({
             name: 'list_files',
-            description: `⚠️ depth 为必填参数，不可省略！获取目录结构（受控递归）。depth 是递归深度（1-10），必须显式传入，例如 {"depth": 2}。1 表示仅当前目录下一层。path 为可选参数，默认为 "."。返回结果中每一项都会明确标注是文件还是目录。`,
+            description: `⚠️ depth 为必填参数，不可省略！获取目录结构（受控递归）。depth 是递归深度（1-10），必须显式传入，例如 {"depth": 2}。1 表示仅当前目录下一层。path 为可选参数，默认为 "."。返回紧凑树形文本（目录以 / 结尾，文件直接显示路径），上限 1200 项。`,
             parameters: {
                 type: 'object',
                 properties: {
