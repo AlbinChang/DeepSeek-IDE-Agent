@@ -272,7 +272,21 @@ export class AgentService extends EventEmitter {
             execute: async (params, context) => {
                 const root = this.resolveWorkspaceRootFromContext(context);
                 if (!root) throw new Error('Workspace not initialized');
-                return await FileTools.listFiles(root, params.path, params.depth);
+                const result = await FileTools.listFiles(root, params.path, params.depth);
+                // 【Token 优化】将结构化 JSON 对象扁平化为纯文本字符串。
+                // 消除 JSON.stringify 导致的 \n → \\n 双重转义（实测节省 15-20% token）。
+                // AgentTurnEngine 对 string 类型 result 直接作为 tool message content 使用，不经过 JSON 序列化。
+                if (result.status === 'error') {
+                    throw new Error(result.message || result.error || 'list_files failed');
+                }
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TS 窄化不足，运行时已通过 status !== 'error' 守卫
+                const ok = result as any;
+                const suffix = ok.truncated ? ' (已截断，仅显示前1200项)' : '';
+                const header = `[list_files] path=${ok.path || '.'} depth=${ok.depth} count=${ok.count}${suffix}`;
+                const ignored = ok.ignoredDirs?.length
+                    ? `\n[已忽略系统目录: ${ok.ignoredDirs.join(', ')}]`
+                    : '';
+                return header + ignored + '\n' + (ok.tree || '');
             }
         });
 
