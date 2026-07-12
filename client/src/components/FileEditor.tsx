@@ -42,7 +42,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [originalContent, setOriginalContent] = useState<string>('');
-  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image'>(mode);
+  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(mode);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const diffEditorRef = useRef<any>(null);
   const savedContentRef = useRef('');
@@ -51,6 +51,10 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const fileName = useMemo(() => activeFile.split(/[/\\]/).pop() || activeFile, [activeFile]);
   const isMarkdown = useMemo(() => activeFile.toLowerCase().endsWith('.md'), [activeFile]);
   const isPdf = useMemo(() => activeFile.toLowerCase().endsWith('.pdf'), [activeFile]);
+  const isCsv = useMemo(() => {
+    const lower = activeFile.toLowerCase();
+    return lower.endsWith('.csv') || lower.endsWith('.tsv');
+  }, [activeFile]);
   const isImage = useMemo(() => {
     const ext = activeFile.toLowerCase().split('.').pop();
     return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'tiff', 'tif'].includes(ext || '');
@@ -67,6 +71,14 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const [imageError, setImageError] = useState<string | null>(null);
   const [imageMimeType, setImageMimeType] = useState<string>('');
 
+  // ── CSV 解析 ──
+  const csvData = useMemo(() => {
+    if (!isCsv || !fileContent || fileContent.includes('[LOADING]') || fileContent.includes('[CRITICAL_ERROR]')) {
+      return null;
+    }
+    return parseCsvContent(fileContent, activeFile.toLowerCase().endsWith('.tsv'));
+  }, [isCsv, fileContent, activeFile]);
+
   // 方案七：利用 Ref 维护原子性操作锁，强力干预 Monaco 内部异步 Canceled 链路
   const modelLockRef = useRef<boolean>(false);
   
@@ -76,7 +88,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const saveFileRef = useRef<() => Promise<void>>(async () => {});
 
   // 方案十二：模式切换护栏，记录上一次模式，防止在同模式下错误地执行 setModel(null) 触发 wordHighlighter 销毁
-  const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf' | 'image'>(mode);
+  const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(mode);
 
   const getCurrentEditorContent = () => {
     if (viewMode === 'editor' && editorRef.current) {
@@ -101,7 +113,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   };
 
   const handleSaveFile = async () => {
-    if (!activeFile || isLocked || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || isPdf || isImage || isSaving) return;
+    if (!activeFile || isLocked || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || viewMode === 'table' || isPdf || isImage || isSaving) return;
 
     const contentToSave = getCurrentEditorContent();
     if (contentToSave === savedContent) {
@@ -171,6 +183,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       case 'css': return 'css';
       case 'xml': case 'pom': return 'xml';
       case 'md': case 'markdown': return 'markdown';
+      case 'csv': case 'tsv': return 'plaintext';
       case 'pdf': return 'pdf';
       default: return 'plaintext';
     }
@@ -191,6 +204,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     if (activeFile && !isPdf && viewMode === 'pdf') {
       console.log(`[Editor] Auto-switching from pdf to ${activeFile.toLowerCase().endsWith('.md') ? 'preview' : 'editor'} because ${activeFile} is not a PDF`);
       setViewMode(activeFile.toLowerCase().endsWith('.md') ? 'preview' : 'editor');
+    }
+    // 当文件改变且非 CSV 时，从 table 模式切回 editor
+    if (activeFile && !isCsv && viewMode === 'table') {
+      console.log(`[Editor] Auto-switching from table to editor because ${activeFile} is not a CSV`);
+      setViewMode('editor');
     }
   }, [activeFile]);
 
@@ -294,6 +312,14 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     return () => { cancelled = true; };
   }, [activeFile, isImage, workspaceRoot]);
+
+  // CSV 文件：自动进入表格预览模式，同时保留文本内容供编辑器使用
+  useEffect(() => {
+    if (!activeFile || !isCsv) return;
+    if (viewMode !== 'table' && viewMode !== 'editor') {
+      setViewMode('table');
+    }
+  }, [activeFile, isCsv]);
 
   // 同步外部 mode 到内部 viewMode (附带渲染屏障防止 Monaco 竞争)
   useEffect(() => {
@@ -856,6 +882,19 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                   {viewMode === 'preview' ? 'EDIT' : 'PREVIEW'}
                 </button>
               )}
+              {isCsv && (
+                <button 
+                  onClick={() => setViewMode(viewMode === 'table' ? 'editor' : 'table')}
+                  className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[8px] font-black tracking-widest transition-all ${
+                    viewMode === 'table' 
+                      ? 'bg-white/20 text-white border border-white/20' 
+                      : 'text-white/40 hover:text-white hover:bg-white/5 border border-transparent'
+                  }`}
+                >
+                  {viewMode === 'table' ? <Code size={10} /> : <Eye size={10} />}
+                  {viewMode === 'table' ? 'EDIT' : 'TABLE'}
+                </button>
+              )}
               <div className="h-4 w-[1px] bg-white/10 mx-0.5" />
               <div 
                   data-testid="language-status-badge" 
@@ -1002,6 +1041,27 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           </div>
         )}
 
+        {/* 6. CSV 表格预览层 */}
+        {viewMode === 'table' && isCsv && (
+          <div className="absolute inset-0 z-20 flex flex-col bg-[#0d1117] overflow-hidden">
+            {csvData ? (
+              <CsvTableView csvData={csvData} fileName={fileName} />
+            ) : fileContent.includes('[LOADING]') ? (
+              <div className="flex items-center justify-center h-full text-white/40 text-[9pt]">
+                <div className="flex flex-col items-center gap-2">
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-white/60" />
+                  <span>正在解析 CSV...</span>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full gap-1 px-6 text-center text-[9pt] text-white/30">
+                <span>无法解析 CSV 内容</span>
+                <span className="text-[8pt]">请切换到编辑视图查看原始内容</span>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* 4. 过渡占位符 */}
         {isTransitioning && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-10 animate-in fade-in duration-200">
@@ -1012,4 +1072,204 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     </div>
   );
 };
+
+/**
+ * 解析 CSV/TSV 内容为二维数组。
+ * 支持：
+ * - 逗号、制表符、分号分隔
+ * - 双引号包裹的字段（含内嵌逗号、换行、转义引号）
+ * - 自动检测分隔符（基于第一行）
+ *
+ * @param content 原始文件内容
+ * @param isTsv 是否为 TSV 文件（强制使用制表符）
+ * @returns { headers, rows, delimiter } 或 null
+ */
+function parseCsvContent(content: string, isTsv: boolean): {
+  headers: string[];
+  rows: string[][];
+  delimiter: string;
+} | null {
+  if (!content || !content.trim()) return null;
+
+  const text = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // 自动检测分隔符（基于前几行）
+  let delimiter: string;
+  if (isTsv) {
+    delimiter = '\t';
+  } else {
+    delimiter = detectDelimiter(text);
+  }
+
+  const rows: string[][] = [];
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue; // 跳过空行
+    const fields = parseCsvLine(line, delimiter);
+    if (fields.length > 0) {
+      rows.push(fields);
+    }
+  }
+
+  if (rows.length === 0) return null;
+
+  const headers = rows[0];
+  const dataRows = rows.slice(1);
+
+  // 补齐不足的列（某些行可能字段数不一致）
+  const maxCols = Math.max(headers.length, ...dataRows.map(r => r.length));
+  const paddedHeaders = [...headers];
+  while (paddedHeaders.length < maxCols) paddedHeaders.push(`Column ${paddedHeaders.length + 1}`);
+  const paddedRows = dataRows.map(row => {
+    const padded = [...row];
+    while (padded.length < maxCols) padded.push('');
+    return padded;
+  });
+
+  return { headers: paddedHeaders, rows: paddedRows, delimiter };
+}
+
+/** 自动检测 CSV 分隔符：统计候选取值，选出现次数最多的 */
+function detectDelimiter(text: string): string {
+  const candidates = [',', '\t', ';', '|'];
+  const sample = text.split('\n').slice(0, 10).join('\n'); // 前 10 行采样
+  let best = ',';
+  let bestCount = 0;
+  for (const ch of candidates) {
+    // 简化：统计非引号内的分隔符出现次数
+    const count = countDelimiterOutsideQuotes(sample, ch);
+    if (count > bestCount) {
+      bestCount = count;
+      best = ch;
+    }
+  }
+  return best;
+}
+
+/** 统计非引号内分隔符出现次数 */
+function countDelimiterOutsideQuotes(text: string, delimiter: string): number {
+  let count = 0;
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      if (inQuotes && text[i + 1] === '"') {
+        i++; // 跳过转义引号
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === delimiter && !inQuotes) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/** 解析单行 CSV，返回字段数组（正确处理引号包裹） */
+function parseCsvLine(line: string, delimiter: string): string[] {
+  const fields: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        // 转义引号 ""
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === delimiter && !inQuotes) {
+      fields.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current.trim()); // 最后一个字段
+  return fields;
+}
+
+// ── CSV 表格渲染组件 ──
+
+interface CsvTableViewProps {
+  csvData: { headers: string[]; rows: string[][]; delimiter: string };
+  fileName: string;
+}
+
+const CsvTableView: React.FC<CsvTableViewProps> = ({ csvData, fileName }) => {
+  const { headers, rows } = csvData;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [showAllRows, setShowAllRows] = useState(false);
+  const INITIAL_ROWS = 100;
+  const displayRows = showAllRows ? rows : rows.slice(0, INITIAL_ROWS);
+  const hasMore = rows.length > INITIAL_ROWS;
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* 表头信息 */}
+      <div className="flex items-center justify-between px-3 py-1.5 bg-[#161b22] border-b border-white/10 shrink-0">
+        <span className="text-[9pt] text-white/50">
+          {fileName} — {rows.length} 行 × {headers.length} 列
+        </span>
+        {hasMore && (
+          <button
+            onClick={() => setShowAllRows(!showAllRows)}
+            className="text-[8pt] px-2 py-0.5 rounded text-white/40 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            {showAllRows ? `仅显示前 ${INITIAL_ROWS} 行` : `显示全部 ${rows.length} 行`}
+          </button>
+        )}
+      </div>
+
+      {/* 表格主体（横向+纵向滚动） */}
+      <div ref={containerRef} className="flex-1 overflow-auto">
+        <table className="w-full border-collapse text-[9pt] font-mono">
+          <thead className="sticky top-0 z-10">
+            <tr className="bg-[#21262d]">
+              <th className="sticky left-0 z-20 bg-[#21262d] px-3 py-1.5 text-left text-[8pt] font-bold text-white/40 border-b border-r border-white/10 whitespace-nowrap select-none">
+                #
+              </th>
+              {headers.map((header, i) => (
+                <th
+                  key={i}
+                  className="px-3 py-1.5 text-left text-[8pt] font-bold text-white/70 border-b border-white/10 whitespace-nowrap"
+                  title={header}
+                >
+                  {header || `Col ${i + 1}`}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {displayRows.map((row, rowIndex) => (
+              <tr
+                key={rowIndex}
+                className={rowIndex % 2 === 0 ? 'bg-transparent' : 'bg-white/[0.02]'}
+              >
+                <td className="sticky left-0 z-10 px-3 py-1 text-white/25 text-[8pt] border-r border-white/5 whitespace-nowrap select-none bg-inherit">
+                  {rowIndex + 1}
+                </td>
+                {row.map((cell, cellIndex) => (
+                  <td
+                    key={cellIndex}
+                    className="px-3 py-1 text-white/80 border-b border-white/5 max-w-[400px] truncate"
+                    title={cell.length > 80 ? cell : undefined}
+                  >
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
 
