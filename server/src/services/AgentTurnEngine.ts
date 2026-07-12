@@ -544,7 +544,15 @@ export class AgentTurnEngine {
                         emit({
                             type: "annotation",
                             method: "tool/result",
-                            params: { toolCallId: tc.id, toolName: tc.function.name, result },
+                            params: {
+                                toolCallId: tc.id,
+                                toolName: tc.function.name,
+                                result,
+                                // 文件编辑工具执行后附上文件路径，供前端编辑器感知刷新
+                                ...(typeof parsedArgs === 'object' && parsedArgs !== null && 'path' in parsedArgs
+                                    ? { filePath: (parsedArgs as any).path }
+                                    : {}),
+                            },
                         });
 
                         activeHistory.push({

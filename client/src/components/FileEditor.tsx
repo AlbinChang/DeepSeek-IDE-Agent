@@ -639,6 +639,41 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     };
   }, [isLocked]);
 
+  // Agent 文件写入后自动刷新编辑器内容
+  useEffect(() => {
+    const handleFileChanged = async (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail?.path) return;
+      const changedPath = String(detail.path).replace(/\\/g, '/');
+      const currentPath = activeFileRef.current?.replace(/\\/g, '/');
+      if (changedPath !== currentPath) return;
+      if (!currentPath) return;
+
+      console.log(`[Editor] File changed by agent: ${changedPath}, reloading content...`);
+      const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
+      if (!effectiveRoot) return;
+
+      try {
+        const result = await electronBridge.readFile({
+          filePath: changedPath,
+          root: effectiveRoot,
+        });
+        if (!result || !result.content) return;
+        // 确认仍未切换到其他文件
+        if (activeFileRef.current?.replace(/\\/g, '/') !== changedPath) return;
+        setFileEncoding(result.encoding || 'utf8');
+        setSavedContent(result.content);
+        setIsDirty(false);
+        setFileContent(result.content);
+      } catch (err) {
+        console.warn('[Editor] Failed to reload file after agent change:', err);
+      }
+    };
+
+    window.addEventListener('ui:file:changed', handleFileChanged);
+    return () => window.removeEventListener('ui:file:changed', handleFileChanged);
+  }, [workspaceRoot]);
+
   // 监听 Problems 面板的行跳转请求
   useEffect(() => {
     const handler = (e: Event) => {
