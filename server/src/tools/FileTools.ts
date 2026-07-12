@@ -461,7 +461,7 @@ export class FileTools {
             }
             return { status: 'error', error: 'WRITE_ERROR', message: err.message };
         }
-        return { status: 'success', path: unsafePath };
+        return { status: 'success' };
     }
 
     /**
@@ -620,7 +620,6 @@ export class FileTools {
 
             return { 
                 status: 'success', 
-                path: unsafePath,
                 newTotalLines: lines.length,
                 contextSnapshot,
             };
@@ -788,7 +787,6 @@ export class FileTools {
 
             return {
                 status: 'success',
-                path: unsafePath,
                 newTotalLines: newLines.length,
                 contextSnapshot,
             };
@@ -963,7 +961,6 @@ export class FileTools {
 
             return {
                 status: 'success',
-                path: fullPath,
                 occurrences: occurrences.length,
                 replacedLines: truncatedLines,
                 ...(linesNote ? { replacedLinesNote: linesNote } : {}),
@@ -985,7 +982,7 @@ export class FileTools {
     static async deletePath(workspaceRoot: string, unsafePath: string, recursive: boolean = false) {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
         await fs.rm(fullPath, { recursive, force: true });
-        return { status: 'success', path: fullPath }; // 返回绝对路径
+        return { status: 'success' };
     }
 
     static async searchFiles(workspaceRoot: string, query: string) { return []; }

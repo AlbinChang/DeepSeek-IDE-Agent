@@ -209,7 +209,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_write...');
         this.toolManager.registerTool({
             name: 'file_write',
-            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_edit。返回 path，语法错误时附加 syntax 字段。',
+            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_edit。返回 status，语法错误时附加 syntax 字段。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -305,16 +305,14 @@ export class AgentService extends EventEmitter {
             execute: async (params, context) => {
                 const root = this.resolveWorkspaceRootFromContext(context);
                 if (!root) throw new Error('Workspace not initialized');
-                // 修复：FileIO.deletePath 的签名是 (unsafePath, workspaceRoot)
-                // 原先将 root 传到了第一个参数，导致 resolvePath 内部校验越界
-                return await FileIO.deletePath(params.path, root, params.recursive);
+                return await FileTools.deletePath(root, params.path, params.recursive);
             }
         });
 
         console.log('[AgentService] Registering file_edit...');
         this.toolManager.registerTool({
             name: 'file_edit',
-            description: '文件行级精修工具（行业最佳实践）。支持两种精准操作：\n- **replace**：基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险\n- **insert**：在指定行号 startLine 前插入 newText\n\n【replace 操作】必须传入 action: "replace"、oldText、newText。oldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n【insert 操作】必须传入 action: "insert"、startLine（>=1）、newText。startLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 path / newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
+            description: '文件行级精修工具（行业最佳实践）。支持两种精准操作：\n- **replace**：基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险\n- **insert**：在指定行号 startLine 前插入 newText\n\n【replace 操作】必须传入 action: "replace"、oldText、newText。oldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n【insert 操作】必须传入 action: "insert"、startLine（>=1）、newText。startLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
             parameters: {
                 type: 'object',
                 properties: {
