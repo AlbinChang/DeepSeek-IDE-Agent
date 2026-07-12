@@ -467,8 +467,8 @@ export class SystemTools {
                     // stderr 独立截断，不受 stdout isTruncated 影响
                     if (stderr.length < LLM_MAX_OUTPUT) {
                         stderr += chunk;
-                    } else if (!stderr.includes('[Agent 自动截断: 错误输出超过 2.5KB]')) {
-                        stderr = stderr.substring(0, LLM_MAX_OUTPUT) + '\n\n--- [Agent 自动截断: 错误输出超过 2.5KB] ---';
+                    } else if (!stderr.includes('[stderr截断]')) {
+                        stderr = stderr.substring(0, LLM_MAX_OUTPUT) + '\n[stderr截断]';
                     }
                 }
 
@@ -494,12 +494,13 @@ export class SystemTools {
                 extraStderr: string,
                 outputFilePath: string | null
             ) => {
-                const stdoutFinal = isTruncated ? '--- [Agent 自动截断: 输出过长，仅保留最近内容] ---\n' + stdout : stdout;
+                const stdoutFinal = isTruncated ? '[截断，仅保留尾部]\n' + stdout : stdout;
                 const resultStderr = stderr + extraStderr;
 
-                // 构建返回给 LLM 的结果，附带输出文件路径提示
-                const fileHint = outputFilePath
-                    ? `\n\n[Agent] 完整输出已保存至 ${this.COMMAND_OUTPUT_DIR}/${this.COMMAND_OUTPUT_FILE}，可使用 read_file 按需查阅完整内容。`
+                // 仅当输出被截断或熔断时才追加简短提示，避免每次命令执行都浪费 ~150 字符
+                // 完整输出始终持久化到 .command/output.txt（已在系统提示词中说明）
+                const fileHint = (outputFilePath && (isTruncated || isHardKilled))
+                    ? `\n[截断，完整日志: ${this.COMMAND_OUTPUT_DIR}/${this.COMMAND_OUTPUT_FILE}]`
                     : '';
 
                 resolve({
