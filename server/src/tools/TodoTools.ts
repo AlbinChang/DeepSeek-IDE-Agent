@@ -45,7 +45,7 @@ export class TodoTools {
         if (!normalizedTodos.length) throw new Error('append_todo 需要提供 todos 数组，每项至少包含 title');
         const appended = await TodoService.appendTodos(this.workspaceRoot, userId, normalizedTodos);
         const total = await this.totalCount(userId);
-        return { status: 'ok', appended, total };
+        return { status: 'success', appended, total };
     }
 
     async updateTodo(params: any, context: any) {
@@ -61,7 +61,7 @@ export class TodoTools {
             updated.push(result);
         }
         const total = await this.totalCount(userId);
-        return { status: 'ok', updated: updated.length === 1 ? updated[0] : updated, total };
+        return { status: 'success', updated: updated.length === 1 ? updated[0] : updated, total };
     }
 
     async deleteTodo(params: any, context: any) {
@@ -74,7 +74,7 @@ export class TodoTools {
         const deletion = await TodoService.deleteTodo(this.workspaceRoot, userId, ids);
         const total = await this.totalCount(userId);
         const deletedCount = Array.isArray(deletion) ? deletion.length : (deletion ? 1 : 0);
-        return { status: 'ok', deleted: deletedCount, total };
+        return { status: 'success', deleted: deletedCount, total };
     }
 
     // ─── 原子工具定义 ───────────────────────────────────────
