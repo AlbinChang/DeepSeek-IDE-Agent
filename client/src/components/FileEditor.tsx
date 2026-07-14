@@ -989,7 +989,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         {/* 3. Markdown 预览层 (Preview Layer) */}
         {viewMode === 'preview' && isMarkdown && (
           <div className="absolute inset-0 z-20 bg-[#0d1117]">
-            <MarkdownPreview content={fileContent} />
+            <MarkdownPreview content={fileContent} filePath={activeFile} workspaceRoot={workspaceRoot} />
           </div>
         )}
 

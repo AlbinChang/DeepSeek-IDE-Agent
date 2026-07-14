@@ -494,7 +494,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_powershell_command...');
         this.toolManager.registerTool({
             name: 'run_powershell_command',
-            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。PowerShell 字符串引号规则见系统提示词中的 powershell_quoting_contract。完整输出自动持久化到 .command/output.txt，长输出场景下请用 read_file 按需检索完整内容。',
+            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。\n\n【JSON 传参免转义】命令字符串优先用单引号包裹文本（JSON 中无需转义），路径优先用正斜杠 C:/xxx（避免反斜杠转义），JSON 体用 here-string @\'...\'@ 包裹，多行用 ; 分隔。详细策略见系统提示词 powershell_quoting_contract。完整输出自动持久化到 .command/output.txt，长输出场景下请用 read_file 按需检索完整内容。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -514,7 +514,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_cmd_command...');
         this.toolManager.registerTool({
             name: 'run_cmd_command',
-            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。适合纯文本处理（findstr、dir、type）和简单文件操作。完整输出自动持久化到 .command/output.txt，长输出场景下请用 read_file 按需检索完整内容。',
+            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。适合纯文本处理（findstr、dir、type）和简单文件操作。\n\n【JSON 传参提示】CMD 反斜杠路径在 JSON 中须写双反斜杠（C:\\\\path），简单命令优先用 run_powershell_command 享受免转义策略。完整输出自动持久化到 .command/output.txt，长输出场景下请用 read_file 按需检索完整内容。',
             parameters: {
                 type: 'object',
                 properties: {

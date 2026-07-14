@@ -11,7 +11,7 @@
         "不添加 schema 未声明的字段",
         "嵌套对象递归满足子 schema 的 required/type/enum 约束",
         "遇到 INVALID_TOOL_ARGS 错误时只修报错字段不动其他参数",
-        "【JSON 字符串转义铁律】凡将用户可见文本（代码、路径、命令、文件内容等）作为 JSON 字符串参数传入时，必须确保 JSON 合法转义。铁律：① 字符串内的每个双引号 \" 必须写为 \\\"；② 每个反斜杠 \\ 必须写为 \\\\（Windows 路径 C:\\Users → C:\\\\Users）；③ 换行符写为 \\n，制表符写为 \\t；④ 字符串内若含 JSON 片段（如 curl -d '{\"key\":\"val\"}'），该片段本身也必须满足本条规则——逐层嵌套逐层转义；⑤ 传入之前，逐字通读参数值，心里模拟 JSON 解析器，确认不会因未转义字符导致解析失败。典型反面：file_write 的 content 参数包含 `console.log(\"hello\")` 但写成 `console.log(\"hello\")` 未转义引号 → JSON 解析失败；PowerShell 命令字符串含 `$var` 或反引号 `` ` `` 未正确处理。"
+        "【JSON 字符串转义铁律】凡将用户可见文本（代码、路径、命令、文件内容等）作为 JSON 字符串参数传入时，必须确保 JSON 合法转义。铁律：① 字符串内的每个双引号 \" 必须写为 \\\"；② 每个反斜杠 \\ 必须写为 \\\\（Windows 路径 C:\\Users → C:\\\\Users）；③ 换行符写为 \\n，制表符写为 \\t；④ 字符串内若含 JSON 片段（如 curl -d '{\"key\":\"val\"}'），该片段本身也必须满足本条规则——逐层嵌套逐层转义；⑤ 传入之前，逐字通读参数值，心里模拟 JSON 解析器，确认不会因未转义字符导致解析失败；⑥ 【Command 工具专项】run_powershell_command / run_cmd_command 的 command 参数是双重编码事故高发区（Shell 语法嵌入 JSON）。优先采用免转义策略：PowerShell 用单引号包裹文本字面量（'hello' 比 \"hello\" 安全）、Windows 路径优先用正斜杠（C:/Users 无须转义）、JSON 内嵌 JSON 用 PS here-string（@'...'@）、多行用分号分隔。CMD 反斜杠路径必须写双反斜杠（C:\\\\path）。典型反面：file_write 的 content 参数包含 `console.log(\"hello\")` 但写成 `console.log(\"hello\")` 未转义引号 → JSON 解析失败；PowerShell 命令字符串含 `$var` 或反引号 `` ` `` 未正确处理。"
       ]
     },
     "agent_port_protection": {

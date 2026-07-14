@@ -283,14 +283,60 @@ export class ShellPolicySection extends BasePromptSection {
 
     async build(ctx: PromptBuildContext): Promise<string> {
         const { envInfo } = ctx;
+        const psAvailable = envInfo.powershellAvailable;
+        const cmdAvailable = envInfo.cmdAvailable;
+
+        const quotingContract = psAvailable ? [
+            '',
+            '#### PowerShell JSON 传参免转义策略（powershell_quoting_contract）',
+            '核心原则：**优先用 PowerShell 语法特性避免 JSON 转义，而非死记转义规则。**',
+            '',
+            '**策略 1 — 字符串参数用单引号（最重要！）**',
+            '  ✅ Write-Host \'Hello World\'          # 单引号在 JSON 字符串中无需转义',
+            '  ❌ Write-Host "Hello World"          # 双引号需写成 \\"Hello World\\"',
+            '  ✅ Select-String -Pattern \'error\'   # 正则/模式匹配用单引号',
+            '  ✅ curl -d \'{"key":"val"}\' url       # JSON 体用单引号包裹，内层双引号无需转义',
+            '  ⚠️ 单引号字符串内变量不展开：$var 保持字面值，需要变量展开时用双引号（此时必须转义）',
+            '',
+            '**策略 2 — Windows 路径用正斜杠**',
+            '  ✅ Get-ChildItem C:/Users/zhang        # 正斜杠在 JSON 中无需转义',
+            '  ❌ Get-ChildItem C:\\Users\\zhang       # 反斜杠需写成 C:\\\\Users\\\\zhang',
+            '  ⚠️ 部分 cmd 原生命令（dir、type）不接受正斜杠 → 改用 run_cmd_command 或写双反斜杠',
+            '',
+            '**策略 3 — 多行命令用分号**',
+            '  ✅ npm install; npm run build          # 分号分隔（PS 5.1 不支持 &&）',
+            '  ✅ "npm install`nnpm run build"        # 反引号 n 表示换行（PS 特有，JSON 中须转义反引号为 ``）',
+            '  ❌ npm install\\nnpm run build          # \\n 在 JSON 中需写成 \\\\n（极易出错）',
+            '',
+            '**策略 4 — JSON 内嵌 JSON 用 here-string**',
+            '  ✅ curl -Method POST -Body (@\'',
+            '       {"key": "value"}',
+            '       \'@) https://api.example.com',
+            '     # here-string @\'...\'@ 内双引号无需转义',
+            '',
+            '**策略 5 — 必须用双引号时的自检清单**',
+            '  调用前逐字通读 command 参数值，确认：',
+            '  ☐ 每个 " 已写为 \\"',
+            '  ☐ 每个 \\ 已写为 \\\\（路径特别注意）',
+            '  ☐ 换行写为 `n（PowerShell 用反引号，不是 \\n）',
+            '  ☐ $ 在JSON中无须转义，仅PS双引号字符串内需用 `$ 转义变量',
+            '  ☐ 反引号 ` 在 JSON 中无须转义（非 JSON 特殊字符）',
+            '',
+            '**常见错误速查**',
+            '  ❌ "command":"echo "hello""         → 内层引号未转义，JSON 解析失败',
+            '  ❌ "command":"dir C:\\Users"         → 单反斜杠，\\U 被当作转义序列',
+            '  ✅ "command":"echo \'hello\'"         → 单引号免转义',
+            '  ✅ "command":"dir C:/Users"          → 正斜杠免转义',
+        ].join('\n') : '';
+
         return [
             '### 终端工具可用性 (TERMINAL TOOLS)',
-            `- run_powershell_command：${envInfo.powershellAvailable ? `✅ 可用（${envInfo.powershellVersion}）` : '❌ 不可用'}`,
-            `- run_cmd_command：${envInfo.cmdAvailable ? `✅ 可用（${envInfo.cmdVersion}）` : '❌ 不可用'}`,
+            `- run_powershell_command：${psAvailable ? `✅ 可用（${envInfo.powershellVersion}）` : '❌ 不可用'}`,
+            `- run_cmd_command：${cmdAvailable ? `✅ 可用（${envInfo.cmdVersion}）` : '❌ 不可用'}`,
             '- Windows 优先用 run_powershell_command；仅在用户明确要求或命令确实只能在 cmd.exe 下执行时才用 run_cmd_command。',
-            '- 每次命令执行后，完整输出（stdout+stderr+元数据）自动持久化到 .command/output.txt；返回给 LLM 的结果可能已被截断。',
-            '- 长命令输出场景：先观察返回结果中的关键信息；若信息不足，用 read_file 读取 .command/output.txt 获取完整输出。',
-        ].join('\n');
+            '- 每次命令执行后，完整输出自动持久化到 .command/output.txt；返回给 LLM 的结果可能已被截断，长输出场景用 read_file 获取完整内容。',
+            quotingContract,
+        ].filter(Boolean).join('\n');
     }
 }
 

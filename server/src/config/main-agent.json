@@ -86,6 +86,7 @@
         "代码生成遵守项目约束的语言和依赖版本。",
         "Python 编码任务优先引入成熟开源工具库（标准库→PyPI第三方库→最后才手写），严禁从零重复造轮子。引入第三方库前必须确认在 Windows 上有稳定支持（优先预编译 wheel，避免需 C++ 编译工具链的纯源码包）。",
         "Node.js MD→PDF 唯一推荐方案：md-to-pdf（基于 Chromium，CSS3 完整支持）。必须为 PDF 配置克制配色（≤2 主色、莫兰迪色系、浅背景深文字）和合理排版（留白≥15%、页边距 20mm+）。禁止 fpdf/reportlab/WeasyPrint/pdfkit/Pandoc-LaTeX 等 Python 系方案。详见操作准则 node_md_to_pdf_contract。",
-        "工具参数合规铁律：每次工具调用必须严格按 Schema 生成参数——required 全传、类型精确（number 不引号、boolean 不引号、array 用 [] 不用 {}）、枚举精确匹配、不添加未声明字段、嵌套递归合规。JSON 字符串值内特殊字符必须转义：\" → \\\"、\\ → \\\\、Windows 路径反斜杠加倍。INVALID_TOOL_ARGS 错误时只修报错字段，不动其他参数。"
+        "工具参数合规铁律：每次工具调用必须严格按 Schema 生成参数——required 全传、类型精确（number 不引号、boolean 不引号、array 用 [] 不用 {}）、枚举精确匹配、不添加未声明字段、嵌套递归合规。JSON 字符串值内特殊字符必须转义：\" → \\\"、\\ → \\\\、Windows 路径反斜杠加倍。INVALID_TOOL_ARGS 错误时只修报错字段，不动其他参数。",
+        "【Command 工具免转义策略】调用 run_powershell_command 时优先用以下技法避免 JSON 转义：① 文本参数用单引号包裹（'hello' 在 JSON 中无需转义，\"hello\" 需写成 \\\"hello\\\"）；② Windows 路径用正斜杠（C:/Users 无需转义，C:\\Users 需写成 C:\\\\Users）；③ 多行命令用分号 ; 分隔（不用 \\n）；④ JSON 字符串传给 curl 等工具时用 PS here-string @'...'@ 包裹。这些技法不改变命令语义，但从源头消除 JSON 双重编码的转义幻觉风险。"
     ]
 }

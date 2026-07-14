@@ -1,12 +1,18 @@
-﻿import React, { Suspense, lazy } from 'react';
+﻿import React, { Suspense, lazy, useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
+import { electronBridge } from '@/services/electron-bridge';
 
 const Mermaid = lazy(() => import('@/components/Mermaid').then((mod) => ({ default: mod.Mermaid })));
 
 interface MarkdownPreviewProps {
   content: string;
+  /** 当前 Markdown 文件的路径（用于解析相对路径图片） */
+  filePath?: string;
+  /** 工作区根目录（用于解析相对路径图片） */
+  workspaceRoot?: string | null;
 }
 
 const MARKDOWN_PREVIEW_CHAR_LIMIT = 200_000;
@@ -15,7 +21,7 @@ const MARKDOWN_PREVIEW_CHAR_LIMIT = 200_000;
  * 对应技术规范：Markdown 预览增强系统 (极简黑白版)
  * 移除所有彩色标题，锁定为黑白灰色调，仅通过字重和边框区分。
  */
-export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content }) => {
+export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, filePath, workspaceRoot }) => {
   const previewContent = React.useMemo(() => {
     if (content.length <= MARKDOWN_PREVIEW_CHAR_LIMIT) return content;
     return `${content.slice(0, MARKDOWN_PREVIEW_CHAR_LIMIT)}\n\n> Markdown 预览内容过长，已截断渲染以避免页面内存溢出；原始字符数：${content.length.toLocaleString('zh-CN')}`;
@@ -34,6 +40,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content }) => 
       <div className="markdown-body max-w-4xl mx-auto">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
+          rehypePlugins={[rehypeRaw]}
           components={{
             // 覆盖代码块渲染逻辑 (黑白化处理)
             code({ node, inline, className, children, ...props }: any) {
@@ -83,6 +90,8 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content }) => 
                 {children}
               </a>
             ),
+            // 图片渲染（支持外部URL、本地相对路径、加载失败回退）
+            img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} filePath={filePath} workspaceRoot={workspaceRoot} />,
             // 极简引用块
             blockquote: ({ children }) => (
               <blockquote className="border-l border-white/30 pl-6 py-2 my-6 bg-white/[0.02] text-white/50 italic font-serif">
@@ -127,3 +136,164 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content }) => 
     </div>
   );
 };
+
+// ── 图片渲染组件（处理加载失败、外部链接、暗色主题） ──
+
+interface MarkdownImageProps {
+  src?: string;
+  alt?: string;
+  filePath?: string;
+  workspaceRoot?: string | null;
+}
+
+const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, filePath, workspaceRoot }) => {
+  const [error, setError] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [resolvedSrc, setResolvedSrc] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
+
+  const rawSrc = String(src || '').trim();
+  if (!rawSrc) {
+    return <ImagePlaceholder reason="无图片来源" />;
+  }
+
+  // 外部 HTTP(S) 图片：正常加载
+  const isExternal = /^https?:\/\//i.test(rawSrc);
+  // Data URI：直接显示
+  const isDataUri = rawSrc.startsWith('data:');
+
+  // 本地相对路径：尝试通过 Electron IPC 读取文件并转为 data URI
+  const isLocalRelative = !isExternal && !isDataUri;
+
+  // 本地相对路径解析 effect
+  useEffect(() => {
+    if (!isLocalRelative) return;
+    if (!workspaceRoot) {
+      setError(true);
+      return;
+    }
+
+    let cancelled = false;
+    setResolving(true);
+
+    const resolveAndLoad = async () => {
+      try {
+        // 解析相对路径：基于当前 MD 文件所在目录
+        let absolutePath: string;
+        if (filePath) {
+          const mdDir = filePath.replace(/[/\\][^/\\]*$/, ''); // MD 文件所在目录
+          absolutePath = mdDir ? `${mdDir}/${rawSrc}`.replace(/\/+/g, '/') : rawSrc;
+        } else {
+          absolutePath = rawSrc;
+        }
+
+        // 规范化路径（处理 ../ 等）
+        const parts = absolutePath.split('/');
+        const resolved: string[] = [];
+        for (const part of parts) {
+          if (part === '..') {
+            resolved.pop();
+          } else if (part !== '.' && part !== '') {
+            resolved.push(part);
+          }
+        }
+        const normalizedPath = resolved.join('/');
+
+        if (!normalizedPath) {
+          if (!cancelled) setError(true);
+          return;
+        }
+
+        const result = await electronBridge.readFileBinary({
+          filePath: normalizedPath,
+          root: workspaceRoot,
+        });
+
+        if (cancelled) return;
+
+        if (result?.success && result.base64) {
+          const mime = result.mimeType || guessMimeFromExt(normalizedPath);
+          setResolvedSrc(`data:${mime};base64,${result.base64}`);
+          setResolving(false);
+        } else {
+          setError(true);
+        }
+      } catch {
+        if (!cancelled) setError(true);
+      }
+    };
+
+    resolveAndLoad();
+    return () => { cancelled = true; };
+  }, [isLocalRelative, rawSrc, filePath, workspaceRoot]);
+
+  // 正在解析本地文件
+  if (resolving) {
+    return (
+      <div className="my-4 flex items-center gap-2 rounded-sm border border-white/5 bg-white/[0.02] px-4 py-3">
+        <div className="h-3 w-3 animate-pulse rounded-full bg-white/10" />
+        <span className="text-[8pt] text-white/30">读取本地图片: {rawSrc}</span>
+      </div>
+    );
+  }
+
+  // 本地图片解析失败
+  if (isLocalRelative && error) {
+    return <ImagePlaceholder reason={`图片未找到: ${alt || rawSrc}`} />;
+  }
+
+  // 最终使用的 src
+  const finalSrc = resolvedSrc || rawSrc;
+
+  // 图片加载失败（外部 URL）
+  if (error && !isLocalRelative) {
+    return <ImagePlaceholder reason={alt || '图片加载失败'} />;
+  }
+
+  return (
+    <span className={`my-4 block ${loaded ? '' : 'min-h-[60px]'}`}>
+      {!loaded && (
+        <div className="flex items-center gap-2 rounded-sm border border-white/5 bg-white/[0.02] px-4 py-3">
+          <div className="h-3 w-3 animate-pulse rounded-full bg-white/10" />
+          <span className="text-[8pt] text-white/30">加载图片中...</span>
+        </div>
+      )}
+      <img
+        src={finalSrc}
+        alt={alt || ''}
+        onLoad={() => setLoaded(true)}
+        onError={() => setError(true)}
+        className={`max-w-full rounded-sm ${loaded ? 'block' : 'hidden'}`}
+        style={{ maxHeight: '400px', objectFit: 'contain' }}
+        loading="lazy"
+      />
+    </span>
+  );
+};
+
+const ImagePlaceholder: React.FC<{ reason: string }> = ({ reason }) => (
+  <div className="my-4 flex items-center gap-3 rounded-sm border border-white/10 bg-white/[0.02] px-4 py-3">
+    <svg className="h-5 w-5 shrink-0 text-white/25" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
+    </svg>
+    <span className="text-[9pt] text-white/35">{reason}</span>
+  </div>
+);
+
+/** 根据文件扩展名猜测 MIME 类型（供本地图片 base64 内联使用） */
+function guessMimeFromExt(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  const mimeMap: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    bmp: 'image/bmp',
+    ico: 'image/x-icon',
+    tiff: 'image/tiff',
+    tif: 'image/tiff',
+  };
+  return mimeMap[ext] || 'image/png';
+}
