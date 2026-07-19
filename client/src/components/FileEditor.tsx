@@ -17,6 +17,13 @@ import { electronBridge } from '@/services/electron-bridge';
 // PDF 预览组件按需懒加载（避免为所有用户增加 ~200KB bundle）
 const PdfPreview = lazy(() => import('@/components/PdfPreview'));
 
+/**
+ * 编辑器视图状态缓存（跨组件生命周期持久化光标/滚动位置）
+ * Key: 文件相对路径, Value: Monaco ICodeEditorViewState
+ * 解决用户二次打开同一文件时无法恢复到上次关闭位置的问题
+ */
+const editorViewStateCache = new Map<string, monaco.editor.IEditorViewState | null>();
+
 interface FileEditorProps {
   activeFile: string;
   isLocked: boolean;
@@ -361,6 +368,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     const modifiedUri = getFixedUri(targetPath, 'git-modified').toString();
 
     if (editorRef.current?.getModel()?.uri.toString() === mainUri) {
+      // 在解除绑定前保存光标/滚动位置，以便重新打开时恢复
+      const state = editorRef.current.saveViewState();
+      if (state) {
+        editorViewStateCache.set(targetPath, state);
+      }
       try { editorRef.current.setModel(null); } catch (e) { /* silent skip */ }
     }
 
@@ -616,12 +628,31 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                diffEditorRef.current.setModel(null);
             }
             editorRef.current.setModel(mainModel);
+            // 恢复上次关闭/切换前的光标和滚动位置
+            const savedState = editorViewStateCache.get(activeFile);
+            if (savedState && editorRef.current) {
+              try {
+                editorRef.current.restoreViewState(savedState);
+                editorRef.current.focus();
+              } catch (e) {
+                // 如果内容发生了根本变化（如行数大幅增减），恢复可能失败，清除过期缓存
+                editorViewStateCache.delete(activeFile);
+              }
+            }
           } else if (viewMode === 'diff' && diffEditorRef.current) {
+            // 从 editor 切到 diff 模式前保存当前光标位置
             if (viewMode !== lastModeRef.current && editorRef.current) {
+               const editorState = editorRef.current.saveViewState();
+               if (editorState) editorViewStateCache.set(activeFile, editorState);
                editorRef.current.setModel(null);
             }
             diffEditorRef.current.setModel({ original: originalModel, modified: modifiedModel });
           } else if (viewMode === 'preview' || viewMode === 'image') {
+            // 进入非编辑模式前保存当前光标位置
+            if (viewMode !== lastModeRef.current && editorRef.current) {
+               const editorState = editorRef.current.saveViewState();
+               if (editorState) editorViewStateCache.set(activeFile, editorState);
+            }
             editorRef.current?.setModel(null);
             diffEditorRef.current?.setModel(null);
           }
@@ -820,6 +851,15 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
+      // 组件卸载前保存当前文件的光标/滚动位置（如关闭所有 Tab 导致 FileEditor 被移除）
+      const currentPath = activeFileRef.current;
+      if (currentPath && editorRef.current) {
+        const state = editorRef.current.saveViewState();
+        if (state) {
+          editorViewStateCache.set(currentPath, state);
+        }
+      }
+
       isMountedRef.current = false;
       if (modelBindRafRef.current) {
         cancelAnimationFrame(modelBindRafRef.current);
