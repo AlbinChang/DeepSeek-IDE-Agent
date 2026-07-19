@@ -15,6 +15,9 @@ export const TodoList: React.FC = () => {
     };
 
     useEffect(() => {
+        // 防御：工作空间切换时立即清空旧 todos，避免闪现上一个工作空间的任务
+        setContextTodos([]);
+
         const fetchTodos = async () => {
             if (!workspaceRoot) return;
             // Electron 模式：跳过 HTTP 请求，依赖 GATEWAY_EVENT 接收 Agent 端推送

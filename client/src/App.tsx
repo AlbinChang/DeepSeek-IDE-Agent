@@ -50,13 +50,58 @@ const PanelFallback = ({ label }: { label: string }) => (
 );
 
 function App() {
-  const [activeFile, setActiveFile] = useState('');
+  // ── 多文件 Tab 管理 ──
+  const [openFiles, setOpenFiles] = useState<string[]>([]);
+  const [activeFileIndex, setActiveFileIndex] = useState(-1);
+  const activeFile = openFiles[activeFileIndex] ?? '';
+
+  const openFile = useCallback((filePath: string) => {
+    if (!filePath) return;
+    // 使用函数式更新，以 openFiles 闭包中的最新值判断
+    const existingIndex = openFiles.indexOf(filePath);
+    if (existingIndex >= 0) {
+      // 文件已打开：直接切换到对应 Tab
+      setActiveFileIndex(existingIndex);
+      return;
+    }
+    // 新文件：追加到 Tab 列表末尾并激活
+    // openFiles.length 即新文件在追加后的索引（0-indexed）
+    const newIndex = openFiles.length;
+    setOpenFiles(prev => [...prev, filePath]);
+    setActiveFileIndex(newIndex);
+  }, [openFiles]);
+
+  const closeFile = useCallback((filePath: string) => {
+    const index = openFiles.indexOf(filePath);
+    if (index < 0) return;
+    const newFiles = openFiles.filter(f => f !== filePath);
+    setOpenFiles(newFiles);
+    if (newFiles.length === 0) {
+      setActiveFileIndex(-1);
+      setEditorMode('editor');
+    } else if (index < activeFileIndex) {
+      // 关闭了当前激活文件之前的 Tab → 索引左移一位
+      setActiveFileIndex(activeFileIndex - 1);
+    } else if (index === activeFileIndex) {
+      // 关闭了当前激活文件 → 选择占据该位置的相邻文件
+      setActiveFileIndex(Math.min(activeFileIndex, newFiles.length - 1));
+    }
+    // index > activeFileIndex: 关闭了后面的 Tab，无需调整索引
+  }, [openFiles, activeFileIndex]);
+
+  const closeActiveFile = useCallback(() => {
+    if (!activeFile) return;
+    closeFile(activeFile);
+  }, [activeFile, closeFile]);
+
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(-1);
   const [activeSidebarView, setActiveSidebarView] = useState<'explorer' | 'git' | 'search' | 'extensions' | 'todo'>('explorer');
   const [bottomPanelTab, setBottomPanelTab] = useState<'terminal' | 'problems'>('terminal');
+  const [lockedFiles, setLockedFiles] = useState<Record<string, string>>({}); // path -> toolCallId
+  const [editorMode, setEditorMode] = useState<'editor' | 'diff'>('editor');
   const { workspaceRoot, setWorkspaceRoot } = useAgentContext();
   const { problems } = useProblemContext();
   const workspaceRootRef = useRef<string | null>(workspaceRoot);
@@ -74,8 +119,11 @@ function App() {
 
   // 处理文件切换并记录历史 (对齐 3.1 节)
   const navigateToFile = useCallback((file: string, updateHistory = true) => {
-    if (!file) return;
-    setActiveFile(file);
+    if (!file) {
+      closeActiveFile();
+      return;
+    }
+    openFile(file);
 
     if (updateHistory) {
       setHistory((prev) => {
@@ -91,7 +139,7 @@ function App() {
         return nextHistory;
       });
     }
-  }, []);
+  }, [closeActiveFile, openFile]);
 
   useEffect(() => {
     historyRef.current = history;
@@ -121,23 +169,11 @@ function App() {
     }
   }, [navigateToFile]);
 
-  const [lockedFiles, setLockedFiles] = useState<Record<string, string>>({}); // path -> toolCallId
-  const [editorMode, setEditorMode] = useState<'editor' | 'diff'>('editor');
   const activeFileRef = useRef(activeFile);
 
-  const closeActiveFile = useCallback(() => {
-    setActiveFile('');
-    setEditorMode('editor');
-  }, []);
-
   const handleFileSelect = useCallback((file: string) => {
-    if (!file) {
-      closeActiveFile();
-      return;
-    }
-
     navigateToFile(file);
-  }, [closeActiveFile, navigateToFile]);
+  }, [navigateToFile]);
 
   useEffect(() => {
     activeFileRef.current = activeFile;
@@ -316,7 +352,10 @@ function App() {
                 }
                 setWorkspaceSwitchModal('hidden');
                 setWorkspaceRoot(result.workspaceRoot);
-                setActiveFile('');
+                // 切换工作空间时清空所有打开的文件 Tab
+                setOpenFiles([]);
+                setActiveFileIndex(-1);
+                setEditorMode('editor');
               } catch (e: any) {
                 const errMsg = e?.message || String(e || '未知错误');
                 console.error('[WorkspaceSwitch] 切换失败:', errMsg);
@@ -420,6 +459,39 @@ function App() {
           <Panel defaultSize={28} minSize={15} className="flex flex-col min-w-0 min-h-0 relative bg-black z-10">
             <PanelGroup orientation="vertical">
               <Panel defaultSize={75} minSize={20} className="flex flex-col overflow-hidden relative min-h-0">
+                {/* ── 多文件 Tab 栏 ── */}
+                {openFiles.length > 0 && (
+                  <div className="h-7 bg-[#050505] flex items-center border-b border-white/[0.08] shrink-0 overflow-x-auto scrollbar-thin scrollbar-thumb-white/5" data-testid="editor-tab-bar">
+                    {openFiles.map((filePath, idx) => {
+                      const isActive = idx === activeFileIndex;
+                      const fileName = filePath.split(/[/\\]/).pop() || filePath;
+                      return (
+                        <button
+                          key={filePath}
+                          onClick={() => { setActiveFileIndex(idx); setEditorMode('editor'); }}
+                          className={`h-full max-w-[200px] px-3 flex items-center gap-1 text-[9px] font-medium shrink-0 border-r border-white/[0.05] transition-colors cursor-pointer select-none ${
+                            isActive
+                              ? 'bg-[#0a0a0a] text-white/90 border-t-[1.5px] border-t-white/25'
+                              : 'text-white/35 hover:text-white/60 hover:bg-white/[0.02]'
+                          }`}
+                          title={filePath}
+                        >
+                          <span className="truncate flex-1 min-w-0">{fileName}</span>
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              closeFile(filePath);
+                            }}
+                            className="ml-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border border-transparent text-white/20 hover:border-white/10 hover:bg-white/10 hover:text-white/80 transition-colors"
+                            title="关闭 (Close)"
+                          >
+                            <X size={9} strokeWidth={2} />
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 {activeFile ? (
                   <Suspense fallback={<PanelFallback label="Loading Editor" />}>
                     <FileEditor 
@@ -687,7 +759,10 @@ function App() {
                           }
                           setWorkspaceSwitchModal('hidden');
                           setWorkspaceRoot(result.workspaceRoot);
-                          setActiveFile('');
+                          // 切换工作空间时清空所有打开的文件 Tab
+                          setOpenFiles([]);
+                          setActiveFileIndex(-1);
+                          setEditorMode('editor');
                         } catch (e: any) {
                           const errMsg = e?.message || String(e || '未知错误');
                           console.error('[WorkspaceSwitch] 切换失败:', errMsg);

@@ -163,6 +163,13 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     const [todos, setTodos] = useState<any[]>([]);
     const [problems, setProblemsState] = useState<ProblemEntry[]>([]);
 
+    // 工作空间切换时，清除旧工作空间的 todos / problems 残留
+    // 防止切换后短暂闪现上一个工作空间的任务列表和诊断信息
+    useEffect(() => {
+        setTodos([]);
+        setProblemsState([]);
+    }, [workspaceRoot]);
+
     const setProblems = useCallback((entries: ProblemEntry[]) => {
         setProblemsState(entries);
     }, []);
