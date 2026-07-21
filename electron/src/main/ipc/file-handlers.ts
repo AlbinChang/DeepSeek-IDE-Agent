@@ -7,7 +7,111 @@
 import { IpcMain } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as zlib from 'node:zlib';
 import { PROJECT_ROOT } from '../index.js';
+
+// ═══════════════════════════════════════════════════════════════
+// ZIP/JAR 文件解析工具（纯 Node.js 内置模块，零外部依赖）
+// ═══════════════════════════════════════════════════════════════
+
+/** ZIP 中央目录条目 */
+interface ZipEntry {
+    name: string;
+    isDirectory: boolean;
+    compressedSize: number;
+    uncompressedSize: number;
+    compressionMethod: number;
+    localHeaderOffset: number;
+}
+
+/** 解析 ZIP 文件的中央目录，返回所有条目列表 */
+function parseZipEntries(zipBuffer: Buffer): ZipEntry[] {
+    const entries: ZipEntry[] = [];
+
+    // 查找 EOCD 签名 (0x06054b50) 从文件末尾向前搜索
+    let eocdOffset = -1;
+    const minEocdSize = 22;
+    const maxEocdCommentSize = 65535;
+    const searchStart = Math.max(0, zipBuffer.length - minEocdSize - maxEocdCommentSize);
+
+    for (let i = zipBuffer.length - minEocdSize; i >= searchStart; i--) {
+        if (zipBuffer.readUInt32LE(i) === 0x06054b50) {
+            eocdOffset = i;
+            break;
+        }
+    }
+
+    if (eocdOffset === -1) {
+        throw new Error('Invalid ZIP file: EOCD signature not found');
+    }
+
+    const totalEntries = zipBuffer.readUInt16LE(eocdOffset + 10);
+    const centralDirOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
+
+    let offset = centralDirOffset;
+    for (let i = 0; i < totalEntries; i++) {
+        if (offset + 46 > zipBuffer.length) break;
+
+        const signature = zipBuffer.readUInt32LE(offset);
+        if (signature !== 0x02014b50) break;
+
+        const compressionMethod = zipBuffer.readUInt16LE(offset + 10);
+        const compressedSize = zipBuffer.readUInt32LE(offset + 20);
+        const uncompressedSize = zipBuffer.readUInt32LE(offset + 24);
+        const fileNameLength = zipBuffer.readUInt16LE(offset + 28);
+        const extraFieldLength = zipBuffer.readUInt16LE(offset + 30);
+        const fileCommentLength = zipBuffer.readUInt16LE(offset + 32);
+        const localHeaderOffset = zipBuffer.readUInt32LE(offset + 42);
+
+        const fileNameStart = offset + 46;
+        if (fileNameStart + fileNameLength > zipBuffer.length) break;
+        const fileName = zipBuffer.toString('utf-8', fileNameStart, fileNameStart + fileNameLength);
+        const normalizedName = fileName.replace(/\\/g, '/');
+
+        entries.push({
+            name: normalizedName,
+            isDirectory: normalizedName.endsWith('/'),
+            compressedSize,
+            uncompressedSize,
+            compressionMethod,
+            localHeaderOffset,
+        });
+
+        offset = fileNameStart + fileNameLength + extraFieldLength + fileCommentLength;
+    }
+
+    return entries;
+}
+
+/** 从 ZIP buffer 中读取并解压单个条目的内容 */
+function readZipEntryContent(zipBuffer: Buffer, entry: ZipEntry): Buffer {
+    let localOffset = entry.localHeaderOffset;
+
+    if (localOffset + 30 > zipBuffer.length) {
+        throw new Error('Local file header out of bounds');
+    }
+
+    const signature = zipBuffer.readUInt32LE(localOffset);
+    if (signature !== 0x04034b50) {
+        throw new Error('Invalid local file header signature');
+    }
+
+    const fileNameLength = zipBuffer.readUInt16LE(localOffset + 26);
+    const extraFieldLength = zipBuffer.readUInt16LE(localOffset + 28);
+
+    const dataOffset = localOffset + 30 + fileNameLength + extraFieldLength;
+    const compressedData = zipBuffer.subarray(dataOffset, dataOffset + entry.compressedSize);
+
+    if (entry.compressionMethod === 0) {
+        // STORE（无压缩）
+        return Buffer.from(compressedData);
+    } else if (entry.compressionMethod === 8) {
+        // DEFLATE 压缩
+        return zlib.inflateRawSync(compressedData);
+    } else {
+        throw new Error(`Unsupported compression method: ${entry.compressionMethod}`);
+    }
+}
 
 // 简单路径校验（对齐 PathUtils 的沙箱逻辑）
 function resolveSafePath(userPath: string, root?: string): string {
@@ -392,6 +496,138 @@ export function registerFileIpc(ipcMain: IpcMain) {
             }
             fs.renameSync(resolvedOld, resolvedNew);
             return { success: true, newPath: resolvedNew };
+        } catch (err: any) {
+            return { success: false, error: err?.message || String(err) };
+        }
+    });
+
+    // ── 列出 JAR/ZIP 内部文件目录 ──
+    ipcMain.handle('file:listJar', async (_event, params: {
+        jarPath: string;
+        innerPath?: string;
+        root?: string;
+    }) => {
+        try {
+            const resolvedJarPath = resolveSafePath(params.jarPath, params.root);
+
+            if (!fs.existsSync(resolvedJarPath)) {
+                return { success: false, error: `JAR file not found: ${params.jarPath}` };
+            }
+
+            const stat = fs.statSync(resolvedJarPath);
+            // 50MB 上限保护主进程内存
+            if (stat.size > 50 * 1024 * 1024) {
+                return { success: false, error: `JAR file too large (${(stat.size / 1024 / 1024).toFixed(1)}MB > 50MB)` };
+            }
+
+            const jarBuffer = fs.readFileSync(resolvedJarPath);
+            const allEntries = parseZipEntries(jarBuffer);
+
+            const innerPath = params.innerPath || '';
+            const prefix = innerPath ? (innerPath.endsWith('/') ? innerPath : innerPath + '/') : '';
+
+            const seenDirs = new Set<string>();
+            const resultEntries: any[] = [];
+
+            for (const entry of allEntries) {
+                if (!entry.name.startsWith(prefix)) continue;
+                if (entry.name === prefix) continue;
+
+                const relativePath = entry.name.substring(prefix.length);
+                const slashIdx = relativePath.indexOf('/');
+
+                let displayName: string;
+                let isDir: boolean;
+
+                if (slashIdx === -1) {
+                    displayName = relativePath;
+                    isDir = false;
+                } else {
+                    displayName = relativePath.substring(0, slashIdx);
+                    isDir = true;
+                }
+
+                if (!displayName) continue;
+
+                const key = `${isDir ? 'D' : 'F'}:${displayName}`;
+                if (seenDirs.has(key)) continue;
+                seenDirs.add(key);
+
+                resultEntries.push({
+                    name: displayName,
+                    path: `${params.jarPath}::${prefix}${displayName}${isDir ? '/' : ''}`,
+                    type: isDir ? 'directory' : 'file',
+                    isDirectory: isDir,
+                    isFile: !isDir,
+                });
+            }
+
+            return { success: true, files: resultEntries, totalCount: resultEntries.length };
+        } catch (err: any) {
+            return { success: false, error: err?.message || String(err) };
+        }
+    });
+
+    // ── 读取 JAR/ZIP 内部文件内容 ──
+    ipcMain.handle('file:readJarEntry', async (_event, params: {
+        jarPath: string;
+        entryPath: string;
+        root?: string;
+    }) => {
+        try {
+            const resolvedJarPath = resolveSafePath(params.jarPath, params.root);
+
+            if (!fs.existsSync(resolvedJarPath)) {
+                return { success: false, error: `JAR file not found: ${params.jarPath}` };
+            }
+
+            const stat = fs.statSync(resolvedJarPath);
+            if (stat.size > 50 * 1024 * 1024) {
+                return { success: false, error: 'JAR file too large (>50MB)' };
+            }
+
+            const jarBuffer = fs.readFileSync(resolvedJarPath);
+            const allEntries = parseZipEntries(jarBuffer);
+
+            const targetName = params.entryPath.replace(/\\/g, '/');
+            const entry = allEntries.find(e => e.name === targetName);
+
+            if (!entry) {
+                return { success: false, error: `Entry not found in JAR: ${targetName}` };
+            }
+
+            if (entry.isDirectory) {
+                return { success: false, error: `Entry is a directory: ${targetName}` };
+            }
+
+            const contentBuffer = readZipEntryContent(jarBuffer, entry);
+
+            // 检测是否为文本内容（简单启发式：前 512 字节不含 NULL 字节）
+            const sample = contentBuffer.subarray(0, Math.min(512, contentBuffer.length));
+            const isBinary = sample.includes(0);
+
+            if (isBinary) {
+                const base64 = contentBuffer.toString('base64');
+                return {
+                    success: true,
+                    content: `[BINARY] 此文件为二进制内容（${entry.uncompressedSize} bytes），无法以文本形式显示。\n` +
+                             `Base64 编码（前 2000 字符）:\n${base64.substring(0, 2000)}`,
+                    encoding: 'base64',
+                    lineCount: 1,
+                    isBinary: true,
+                    entryPath: targetName,
+                };
+            }
+
+            const textContent = contentBuffer.toString('utf-8');
+            return {
+                success: true,
+                content: textContent,
+                encoding: 'utf-8',
+                lineCount: textContent.split('\n').length,
+                isBinary: false,
+                entryPath: targetName,
+            };
         } catch (err: any) {
             return { success: false, error: err?.message || String(err) };
         }

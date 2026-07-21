@@ -2,7 +2,7 @@
 import { createPortal } from 'react-dom';
 import { 
   File, Folder, ChevronRight, ChevronDown, 
-  Loader2, Lock, FolderPlus, Compass, Copy, Trash2, AlertTriangle, Pencil, Clock, X, FolderOpen
+  Loader2, Lock, FolderPlus, Compass, Copy, Trash2, AlertTriangle, Pencil, Clock, X, FolderOpen, Box
 } from 'lucide-react';
 import axios from 'axios';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
@@ -18,7 +18,25 @@ interface FileNode {
   children?: FileNode[];
   isOpen?: boolean;
   lockedBy?: string | null;
+  /** 若设置，表示此节点为 JAR/WAR/EAR 内部条目，值为宿主归档文件的真实路径 */
+  jarBase?: string;
 }
+
+/** 判断文件名是否为支持的归档格式（JAR/WAR/EAR） */
+const isArchiveFile = (fileName: string): boolean => {
+  const lower = fileName.toLowerCase();
+  return lower.endsWith('.jar') || lower.endsWith('.war') || lower.endsWith('.ear') || lower.endsWith('.zip');
+};
+
+/** 从 :: 路径中提取 JAR 内部路径 */
+const extractJarInnerPath = (fullPath: string): string => {
+  const idx = fullPath.indexOf('::');
+  if (idx === -1) return '';
+  let inner = fullPath.substring(idx + 2);
+  // 去除尾部斜杠（目录条目）
+  if (inner.endsWith('/')) inner = inner.slice(0, -1);
+  return inner;
+};
 
 interface FileTreeProps {
   onFileSelect: (path: string) => void;
@@ -177,7 +195,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   };
 
   const handleDragStart = (e: React.DragEvent, node: FileNode) => {
-    if (isMoving) return;
+    // JAR 内部条目不可拖拽
+    if (isMoving || node.jarBase) return;
     e.dataTransfer.setData('text/plain', node.path);
     e.dataTransfer.effectAllowed = 'move';
     setDragNodePath(node.path);
@@ -198,7 +217,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   };
 
   const handleDragOver = (e: React.DragEvent, node: FileNode) => {
-    if (!node.isDirectory) return;
+    // JAR 内部目录不可作为拖放目标
+    if (!node.isDirectory || node.jarBase) return;
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
@@ -209,7 +229,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   };
 
   const handleDragEnter = (e: React.DragEvent, node: FileNode) => {
-    if (!node.isDirectory) return;
+    // JAR 内部目录不可作为拖放目标
+    if (!node.isDirectory || node.jarBase) return;
     e.preventDefault();
     e.stopPropagation();
     // 使用计数器处理嵌套元素冒泡
@@ -221,7 +242,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   };
 
   const handleDragLeave = (e: React.DragEvent, node: FileNode) => {
-    if (!node.isDirectory) return;
+    // JAR 内部目录不可作为拖放目标
+    if (!node.isDirectory || node.jarBase) return;
     e.preventDefault();
     e.stopPropagation();
     const count = (dragCounterRef.current.get(node.path) || 1) - 1;
@@ -246,8 +268,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
       return;
     }
 
-    // 不允许拖入自身或自身的子目录
-    if (isDescendantOf(sourcePath, targetNode.path)) {
+    // 不允许拖入自身或自身的子目录 / JAR 内部目录
+    if (isDescendantOf(sourcePath, targetNode.path) || targetNode.jarBase) {
       console.warn('[FileTree] Cannot move into itself or a child directory');
       setDragNodePath(null);
       setDragOverPath(null);
@@ -342,6 +364,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         const pathsToRefresh = ['.'];
             const findOpenPaths = (nodesList: FileNode[]) => {
                 for (const node of nodesList) {
+            // 跳过 JAR 内部节点（虚拟目录，不参与文件系统轮询）
+            if (node.jarBase) continue;
             if (node.isDirectory && node.isOpen && !shouldSkipAutoRefreshPath(node.path)) {
                         pathsToRefresh.push(node.path);
               if (pathsToRefresh.length >= MAX_AUTO_REFRESH_PATHS) return;
@@ -543,8 +567,9 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
       const oldNode = oldNodeByPath.get(newNode.path);
       if (oldNode) {
         newNode.isOpen = oldNode.isOpen;
-        // 如果原本是打开的且已经有子节点，保留它们用于占位或递归
-        if (newNode.isDirectory && newNode.isOpen && oldNode.children) {
+        newNode.jarBase = oldNode.jarBase; // 保留 JAR 内部节点标记
+        // 如果是打开的且已经有子节点，保留它们（含 JAR 展开后的虚拟子节点）
+        if (newNode.isOpen && oldNode.children) {
           newNode.children = oldNode.children;
         }
       }
@@ -553,7 +578,10 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   };
 
   const toggleFolder = async (node: FileNode) => {
-    if (!node.isDirectory) {
+    // ── JAR/WAR/EAR 归档文件：视为虚拟目录展开 ──
+    const isArchive = isArchiveFile(node.name);
+
+    if (!node.isDirectory && !isArchive) {
       onFileSelect(node.path);
       return;
     }
@@ -581,7 +609,21 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
           return;
         }
         let childData: any[];
-        if (electronBridge.isElectron) {
+
+        if (node.jarBase || isArchive) {
+          // ── 归档文件内部目录（JAR/WAR/EAR/ZIP） ──
+          const jarPath = node.jarBase || node.path;
+          const innerPath = node.jarBase ? extractJarInnerPath(node.path) : '';
+          const result = await electronBridge.listJarContents({ jarPath, innerPath, root: workspaceRoot });
+          if (!result.success) throw new Error(result.error || 'Failed to list archive contents');
+          childData = (result.files || []).map((f: any) => ({
+            name: f.name,
+            path: f.path,
+            isDirectory: f.isDirectory || f.type === 'directory',
+            jarBase: node.jarBase || node.path,
+          }));
+        } else if (electronBridge.isElectron) {
+          // ── 普通文件系统目录 ──
           const result = await electronBridge.listFiles({ dirPath: node.path, depth: 1, root: workspaceRoot });
           if (!result.success) throw new Error(result.error || 'Toggle failed');
           childData = (result.files || []).map((f: any) => ({
@@ -668,14 +710,20 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
           }`}
         >
           <div className="flex items-center gap-1.5 min-w-0 flex-1">
-            {node.isDirectory ? (
+            {node.isDirectory || isArchiveFile(node.name) ? (
               <>
-                {node.isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                <Folder size={11} className={`${node.isOpen ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`} />
+                {(node.isDirectory || isArchiveFile(node.name)) && (
+                  node.isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />
+                )}
+                {isArchiveFile(node.name) && !node.jarBase ? (
+                  <Box size={11} className={`${node.isOpen ? 'text-amber-400' : 'text-amber-400/60 group-hover:text-amber-400'} shrink-0`} title="归档文件 (JAR/WAR/EAR/ZIP)" />
+                ) : (
+                  <Folder size={11} className={`${node.isOpen ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`} />
+                )}
               </>
             ) : (
               <>
-                <File size={10} className={`${isActive ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0`} />
+                <File size={10} className={`${isActive ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${node.jarBase ? 'text-amber-400/50' : ''}`} />
               </>
             )}
             <span className={`text-[10px] truncate tracking-tighter ${isActive ? 'translate-x-0.5 transition-transform' : 'opacity-40 group-hover:opacity-100'} ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`}>
@@ -723,7 +771,10 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             <Copy size={12} className="opacity-50" />
             <span>复制绝对路径 (Absolute)</span>
           </div>
+          {!contextMenu.node.jarBase && (
           <div className="border-t border-white/5 my-1" />
+          )}
+          {!contextMenu.node.jarBase && (
           <div 
             className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
             onClick={(e) => {
@@ -746,6 +797,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             <Folder size={12} className="opacity-50" />
             <span>在文件资源管理器中显示</span>
           </div>
+          )}
+          {!contextMenu.node.jarBase && (
           <div 
             className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
             onClick={(e) => {
@@ -759,7 +812,11 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             <Pencil size={12} className="opacity-50" />
             <span>重命名{contextMenu.node.isDirectory ? '目录' : '文件'}</span>
           </div>
+          )}
+          {!contextMenu.node.jarBase && (
           <div className="border-t border-white/5 my-1" />
+          )}
+          {!contextMenu.node.jarBase && (
           <div 
             className="px-3 py-2 hover:bg-red-500/20 cursor-pointer flex items-center gap-2 transition-colors text-red-400"
             onClick={(e) => {
@@ -772,6 +829,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             <Trash2 size={12} />
             <span>删除{contextMenu.node.isDirectory ? '目录' : '文件'}</span>
           </div>
+          )}
         </div>
       )}
 

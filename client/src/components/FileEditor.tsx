@@ -67,6 +67,20 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'tiff', 'tif'].includes(ext || '');
   }, [activeFile]);
 
+  // JAR/ZIP 归档文件内部条目检测
+  const isJarEntry = useMemo(() => activeFile.includes('::'), [activeFile]);
+  const jarEntryInfo = useMemo(() => {
+    if (!isJarEntry) return null;
+    const idx = activeFile.indexOf('::');
+    const jarPath = activeFile.substring(0, idx);
+    let entryPath = activeFile.substring(idx + 2);
+    if (entryPath.endsWith('/')) entryPath = entryPath.slice(0, -1);
+    return { jarPath, entryPath };
+  }, [activeFile, isJarEntry]);
+
+  // JAR 内部文件为只读（无法直接保存回归档）
+  const isEffectivelyReadOnly = isLocked || isJarEntry;
+
   // PDF 预览状态
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
@@ -120,7 +134,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   };
 
   const handleSaveFile = async () => {
-    if (!activeFile || isLocked || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || viewMode === 'table' || isPdf || isImage || isSaving) return;
+    if (!activeFile || isLocked || isJarEntry || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || viewMode === 'table' || isPdf || isImage || isSaving) return;
 
     const contentToSave = getCurrentEditorContent();
     if (contentToSave === savedContent) {
@@ -439,6 +453,31 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
           if (!effectiveRoot) return;
 
+          // ── JAR 内部文件：通过 readJarEntry 读取 ──
+          if (isJarEntry && jarEntryInfo) {
+            const jarResult = await electronBridge.readJarEntry({
+              jarPath: jarEntryInfo.jarPath,
+              entryPath: jarEntryInfo.entryPath,
+              root: effectiveRoot,
+            });
+
+            if (signal.aborted || activeFileRef.current !== activeFile) {
+              console.log(`[Editor] JAR fetch aborted or stale for ${activeFile}`);
+              return;
+            }
+
+            if (!jarResult || !jarResult.success) {
+              throw new Error(`[IO_FAILURE] JAR 条目读取失败: ${jarResult?.error || '无内容'}`);
+            }
+
+            console.log(`[Editor] JAR entry fetched for ${activeFile}, length: ${jarResult.content?.length || 0}`);
+            setFileEncoding(jarResult.encoding || 'utf8');
+            setSavedContent(jarResult.content || '');
+            setIsDirty(false);
+            setFileContent(jarResult.content || '');
+            return;
+          }
+
           // 通过 IPC 直接读取本地文件
           const result = await electronBridge.readFile({
             filePath: activeFile,
@@ -632,7 +671,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
             const savedState = editorViewStateCache.get(activeFile);
             if (savedState && editorRef.current) {
               try {
-                editorRef.current.restoreViewState(savedState);
+                editorRef.current.restoreViewState(savedState as monaco.editor.ICodeEditorViewState);
                 editorRef.current.focus();
               } catch (e) {
                 // 如果内容发生了根本变化（如行数大幅增减），恢复可能失败，清除过期缓存
@@ -893,7 +932,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                 title="当前文件有未保存修改"
               />
             )}
-            {isLocked && <Lock size={10} className="ml-1 shrink-0 animate-pulse text-white" />}
+            {isEffectivelyReadOnly && (
+              <span title={isJarEntry ? '归档文件内部条目（只读）' : '文件已被 Agent 锁定'}>
+                <Lock size={10} className={`ml-1 shrink-0 ${isLocked ? 'animate-pulse' : ''} text-white`} />
+              </span>
+            )}
             {onClose && (
               <button
                 type="button"
@@ -976,7 +1019,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
               lineDecorationsWidth: 4,
               lineNumbersMinChars: 3,
               automaticLayout: true,
-              readOnly: isLocked,
+              readOnly: isEffectivelyReadOnly,
               renderLineHighlight: 'all',
               inlineSuggest: { enabled: true, showToolbar: 'always' },
               quickSuggestions: { other: true, comments: true, strings: true },

@@ -27,6 +27,8 @@ export interface ElectronAPI {
     getFileMd5: (params: { filePath: string }) => Promise<{ md5: string }>;
     deleteFile: (params: { filePath: string; root?: string }) => Promise<{ success: boolean; error?: string }>;
     renameFile: (params: { oldPath: string; newPath: string; root?: string }) => Promise<{ success: boolean; newPath?: string; error?: string }>;
+    listJarContents: (params: { jarPath: string; innerPath?: string; root?: string }) => Promise<{ success: boolean; files?: Array<{ name: string; type: 'file' | 'directory'; path: string; isDirectory: boolean; isFile: boolean }>; totalCount?: number; error?: string }>;
+    readJarEntry: (params: { jarPath: string; entryPath: string; root?: string }) => Promise<{ success: boolean; content?: string; encoding?: string; lineCount?: number; isBinary?: boolean; entryPath?: string; error?: string }>;
 
     // 终端（替换 terminal-server SSE/REST）
     createTerminal: (params: TerminalCreateParams) => Promise<TerminalCreateResult>;
@@ -204,6 +206,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getFileMd5: (params: { filePath: string }) => ipcRenderer.invoke('file:md5', params),
     deleteFile: (params: { filePath: string; root?: string }) => ipcRenderer.invoke('file:delete', params),
     renameFile: (params: { oldPath: string; newPath: string; root?: string }) => ipcRenderer.invoke('file:rename', params),
+    listJarContents: (params: { jarPath: string; innerPath?: string; root?: string }) => ipcRenderer.invoke('file:listJar', params),
+    readJarEntry: (params: { jarPath: string; entryPath: string; root?: string }) => ipcRenderer.invoke('file:readJarEntry', params),
 
     // 终端
     createTerminal: (params: TerminalCreateParams) => ipcRenderer.invoke('terminal:create', params),

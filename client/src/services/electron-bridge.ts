@@ -173,6 +173,12 @@ export const electronBridge = {
     async renameFile(params: { oldPath: string; newPath: string; root?: string }) {
         return callIpc('renameFile', [params]);
     },
+    async listJarContents(params: { jarPath: string; innerPath?: string; root?: string }) {
+        return callIpc('listJarContents', [params]);
+    },
+    async readJarEntry(params: { jarPath: string; entryPath: string; root?: string }) {
+        return callIpc('readJarEntry', [params]);
+    },
 
     // ═══ Terminal ═══
     async createTerminal(params: { userId: string; sessionId?: string; workDir?: string; cols?: number; rows?: number }) {
