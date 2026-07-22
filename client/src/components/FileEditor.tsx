@@ -1025,6 +1025,9 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
               quickSuggestions: { other: true, comments: true, strings: true },
               cursorSmoothCaretAnimation: 'on',
               scrollBeyondLastLine: false,
+              wordWrap: 'on',
+              wrappingStrategy: 'advanced',
+              wrappingIndent: 'same',
               padding: { top: 8, bottom: 8 },
               // 方案十四：强制禁用内置的行装饰器/行号克隆。
               // 在 React/Monaco 混合渲染且带有 model.setValue 更新时，
@@ -1063,6 +1066,9 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
               automaticLayout: true,
               readOnly: true, 
               renderSideBySide: true,
+              wordWrap: 'on',
+              wrappingStrategy: 'advanced',
+              wrappingIndent: 'same',
               originalEditable: false,
               padding: { top: 8, bottom: 8 }
             }}

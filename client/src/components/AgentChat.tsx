@@ -1,6 +1,7 @@
 ﻿import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Virtuoso } from 'react-virtuoso';
 import { useAgentSSE } from '@/hooks/useAgentSSE';
 import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, XCircle, Brain, Copy, ClipboardCheck, ChevronDown } from 'lucide-react';
 import { TodoList } from './TodoList';
@@ -379,13 +380,10 @@ export const AgentChat: React.FC = () => {
     }, [activeProviderConfig]);
     const thinkingEnabled = activeProviderConfig?.enableThinking !== false;
 
-    const scrollRef = useRef<HTMLDivElement>(null);
-    const bottomAnchorRef = useRef<HTMLDivElement>(null);
-    const lastScrollHeightRef = useRef<number>(0);
-    const isAutoScrollingRef = useRef<boolean>(true); // 追踪用户是否手动向上滚动，若是则暂停自动贴底
-    const isProgrammaticScrollRef = useRef<boolean>(false);
-    const lastScrollTopRef = useRef<number>(0);
-    const scrollRafRef = useRef<number | null>(null);
+    // Virtuoso virtual scroll
+    const virtuosoRef = useRef<React.ComponentRef<typeof Virtuoso>>(null);
+    const isAtBottomRef = useRef<boolean>(true);
+    const lastMessageContentRef = useRef<string>('');
 
     const normalizeExternalHref = useCallback((href?: string) => {
         const raw = String(href || '').trim();
@@ -435,115 +433,34 @@ export const AgentChat: React.FC = () => {
         setIsThinkingExpanded(prev => !prev);
     }, []);
 
-    // 自动滚动到底部逻辑：当消息更新或 loading 状态变化时触发
-    const scrollToBottom = (force: boolean = false) => {
-        const container = scrollRef.current;
-        if (!container) return;
+    // Virtuoso auto-scroll strategy
+    // followOutput='auto' handles new item append;
+    // atBottomStateChange tracks user scroll-away.
 
-        const { scrollHeight, clientHeight, scrollTop } = container;
-        const distanceToBottom = scrollHeight - scrollTop - clientHeight;
-        const isNearBottom = distanceToBottom < 160;
-        const hasNewContent = scrollHeight > lastScrollHeightRef.current;
-
-        if (!force && !(isAutoScrollingRef.current && (isNearBottom || hasNewContent || isLoading))) {
-            lastScrollHeightRef.current = scrollHeight;
-            return;
-        }
-
-        isProgrammaticScrollRef.current = true;
-        // 仅使用 scrollTop 设置，避免 scrollIntoView 触发额外的强制回流
-        container.scrollTop = container.scrollHeight;
-        lastScrollHeightRef.current = container.scrollHeight;
-        // 延迟重置标记，防止 handleScroll 误判
-        requestAnimationFrame(() => {
-            isProgrammaticScrollRef.current = false;
-        });
-    };
-
-    // 记录上次滚动调度时间戳，流式期间每 ~50ms 最多滚动一次，避免布局颠簸
-    const lastScrollScheduleRef = useRef<number>(0);
-    const SCROLL_THROTTLE_MS = 50;
-
-    const scheduleScrollToBottom = (force: boolean = false) => {
-        const now = performance.now();
-        // 非强制模式下，流式传输期间限制滚动频率
-        if (!force && isLoading && now - lastScrollScheduleRef.current < SCROLL_THROTTLE_MS) {
-            return;
-        }
-        lastScrollScheduleRef.current = now;
-
-        if (scrollRafRef.current) {
-            cancelAnimationFrame(scrollRafRef.current);
-        }
-        scrollRafRef.current = requestAnimationFrame(() => {
-            scrollToBottom(force);
-            scrollRafRef.current = null;
-        });
-    };
-
-    // 监听用户滚动行为，判断是否需要暂停自动贴底
-    const handleScroll = () => {
-        if (!scrollRef.current) return;
-        if (isProgrammaticScrollRef.current) return;
-
-        const { scrollHeight, clientHeight, scrollTop } = scrollRef.current;
-        const distanceToBottom = scrollHeight - scrollTop - clientHeight;
-        const movingUp = scrollTop < lastScrollTopRef.current;
-        lastScrollTopRef.current = scrollTop;
-
-        if (movingUp && distanceToBottom > 220) {
-            // 仅在“明显向上离开底部”时才关闭自动贴底，避免高频更新时误触发。
-            isAutoScrollingRef.current = false;
-            return;
-        }
-
-        if (distanceToBottom < 120) {
-            isAutoScrollingRef.current = true;
-        }
-    };
-
-    // 监听实时消息流（messages 内部 content 的变化）
-    // 使用 useEffect 而非 useLayoutEffect：scheduleScrollToBottom 内部已用 rAF 异步调度，
-    // 无需同步阻塞布局计算，避免高频 streaming 时阻塞主线程绘制。
+    // Streaming: keep at bottom when last message content grows
     useEffect(() => {
-        if (isLoading || isAutoScrollingRef.current) {
-            scheduleScrollToBottom(false);
+        if (!isLoading || messages.length === 0) return;
+        const lastMsg = messages[messages.length - 1];
+        if (!lastMsg || lastMsg.role !== 'assistant') return;
+        const currentContent = lastMsg.content || '';
+        if (currentContent !== lastMessageContentRef.current) {
+            lastMessageContentRef.current = currentContent;
+            if (isAtBottomRef.current) {
+                virtuosoRef.current?.scrollToIndex({
+                    index: messages.length - 1,
+                    align: 'end',
+                    behavior: 'auto',
+                });
+            }
         }
-    }, [messages, data, todos, isLoading, isThinkingExpanded]);
+    }, [messages, isLoading]);
 
+    // Reset content tracking when streaming ends
     useEffect(() => {
-        if (!scrollRef.current) return;
-        
-        const observer = new ResizeObserver(() => {
-            scheduleScrollToBottom(false);
-        });
-        
-        const container = scrollRef.current;
-        observer.observe(container);
-
-        const chatContainer = container.closest('.flex.flex-col.h-full');
-        const pipeline = chatContainer?.querySelector('.mission-pipeline-container');
-        if (pipeline) observer.observe(pipeline);
-        
-        return () => observer.disconnect();
-    }, []);
-
-    // 监听关键状态变化
-    useEffect(() => {
-        // 当 Loading 结束时，强制执行一次不带平滑动画的滚动，确保 done 后的最终渲染可见
         if (!isLoading) {
-            const timer = window.setTimeout(() => scheduleScrollToBottom(true), 80);
-            return () => window.clearTimeout(timer);
+            lastMessageContentRef.current = '';
         }
     }, [isLoading]);
-
-    useEffect(() => {
-        return () => {
-            if (scrollRafRef.current) {
-                cancelAnimationFrame(scrollRafRef.current);
-            }
-        };
-    }, []);
 
     useEffect(() => {
         return () => {
@@ -769,6 +686,45 @@ export const AgentChat: React.FC = () => {
         };
     }, [messages.length, isLoading]);
 
+
+    // ── Virtuoso item renderer（useCallback 保持引用稳定） ──
+    const itemContent = useCallback((index: number, message: Message) => (
+        <div className="px-4 py-2">
+            <ChatMessageItem
+                message={message}
+                isLastItem={index === messages.length - 1}
+                isLoading={isLoading}
+                isThinkingExpanded={isThinkingExpanded}
+                onToggleThinking={toggleThinkingExpanded}
+                markdownComponentsWithCode={markdownComponentsWithCode}
+                markdownComponentsTextOnly={markdownComponentsTextOnly}
+            />
+        </div>
+    ), [messages.length, isLoading, isThinkingExpanded, toggleThinkingExpanded, markdownComponentsWithCode, markdownComponentsTextOnly]);
+
+    // ── Virtuoso Footer：流式期间显示阶段加载指示器 ──
+    const Footer = useCallback(() => {
+        if (!isLoading || !currentStage) return null;
+        return (
+            <div className={'flex items-center gap-3 px-4 py-3 bg-emerald-500/5 border border-emerald-500/10 rounded-lg mx-4 my-2 ' + (!isThinkingExpanded ? 'block' : 'hidden opacity-0')}>
+                <div className='relative flex items-center justify-center'>
+                    <Loader2 className='w-4 h-4 text-emerald-500 animate-spin' />
+                    <div className='absolute inset-0 bg-emerald-500/20 blur-sm rounded-full animate-pulse' />
+                </div>
+                <div className='flex flex-col gap-0.5'>
+                    <span className='text-[9px] font-black text-emerald-500/60 uppercase tracking-[0.2em]'>System Processor</span>
+                    <span className='text-[11px] font-medium text-emerald-400 capitalize tracking-tight'>
+                        {currentStage}
+                        <span className='inline-flex ml-1'>
+                            <span className='animate-[bounce_1.4s_infinite]'>.</span>
+                            <span className='animate-[bounce_1.4s_infinite_0.2s]'>.</span>
+                            <span className='animate-[bounce_1.4s_infinite_0.4s]'>.</span>
+                        </span>
+                    </span>
+                </div>
+            </div>
+        );
+    }, [isLoading, currentStage, isThinkingExpanded]);
     return (
         <div className='flex flex-col h-full bg-black text-white font-sans'>
              <div className='flex items-center justify-between px-4 pt-px pb-1 border-b border-white/5 bg-black/50 backdrop-blur-md sticky top-0 z-10'>
@@ -833,52 +789,25 @@ export const AgentChat: React.FC = () => {
                 </div>
             </div>
 
-            <div onScroll={handleScroll} ref={scrollRef} className='flex-1 overflow-y-auto p-4 space-y-4'>
-                {messages.length === 0 ? (
-                    <div className='h-full flex flex-col items-center justify-center opacity-20 py-20'>
-                        <Box className='w-8 h-8 mb-4 text-emerald-500/50' />
-                        <h2 className='text-sm font-light tracking-widest text-white uppercase'>多模型推理式编码助手</h2>
-                        <p className='text-[8px] text-white/60 mt-2 uppercase tracking-tighter'>当前节点: {(activeProviderConfig?.name || provider || 'N/A')} / {(model || activeProviderConfig?.modelId || 'N/A')}</p>
-                    </div>
-                ) : (
-                    <>
-                        {messages.map((m, idx) => (
-                            <ChatMessageItem
-                                key={m.id}
-                                message={m}
-                                isLastItem={idx === messages.length - 1}
-                                isLoading={isLoading}
-                                isThinkingExpanded={isThinkingExpanded}
-                                onToggleThinking={toggleThinkingExpanded}
-                                markdownComponentsWithCode={markdownComponentsWithCode}
-                                markdownComponentsTextOnly={markdownComponentsTextOnly}
-                            />
-                        ))}
-                        
-                        {/* 实时 Stage 进度展示 */}
-                        {isLoading && currentStage && (
-                            <div className={'flex items-center gap-3 px-2 py-3 bg-emerald-500/5 border border-emerald-500/10 rounded-lg animate-in fade-in slide-in-from-bottom-2 duration-300 ' + (!isThinkingExpanded ? 'block' : 'hidden opacity-0')}>
-                                <div className='relative flex items-center justify-center'>
-                                    <Loader2 className='w-4 h-4 text-emerald-500 animate-spin' />
-                                    <div className='absolute inset-0 bg-emerald-500/20 blur-sm rounded-full animate-pulse' />
-                                </div>
-                                <div className='flex flex-col gap-0.5'>
-                                    <span className='text-[9px] font-black text-emerald-500/60 uppercase tracking-[0.2em]'>System Processor</span>
-                                    <span className='text-[11px] font-medium text-emerald-400 capitalize tracking-tight'>
-                                        {currentStage}
-                                        <span className='inline-flex ml-1'>
-                                            <span className='animate-[bounce_1.4s_infinite]'>.</span>
-                                            <span className='animate-[bounce_1.4s_infinite_0.2s]'>.</span>
-                                            <span className='animate-[bounce_1.4s_infinite_0.4s]'>.</span>
-                                        </span>
-                                    </span>
-                                </div>
-                            </div>
-                        )}
-                    </>
-                )}
-                <div ref={bottomAnchorRef} className='h-px w-full' aria-hidden='true' />
-            </div>
+            
+            {/* 虚拟滚动消息列表：仅渲染可视区域内的消息，彻底解决长消息/多轮对话导致的 DOM 膨胀与卡顿 */}
+            {messages.length === 0 ? (
+                <div className='flex-1 flex flex-col items-center justify-center opacity-20 py-20'>
+                    <Box className='w-8 h-8 mb-4 text-emerald-500/50' />
+                    <h2 className='text-sm font-light tracking-widest text-white uppercase'>多模型推理式编码助手</h2>
+                    <p className='text-[8px] text-white/60 mt-2 uppercase tracking-tighter'>当前节点: {(activeProviderConfig?.name || provider || 'N/A')} / {(model || activeProviderConfig?.modelId || 'N/A')}</p>
+                </div>
+            ) : (
+                <Virtuoso
+                    ref={virtuosoRef}
+                    data={messages}
+                    followOutput={'auto'}
+                    atBottomStateChange={(atBottom: boolean) => { isAtBottomRef.current = atBottom; }}
+                    itemContent={itemContent}
+                    components={{ Footer }}
+                    className='flex-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent'
+                />
+            )}
 
             <form onSubmit={handleSubmit} className='px-1.5 pt-1.5 pb-px bg-black border-t border-white/5'>
                 {/* 2026.03: 实时 TODO 任务悬浮窗 (已解耦重构) */}

@@ -280,6 +280,7 @@ interface ElectronAPI {
 declare global {
     interface Window {
         electronAPI?: ElectronAPI;
+        __ELECTRON_USER_ID__?: string;
     }
 }
 

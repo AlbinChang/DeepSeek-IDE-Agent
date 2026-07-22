@@ -6,9 +6,13 @@
  * 无法直接访问 Node.js API 或文件系统。
  */
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
+import * as os from 'node:os';
 
 // ── 注入 Electron 环境标记（供 electron-bridge.ts 多重检测兜底） ──
 contextBridge.exposeInMainWorld('__IS_ELECTRON__', true);
+// 与 app:info 使用同一来源，确保渲染进程生成的 userId 与后台 Agent 身份一致。
+const electronUserId = process.env.USERNAME || os.userInfo().username || 'unknown';
+contextBridge.exposeInMainWorld('__ELECTRON_USER_ID__', electronUserId);
 
 // ── 类型定义 ──
 export interface ElectronAPI {
