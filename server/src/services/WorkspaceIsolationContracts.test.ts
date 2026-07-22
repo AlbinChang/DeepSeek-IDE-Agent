@@ -56,8 +56,9 @@ describe('workspace isolation contracts', () => {
             { workspaceRoot: rootA }
         );
 
-        expect(result.content).toContain('workspace A');
-        expect(result.content).not.toContain('workspace B');
+        const text = typeof result === 'string' ? result : (result as any).content;
+        expect(text).toContain('workspace A');
+        expect(text).not.toContain('workspace B');
     });
 
     it('routes chat stream system messages only to matching workspace listeners', async () => {

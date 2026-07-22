@@ -111,7 +111,7 @@ export class AgentService extends EventEmitter {
                     if (!root) throw new Error('Workspace not initialized');
                     const tools = new TodoTools(root);
                     switch (toolName) {
-                        case 'list_todos': return await tools.listTodos(context);
+                        case 'list_todos': return await tools.listTodos(params, context);
                         case 'append_todo': return await tools.appendTodo(params, context);
                         case 'update_todo': return await tools.updateTodo(params, context);
                         case 'delete_todo': return await tools.deleteTodo(params, context);
@@ -1019,6 +1019,7 @@ export class AgentService extends EventEmitter {
             '### TODO 工具使用策略 (TODO TOOLING POLICY)',
             '为提升前缀稳定性与 KV 缓存命中率，系统提示词不再按轮次注入完整 TODO 明细快照。',
             '`list_todos` / `append_todo` / `update_todo` / `delete_todo` 仅允许顶层 Agent（主 Agent/评估 Agent）直接调用，子代理不得直接操作全局任务清单。',
+            '⚠️ 职责区分：`list_todos` 为纯只读查询工具（无必填参数），绝不会保存任何传入参数！新建/规划任务必须调用 `append_todo`，更新状态调用 `update_todo`。',
             '当你需要确认最新任务状态、任务 ID，或怀疑历史裁剪导致状态不清晰时，必须优先调用 `list_todos` 获取当前真值（SSOT）。',
             '`list_todos` 无必填参数，直接调用 `{}` 即可获取完整清单。',
             '如果用户明确要求查看当前 TODO 状态，应直接调用 `list_todos` 并基于工具结果答复。',

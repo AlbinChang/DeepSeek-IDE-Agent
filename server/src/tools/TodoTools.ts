@@ -31,11 +31,27 @@ export class TodoTools {
 
     // ─── 原子操作实现 ───────────────────────────────────────
 
-    async listTodos(context: any) {
-        this.guardBackgroundService(context);
-        const userId = context?.userId || 'system';
+    async listTodos(params?: any, context?: any) {
+        // 兼容单参数 listTodos(context) 或双参数 listTodos(params, context)
+        let ctx = context;
+        let p = params;
+        if (params && !context && (params.userId !== undefined || params.isBackgroundService !== undefined)) {
+            ctx = params;
+            p = undefined;
+        }
+
+        this.guardBackgroundService(ctx);
+        const userId = ctx?.userId || 'system';
         const todos = await TodoService.getTodos(this.workspaceRoot, userId);
-        return { todos, total: todos.length };
+
+        const result: { todos: any[]; total: number; warning?: string } = { todos, total: todos.length };
+
+        // 防错引导：若模型误将 todos/todo 参数传给 list_todos，给予明确警告
+        if (p && (p.todos || p.todo || (Array.isArray(p) && p.length > 0))) {
+            result.warning = '⚠️ list_todos 是纯只读查询工具，不会保存你传入的 todos！如需新增/规划任务，请立即调用 append_todo 工具。';
+        }
+
+        return result;
     }
 
     async appendTodo(params: any, context: any) {
@@ -73,7 +89,7 @@ export class TodoTools {
         if (!ids.length) throw new Error('delete_todo 需要提供 ids（任务 ID 字符串或字符串数组）');
         const deletion = await TodoService.deleteTodo(this.workspaceRoot, userId, ids);
         const total = await this.totalCount(userId);
-        const deletedCount = Array.isArray(deletion) ? deletion.length : (deletion ? 1 : 0);
+        const deletedCount = typeof deletion?.deletedCount === 'number' ? deletion.deletedCount : (Array.isArray(deletion) ? deletion.length : (deletion ? 1 : 0));
         return { status: 'success', deleted: deletedCount, total };
     }
 
@@ -83,7 +99,7 @@ export class TodoTools {
         return [
             {
                 name: 'list_todos',
-                description: '读取当前任务清单（SSOT）。仅顶层 Agent 有权访问。当状态不清晰或历史被裁剪时优先调用此工具获取最新清单。',
+                description: '读取当前任务清单（SSOT）。仅顶层 Agent 有权访问。⚠️ 纯只读工具，无必填参数，不保存任何传入的 todos 参数！新建/追加任务请务必调用 append_todo。',
                 parameters: {
                     type: 'object',
                     properties: {},

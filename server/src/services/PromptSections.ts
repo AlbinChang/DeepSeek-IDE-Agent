@@ -526,6 +526,7 @@ export class TodoPolicySection extends BasePromptSection {
         return [
             '### TODO 工具使用策略 (TODO TOOLING POLICY)',
             '`list_todos`/`append_todo`/`update_todo`/`delete_todo` 仅允许顶层 Agent 调用。',
+            '⚠️ 职责区分：`list_todos` 为纯只读查询工具（无必填参数），绝不会保存任何传入参数！新建/规划任务必须调用 `append_todo`，更新状态调用 `update_todo`。',
             '状态不确定时优先 `list_todos` 获取当前真值（SSOT），`list_todos` 无必填参数。',
             '',
             '**【执行前置检查 — 防止历史遗留污染】**：',

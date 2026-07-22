@@ -202,4 +202,20 @@ describe('TodoTools atomic tool contract', () => {
             await fs.rm(workspaceRoot, { recursive: true, force: true });
         }
     });
+
+    it('returns warning when list_todos is called with accidental todos parameter', async () => {
+        const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'todo-tools-'));
+        try {
+            const tool = new TodoTools(workspaceRoot);
+            const result: any = await tool.listTodos({
+                todos: [{ title: 'Accidental todo' }]
+            }, { userId: 'test-user' });
+
+            expect(result.todos).toEqual([]);
+            expect(result.total).toBe(0);
+            expect(result.warning).toContain('list_todos 是纯只读查询工具');
+        } finally {
+            await fs.rm(workspaceRoot, { recursive: true, force: true });
+        }
+    });
 });
