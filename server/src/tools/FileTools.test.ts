@@ -89,3 +89,89 @@ describe('FileTools.readFile', () => {
         expect(tree).toContain('📄 SKILL.md');
     });
 });
+
+describe('FileTools.editFileByReplace & EOL Normalization', () => {
+    const tempDirs: string[] = [];
+
+    const createWorkspace = async () => {
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepseek-ide-agent-edit-file-'));
+        tempDirs.push(dir);
+        return dir;
+    };
+
+    afterEach(async () => {
+        await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+    });
+
+    it('matches CRLF file content when LLM provides LF oldText, preserving CRLF EOL style', async () => {
+        const workspaceRoot = await createWorkspace();
+        const filePath = path.join(workspaceRoot, 'crlf_sample.js');
+        // CRLF file content
+        const crlfContent = 'function hello() {\r\n    console.log("hello");\r\n    return true;\r\n}';
+        await fs.writeFile(filePath, crlfContent, 'utf8');
+
+        // LLM inputs oldText using LF \n
+        const lfOldText = 'function hello() {\n    console.log("hello");\n    return true;\n}';
+        const lfNewText = 'function helloWorld() {\n    console.log("hello world");\n    return false;\n}';
+
+        const result = await FileTools.editFileByReplace(
+            workspaceRoot,
+            'crlf_sample.js',
+            lfOldText,
+            lfNewText
+        );
+
+        expect(result.status).toBe('success');
+
+        const fileAfter = await fs.readFile(filePath, 'utf8');
+        // File content should be updated with new text formatted in CRLF
+        expect(fileAfter).toBe('function helloWorld() {\r\n    console.log("hello world");\r\n    return false;\r\n}');
+    });
+
+    it('matches LF file content when LLM provides CRLF oldText, preserving LF EOL style', async () => {
+        const workspaceRoot = await createWorkspace();
+        const filePath = path.join(workspaceRoot, 'lf_sample.js');
+        // LF file content
+        const lfContent = 'const a = 1;\nconst b = 2;\nconst c = 3;';
+        await fs.writeFile(filePath, lfContent, 'utf8');
+
+        // LLM inputs oldText using CRLF \r\n
+        const crlfOldText = 'const b = 2;\r\nconst c = 3;';
+        const crlfNewText = 'const b = 200;\r\nconst c = 300;';
+
+        const result = await FileTools.editFileByReplace(
+            workspaceRoot,
+            'lf_sample.js',
+            crlfOldText,
+            crlfNewText
+        );
+
+        expect(result.status).toBe('success');
+
+        const fileAfter = await fs.readFile(filePath, 'utf8');
+        expect(fileAfter).toBe('const a = 1;\nconst b = 200;\nconst c = 300;');
+    });
+
+    it('replaceAllInFile handles CRLF/LF normalization across all occurrences', async () => {
+        const workspaceRoot = await createWorkspace();
+        const filePath = path.join(workspaceRoot, 'global_sample.txt');
+        const crlfContent = 'item 1:\r\n  status: active\r\n\r\nitem 2:\r\n  status: active';
+        await fs.writeFile(filePath, crlfContent, 'utf8');
+
+        const lfOldText = 'status: active';
+        const lfNewText = 'status: disabled';
+
+        const result = await FileTools.replaceAllInFile(
+            workspaceRoot,
+            'global_sample.txt',
+            lfOldText,
+            lfNewText
+        );
+
+        expect(result.status).toBe('success');
+        expect(result.occurrences).toBe(2);
+
+        const fileAfter = await fs.readFile(filePath, 'utf8');
+        expect(fileAfter).toBe('item 1:\r\n  status: disabled\r\n\r\nitem 2:\r\n  status: disabled');
+    });
+});

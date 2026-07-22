@@ -719,17 +719,21 @@ export class FileTools {
                 };
             }
 
-            // 统计 oldText 出现次数，记录各次出现的位移
+            // 归一化文本匹配：屏蔽换行符（CRLF vs LF）差异，使 LLM 对底层换行符透明
+            const { normContent, normToRawMap } = FileIO.normalizeWithMapping(rawContent);
+            const normOldText = oldText.replace(/\r\n/g, '\n');
+
+            // 统计 normOldText 出现次数，记录各次出现的位移（基于 normContent）
             let searchFrom = 0;
-            const occurrences: number[] = [];
+            const normOccurrences: number[] = [];
             while (true) {
-                const idx = rawContent.indexOf(oldText, searchFrom);
+                const idx = normContent.indexOf(normOldText, searchFrom);
                 if (idx === -1) break;
-                occurrences.push(idx);
+                normOccurrences.push(idx);
                 searchFrom = idx + 1;
             }
 
-            if (occurrences.length === 0) {
+            if (normOccurrences.length === 0) {
                 return {
                     status: 'error',
                     path: unsafePath,
@@ -738,37 +742,54 @@ export class FileTools {
                 };
             }
 
-            // 【性能优化】预计算每行起始偏移量，O(L) 一次构建。二分查找 O(log L) 替代原 O(M×L) 逐偏移量遍历全行
-            const lineStarts: number[] = [0];
-            for (let i = 0; i < rawContent.length; i++) {
-                if (rawContent[i] === '\n') {
-                    lineStarts.push(i + 1);
+            // 【性能优化】预计算每行起始偏移量（在 normContent 上计算），O(L) 一次构建。二分查找 O(log L)
+            const normLineStarts: number[] = [0];
+            for (let i = 0; i < normContent.length; i++) {
+                if (normContent[i] === '\n') {
+                    normLineStarts.push(i + 1);
                 }
             }
-            const offsetToLine = (offset: number): number => {
-                let lo = 0, hi = lineStarts.length - 1;
+            const normOffsetToLine = (offset: number): number => {
+                let lo = 0, hi = normLineStarts.length - 1;
                 while (lo < hi) {
                     const mid = (lo + hi + 1) >>> 1;
-                    if (lineStarts[mid] <= offset) lo = mid;
+                    if (normLineStarts[mid] <= offset) lo = mid;
                     else hi = mid - 1;
                 }
                 return lo + 1; // 1-indexed
             };
 
-            if (occurrences.length > 1) {
-                const linePositions = occurrences.map(offsetToLine);
+            if (normOccurrences.length > 1) {
+                const linePositions = normOccurrences.map(normOffsetToLine);
                 return {
                     status: 'error',
                     path: unsafePath,
                     error: 'OLD_TEXT_AMBIGUOUS',
-                    occurrences: occurrences.length,
-                    message: `oldText 在文件中出现了 ${occurrences.length} 次（行 ${linePositions.join(', ')}），请提供更多上下文使 oldText 唯一。` +
+                    occurrences: normOccurrences.length,
+                    message: `oldText 在文件中出现了 ${normOccurrences.length} 次（行 ${linePositions.join(', ')}），请提供更多上下文使 oldText 唯一。` +
                         `建议：在 oldText 中包含目标位置前后各 1~2 行的原文以消除歧义。`
                 };
             }
 
-            // 执行替换
-            const newContent = rawContent.slice(0, occurrences[0]) + newText + rawContent.slice(occurrences[0] + oldText.length);
+            // 精准映射回 rawContent 的物理字符区间
+            const normStart = normOccurrences[0];
+            const normEnd = normStart + normOldText.length;
+            const { rawStart, rawEnd } = FileIO.getRawRange(rawContent, normToRawMap, normStart, normEnd);
+
+            // 智能适配 EOL 换行风格：优先匹配原目标片段/原文件的换行符类型
+            const crlfCount = (rawContent.match(/\r\n/g) || []).length;
+            const lfOnlyCount = (rawContent.match(/(?<!\r)\n/g) || []).length;
+            const fileIsCRLF = crlfCount > 0 && crlfCount >= lfOnlyCount;
+
+            const matchedRaw = rawContent.slice(rawStart, rawEnd);
+            const targetIsCRLF = matchedRaw.includes('\r\n') || (matchedRaw.indexOf('\n') === -1 && fileIsCRLF);
+
+            const formattedNewText = targetIsCRLF
+                ? newText.replace(/\r?\n/g, '\r\n')
+                : newText.replace(/\r\n/g, '\n');
+
+            // 执行替换（在物理原文上拼接）
+            const newContent = rawContent.slice(0, rawStart) + formattedNewText + rawContent.slice(rawEnd);
 
             // 编码并写入（复用底层原子化写出）
             const finalBuffer = FileIO.encodeString(newContent, encoding);
@@ -776,7 +797,7 @@ export class FileTools {
 
             // 构建操作后上下文快照（±2 行，供 LLM 快速验证修改效果）
             const newLines = newContent.split(/\r?\n|\r|\u2028|\u2029/);
-            const replacementLine = offsetToLine(occurrences[0]);
+            const replacementLine = normOffsetToLine(normOccurrences[0]);
             const lineNumWidth = String(newLines.length).length;
             const snapshotStart = Math.max(0, replacementLine - 2);
             const snapshotEnd = Math.min(newLines.length, replacementLine + newText.split('\n').length + 2);
@@ -898,17 +919,21 @@ export class FileTools {
                 };
             }
 
-            // 统计 oldText 出现次数
+            // 归一化文本匹配：屏蔽换行符（CRLF vs LF）差异
+            const { normContent, normToRawMap } = FileIO.normalizeWithMapping(rawContent);
+            const normOldText = oldText.replace(/\r\n/g, '\n');
+
+            // 统计 normOldText 出现位置
             let searchFrom = 0;
-            const occurrences: number[] = [];
+            const normOccurrences: number[] = [];
             while (true) {
-                const idx = rawContent.indexOf(oldText, searchFrom);
+                const idx = normContent.indexOf(normOldText, searchFrom);
                 if (idx === -1) break;
-                occurrences.push(idx);
+                normOccurrences.push(idx);
                 searchFrom = idx + 1;
             }
 
-            if (occurrences.length === 0) {
+            if (normOccurrences.length === 0) {
                 return {
                     status: 'error',
                     path: fullPath,
@@ -917,23 +942,36 @@ export class FileTools {
                 };
             }
 
-            // 执行全局替换（从后往前替换，避免位移影响）
-            let newContent = rawContent;
-            // 记录替换位置的行号信息（在替换前计算）
-            const lines = rawContent.split('\n');
-            const replacementLineNumbers: number[] = occurrences.map(offset => {
+            // 计算包含行号信息（基于 normContent 计算极其精确）
+            const normLines = normContent.split('\n');
+            const replacementLineNumbers: number[] = normOccurrences.map(offset => {
                 let charCount = 0;
-                for (let i = 0; i < lines.length; i++) {
-                    charCount += lines[i].length + 1; // +1 for \n
+                for (let i = 0; i < normLines.length; i++) {
+                    charCount += normLines[i].length + 1; // +1 for \n
                     if (charCount > offset) return i + 1;
                 }
-                return lines.length;
+                return normLines.length;
             });
 
-            // 从后往前替换，保证前面的位移不受影响
-            for (let i = occurrences.length - 1; i >= 0; i--) {
-                const idx = occurrences[i];
-                newContent = newContent.slice(0, idx) + newText + newContent.slice(idx + oldText.length);
+            const crlfCount = (rawContent.match(/\r\n/g) || []).length;
+            const lfOnlyCount = (rawContent.match(/(?<!\r)\n/g) || []).length;
+            const fileIsCRLF = crlfCount > 0 && crlfCount >= lfOnlyCount;
+
+            // 执行全局替换（从后往前替换，保证前面物理偏移不影响）
+            let newContent = rawContent;
+            for (let i = normOccurrences.length - 1; i >= 0; i--) {
+                const normStart = normOccurrences[i];
+                const normEnd = normStart + normOldText.length;
+                const { rawStart, rawEnd } = FileIO.getRawRange(rawContent, normToRawMap, normStart, normEnd);
+
+                const matchedRaw = rawContent.slice(rawStart, rawEnd);
+                const targetIsCRLF = matchedRaw.includes('\r\n') || (matchedRaw.indexOf('\n') === -1 && fileIsCRLF);
+
+                const formattedNewText = targetIsCRLF
+                    ? newText.replace(/\r?\n/g, '\r\n')
+                    : newText.replace(/\r\n/g, '\n');
+
+                newContent = newContent.slice(0, rawStart) + formattedNewText + newContent.slice(rawEnd);
             }
 
             // 编码并写入（复用底层原子化写出）
@@ -961,7 +999,7 @@ export class FileTools {
 
             return {
                 status: 'success',
-                occurrences: occurrences.length,
+                occurrences: normOccurrences.length,
                 replacedLines: truncatedLines,
                 ...(linesNote ? { replacedLinesNote: linesNote } : {}),
                 newTotalLines: newLines.length,

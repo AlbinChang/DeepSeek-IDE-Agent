@@ -423,4 +423,57 @@ export class FileIO {
     public static encodingExists(encoding: string): boolean {
         return iconv.encodingExists(encoding);
     }
+
+    /**
+     * 规范化文本内容（将 CRLF \r\n 归一化为 LF \n），并建立规范化索引到原始文本索引的映射数组 normToRawMap。
+     * 保证在屏蔽换行符差异（如 \r\n vs \n）的前提下，能够将归一化后的匹配区间 [normStart, normEnd] 还原回原始文本区间 [rawStart, rawEnd]。
+     */
+    public static normalizeWithMapping(rawContent: string): { normContent: string; normToRawMap: number[] } {
+        const normChars: string[] = [];
+        const normToRawMap: number[] = [];
+        let i = 0;
+        while (i < rawContent.length) {
+            if (rawContent[i] === '\r' && i + 1 < rawContent.length && rawContent[i + 1] === '\n') {
+                normChars.push('\n');
+                normToRawMap.push(i);
+                i += 2;
+            } else {
+                normChars.push(rawContent[i]);
+                normToRawMap.push(i);
+                i += 1;
+            }
+        }
+        normToRawMap.push(rawContent.length);
+        return {
+            normContent: normChars.join(''),
+            normToRawMap
+        };
+    }
+
+    /**
+     * 根据 normToRawMap 将规范化文本中的字符区间 [normStart, normEnd] 映射回原始文本中的字符区间 [rawStart, rawEnd]。
+     */
+    public static getRawRange(
+        rawContent: string,
+        normToRawMap: number[],
+        normStart: number,
+        normEnd: number
+    ): { rawStart: number; rawEnd: number } {
+        if (normStart === normEnd) {
+            const rawStart = normToRawMap[normStart] ?? rawContent.length;
+            return { rawStart, rawEnd: rawStart };
+        }
+        const rawStart = normToRawMap[normStart];
+        const rawLastCharIdx = normToRawMap[normEnd - 1];
+        let charLen = 1;
+        if (
+            rawContent[rawLastCharIdx] === '\r' &&
+            rawLastCharIdx + 1 < rawContent.length &&
+            rawContent[rawLastCharIdx + 1] === '\n'
+        ) {
+            charLen = 2;
+        }
+        const rawEnd = rawLastCharIdx + charLen;
+        return { rawStart, rawEnd };
+    }
 }
