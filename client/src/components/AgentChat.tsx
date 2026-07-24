@@ -216,7 +216,7 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
 
 export const AgentChat: React.FC = () => {
     const { messages, input, setInput, handleInputChange, handleSubmit, isLoading, stop, data, streamProgress, clearHistory } = useAgentSSE();
-    const { todos } = useTodoContext();
+    useTodoContext();
     const { workspaceRoot, provider, model, settings, setProvider } = useAgentContext();
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isThinkingExpanded, setIsThinkingExpanded] = useState(true);

@@ -716,7 +716,9 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
                   node.isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />
                 )}
                 {isArchiveFile(node.name) && !node.jarBase ? (
-                  <Box size={11} className={`${node.isOpen ? 'text-amber-400' : 'text-amber-400/60 group-hover:text-amber-400'} shrink-0`} title="归档文件 (JAR/WAR/EAR/ZIP)" />
+                  <span title="归档文件 (JAR/WAR/EAR/ZIP)">
+                    <Box size={11} className={`${node.isOpen ? 'text-amber-400' : 'text-amber-400/60 group-hover:text-amber-400'} shrink-0`} />
+                  </span>
                 ) : (
                   <Folder size={11} className={`${node.isOpen ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`} />
                 )}

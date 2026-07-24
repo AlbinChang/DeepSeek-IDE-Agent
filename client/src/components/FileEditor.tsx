@@ -1,4 +1,4 @@
-﻿import React, { useRef, useEffect, useState, useMemo, useCallback, lazy, Suspense } from 'react';
+﻿import React, { useRef, useEffect, useState, useMemo, lazy, Suspense } from 'react';
 import { Editor, DiffEditor, loader } from '@monaco-editor/react';
 import type { OnMount } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
@@ -7,7 +7,7 @@ import * as monaco from 'monaco-editor';
 loader.config({ monaco });
 (window as any).monaco = monaco;
 
-import { Lock, FileCode, Eye, Code, X } from 'lucide-react';
+import { Lock, FileCode, Eye, Code, ChevronRight } from 'lucide-react';
 import { useInlineCompletions } from '@/hooks/useInlineCompletions';
 import { GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
@@ -35,7 +35,7 @@ interface FileEditorProps {
  * 对应技术规范 3.1 & 26.0 节：前端文件编辑器组件
  * 封装 Monaco Editor，包含补全、Shadow Editor 与物理写入感知
  */
-export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mode = 'editor', onClose }) => {
+export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mode = 'editor' }) => {
   const { workspaceRoot } = useAgentContext();
   const LOCKED_PROVIDER = 'deepseek';
   const LOCKED_MODEL = 'deepseek-reasoner';
@@ -56,6 +56,10 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const modelBindRafRef = useRef<number | null>(null);
 
   const fileName = useMemo(() => activeFile.split(/[/\\]/).pop() || activeFile, [activeFile]);
+  const pathSegments = useMemo(() => {
+    if (!activeFile) return [];
+    return activeFile.replace(/\\/g, '/').split('/').filter(Boolean);
+  }, [activeFile]);
   const isMarkdown = useMemo(() => activeFile.toLowerCase().endsWith('.md'), [activeFile]);
   const isPdf = useMemo(() => activeFile.toLowerCase().endsWith('.pdf'), [activeFile]);
   const isCsv = useMemo(() => {
@@ -171,18 +175,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       }
     }
   };
-
-  const handleCloseFile = useCallback(() => {
-    if (!onClose || isSaving) return;
-
-    if (isDirty && !window.confirm('当前文件有未保存修改，关闭后这些修改将丢失。确定关闭吗？')) {
-      return;
-    }
-
-    detachEditorModels();
-    disposeAllEditorModels();
-    onClose();
-  }, [isDirty, isSaving, onClose]);
 
   useEffect(() => {
     saveFileRef.current = handleSaveFile;
@@ -920,68 +912,70 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
   return (
     <div ref={editorContainerRef} className="flex-1 flex flex-col min-w-0 relative" data-testid="file-editor-container">
-      {/* 编辑器页签栏 (对齐 TECH_SPEC 26.0) */}
-      <div className="h-8 bg-[#050505] flex items-center px-3 border-b border-white/15 justify-between" data-testid="editor-tab-bar">
-          <div className="flex min-w-0 items-center gap-1.5 text-[10.5px] font-bold text-white/50" data-testid="editor-filename">
-            <FileCode size={12} className="shrink-0 text-white/80" />
-            <span className="truncate max-w-[260px]" title={activeFile}>{fileName}</span>
+      {/* 编辑器面包屑与操作栏 (Breadcrumb & Action Bar) */}
+      <div className="h-6.5 bg-[#050505] flex items-center px-3 border-b border-white/10 justify-between shrink-0 select-none" data-testid="editor-action-bar">
+          <div className="flex min-w-0 items-center gap-1 text-[9.5px] text-white/40 overflow-hidden" data-testid="editor-breadcrumb">
+            <FileCode size={11} className="shrink-0 text-white/60 mr-0.5" />
+            {pathSegments.map((seg, idx) => {
+              const isLast = idx === pathSegments.length - 1;
+              return (
+                <React.Fragment key={idx}>
+                  {idx > 0 && <ChevronRight size={9} className="shrink-0 text-white/20" />}
+                  <span
+                    className={`truncate ${
+                      isLast ? 'text-white/80 font-medium' : 'text-white/35 hover:text-white/50'
+                    }`}
+                    title={activeFile}
+                  >
+                    {seg}
+                  </span>
+                </React.Fragment>
+              );
+            })}
             {isDirty && (
               <span
                 data-testid="editor-unsaved-indicator"
-                className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
+                className="ml-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
                 title="当前文件有未保存修改"
               />
             )}
             {isEffectivelyReadOnly && (
               <span title={isJarEntry ? '归档文件内部条目（只读）' : '文件已被 Agent 锁定'}>
-                <Lock size={10} className={`ml-1 shrink-0 ${isLocked ? 'animate-pulse' : ''} text-white`} />
+                <Lock size={9} className={`ml-1 shrink-0 ${isLocked ? 'animate-pulse' : ''} text-white/70`} />
               </span>
             )}
-            {onClose && (
-              <button
-                type="button"
-                onClick={handleCloseFile}
-                disabled={isSaving}
-                aria-label={`关闭文件 ${fileName}`}
-                title={isSaving ? '正在保存，暂不能关闭' : isDirty ? '关闭文件（有未保存修改）' : '关闭文件'}
-                data-testid="editor-close-file-btn"
-                className="ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-transparent text-white/35 transition-colors hover:border-white/10 hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
-              >
-                <X size={10} strokeWidth={2.4} />
-              </button>
-            )}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 shrink-0 ml-2">
               {isMarkdown && (
                 <button 
                   onClick={() => setViewMode(viewMode === 'preview' ? 'editor' : 'preview')}
-                  className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[8px] font-black tracking-widest transition-all ${
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all ${
                     viewMode === 'preview' 
                       ? 'bg-white/20 text-white border border-white/20' 
                       : 'text-white/40 hover:text-white hover:bg-white/5 border border-transparent'
                   }`}
                 >
-                  {viewMode === 'preview' ? <Code size={10} /> : <Eye size={10} />}
+                  {viewMode === 'preview' ? <Code size={9} /> : <Eye size={9} />}
                   {viewMode === 'preview' ? 'EDIT' : 'PREVIEW'}
                 </button>
               )}
               {isCsv && (
                 <button 
                   onClick={() => setViewMode(viewMode === 'table' ? 'editor' : 'table')}
-                  className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[8px] font-black tracking-widest transition-all ${
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all ${
                     viewMode === 'table' 
                       ? 'bg-white/20 text-white border border-white/20' 
                       : 'text-white/40 hover:text-white hover:bg-white/5 border border-transparent'
                   }`}
                 >
-                  {viewMode === 'table' ? <Code size={10} /> : <Eye size={10} />}
+                  {viewMode === 'table' ? <Code size={9} /> : <Eye size={9} />}
                   {viewMode === 'table' ? 'EDIT' : 'TABLE'}
                 </button>
               )}
-              <div className="h-4 w-[1px] bg-white/10 mx-0.5" />
+              <div className="h-3 w-[1px] bg-white/10 mx-0.5" />
               <div 
                   data-testid="language-status-badge" 
-                  className="flex items-center gap-1 px-1.5 py-0 rounded text-[8px] font-black tracking-widest bg-white/10 text-white"
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-mono font-bold tracking-wider bg-white/10 text-white/80"
               >
                   {languageId.toUpperCase()}
               </div>
