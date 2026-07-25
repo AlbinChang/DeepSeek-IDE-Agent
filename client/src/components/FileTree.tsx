@@ -733,7 +733,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             </span>
           </div>
         </div>
-        {node.isDirectory && node.isOpen && node.children && (
+        {(node.isDirectory || isArchiveFile(node.name)) && node.isOpen && node.children && (
           <div>
             {node.children.map(child => renderNode(child, depth + 1))}
           </div>
