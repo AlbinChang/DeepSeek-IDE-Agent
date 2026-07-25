@@ -380,10 +380,15 @@ export const AgentChat: React.FC = () => {
     }, [activeProviderConfig]);
     const thinkingEnabled = activeProviderConfig?.enableThinking !== false;
 
-    // Virtuoso virtual scroll
+    // ── Virtuoso 虚拟滚动：「写前快照」模式 ──
+    // userScrolledUpRef 仅由用户**主动**滚离底部时置 true，由用户滚回底部或
+    // 程序化 scrollToIndex 完成后置 false。不再依赖 Virtuoso 的 atBottomStateChange
+    // 异步回调，根除其内部布局重算期间 flag 污染（与 Terminal 自动滚动 bug 同源）。
     const virtuosoRef = useRef<React.ComponentRef<typeof Virtuoso>>(null);
-    const isAtBottomRef = useRef<boolean>(true);
-    const lastMessageContentRef = useRef<string>('');
+    const userScrolledUpRef = useRef<boolean>(false);
+    const scrollerElementRef = useRef<HTMLDivElement | null>(null);
+    const programmaticScrollRef = useRef<boolean>(false);
+    const lastMessagesSnapshotRef = useRef<Message[]>(messages);
 
     const normalizeExternalHref = useCallback((href?: string) => {
         const raw = String(href || '').trim();
@@ -433,32 +438,50 @@ export const AgentChat: React.FC = () => {
         setIsThinkingExpanded(prev => !prev);
     }, []);
 
-    // Virtuoso auto-scroll strategy
-    // followOutput='auto' handles new item append;
-    // atBottomStateChange tracks user scroll-away.
-
-    // Streaming: keep at bottom when last message content grows
+    // ── Virtuoso 自动滚动：写前快照 + 双 rAF ──
+    // followOutput='auto' 仅处理新消息追加（messages.length 变化）；
+    // 同一条消息内容增长（text/reasoning/annotation/error）由本 effect 负责。
+    // 用 messages 数组引用变化（而非 content 字符串比较）检测**任何**内容增长，
+    // 覆盖 text delta、reasoning delta、tool annotation、error 等所有路径。
+    // scrollToIndex 包裹双 requestAnimationFrame：确保浏览器 Layout→Paint
+    // 完成后再滚动，消除「差一点到底」的布局竞态。
     useEffect(() => {
         if (!isLoading || messages.length === 0) return;
         const lastMsg = messages[messages.length - 1];
         if (!lastMsg || lastMsg.role !== 'assistant') return;
-        const currentContent = lastMsg.content || '';
-        if (currentContent !== lastMessageContentRef.current) {
-            lastMessageContentRef.current = currentContent;
-            if (isAtBottomRef.current) {
+
+        // 用 messages 数组引用变化检测任何内容增长（而非仅 content 字段）
+        const prev = lastMessagesSnapshotRef.current;
+        if (prev === messages) return;
+        lastMessagesSnapshotRef.current = messages;
+
+        if (userScrolledUpRef.current) return; // 用户主动滚离 → 不跟随
+
+        let cancelled = false;
+        // 第一帧：等浏览器完成当前帧的 Style/Layout
+        requestAnimationFrame(() => {
+            if (cancelled) return;
+            // 第二帧：确保 Paint 也完成，Virtuoso 内部尺寸测量为最新值
+            requestAnimationFrame(() => {
+                if (cancelled) return;
+                programmaticScrollRef.current = true;
+                userScrolledUpRef.current = false;
                 virtuosoRef.current?.scrollToIndex({
                     index: messages.length - 1,
                     align: 'end',
                     behavior: 'auto',
                 });
-            }
-        }
+            });
+        });
+
+        return () => { cancelled = true; };
     }, [messages, isLoading]);
 
-    // Reset content tracking when streaming ends
+    // 流式结束：重置快照与用户滚离标记，为下一轮对话准备
     useEffect(() => {
         if (!isLoading) {
-            lastMessageContentRef.current = '';
+            lastMessagesSnapshotRef.current = messages;
+            userScrolledUpRef.current = false;
         }
     }, [isLoading]);
 
@@ -702,6 +725,50 @@ export const AgentChat: React.FC = () => {
         </div>
     ), [messages.length, isLoading, isThinkingExpanded, toggleThinkingExpanded, markdownComponentsWithCode, markdownComponentsTextOnly]);
 
+    // ── Virtuoso 自定义 Scroller：原生 scroll 监听（「写前快照」核心） ──
+    // 接管 Virtuoso 的滚动容器，附加原生 scroll 事件监听器。
+    // 仅用户主动滚离底部时置 userScrolledUpRef = true；程序化 scrollToIndex
+    // 触发的 scroll 事件通过 programmaticScrollRef 识别并忽略。
+    // 使用 useMemo([]) 确保组件身份永不变，避免 Virtuoso 重挂载滚动容器。
+    const Scroller = useMemo(() =>
+        React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+            (props, forwardedRef) => {
+                const forwardedRefHolder = useRef(forwardedRef);
+                forwardedRefHolder.current = forwardedRef;
+
+                const mergedRef = useCallback((el: HTMLDivElement | null) => {
+                    scrollerElementRef.current = el;
+                    const ref = forwardedRefHolder.current;
+                    if (typeof ref === 'function') {
+                        ref(el);
+                    } else if (ref) {
+                        (ref as React.MutableRefObject<HTMLDivElement | null>).current = el;
+                    }
+                }, []);
+
+                useEffect(() => {
+                    const el = scrollerElementRef.current;
+                    if (!el) return;
+                    const onScroll = () => {
+                        // 忽略程序化 scrollToIndex 触发的 scroll 事件
+                        if (programmaticScrollRef.current) {
+                            programmaticScrollRef.current = false;
+                            return;
+                        }
+                        // 用户发起的滚动：检测是否离开底部（5% 容差，抗布局抖动）
+                        const threshold = Math.max(5, el.clientHeight * 0.05);
+                        const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
+                        userScrolledUpRef.current = !atBottom;
+                    };
+                    el.addEventListener('scroll', onScroll, { passive: true });
+                    return () => el.removeEventListener('scroll', onScroll);
+                }, []);
+
+                return <div {...props} ref={mergedRef} />;
+            }
+        ),
+    []);
+
     // ── Virtuoso Footer：流式期间显示阶段加载指示器 ──
     const Footer = useCallback(() => {
         if (!isLoading || !currentStage) return null;
@@ -802,9 +869,8 @@ export const AgentChat: React.FC = () => {
                     ref={virtuosoRef}
                     data={messages}
                     followOutput={'auto'}
-                    atBottomStateChange={(atBottom: boolean) => { isAtBottomRef.current = atBottom; }}
                     itemContent={itemContent}
-                    components={{ Footer }}
+                    components={{ Scroller, Footer }}
                     className='flex-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent'
                 />
             )}
