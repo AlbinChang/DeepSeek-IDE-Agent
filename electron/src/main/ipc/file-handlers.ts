@@ -462,14 +462,16 @@ export function registerFileIpc(ipcMain: IpcMain) {
     }) => {
         try {
             const resolvedPath = resolveSafePath(params.filePath, params.root);
-            if (!fs.existsSync(resolvedPath)) {
+            try {
+                await fs.promises.access(resolvedPath);
+            } catch {
                 return { success: false, error: 'File not found' };
             }
-            const stat = fs.statSync(resolvedPath);
+            const stat = await fs.promises.stat(resolvedPath);
             if (stat.isDirectory()) {
-                fs.rmSync(resolvedPath, { recursive: true, force: true });
+                await fs.promises.rm(resolvedPath, { recursive: true, force: true });
             } else {
-                fs.unlinkSync(resolvedPath);
+                await fs.promises.unlink(resolvedPath);
             }
             return { success: true };
         } catch (err: any) {
@@ -486,15 +488,15 @@ export function registerFileIpc(ipcMain: IpcMain) {
         try {
             const resolvedOld = resolveSafePath(params.oldPath, params.root);
             const resolvedNew = resolveSafePath(params.newPath, params.root);
-            if (!fs.existsSync(resolvedOld)) {
+            try {
+                await fs.promises.access(resolvedOld);
+            } catch {
                 return { success: false, error: 'Source file not found' };
             }
             // 确保目标目录存在
             const newDir = path.dirname(resolvedNew);
-            if (!fs.existsSync(newDir)) {
-                fs.mkdirSync(newDir, { recursive: true });
-            }
-            fs.renameSync(resolvedOld, resolvedNew);
+            await fs.promises.mkdir(newDir, { recursive: true });
+            await fs.promises.rename(resolvedOld, resolvedNew);
             return { success: true, newPath: resolvedNew };
         } catch (err: any) {
             return { success: false, error: err?.message || String(err) };
