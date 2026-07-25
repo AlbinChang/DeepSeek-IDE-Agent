@@ -188,7 +188,7 @@
   <!-- Tool groups -->
   <rect x="78" y="658" width="195" height="32" rx="6" fill="#8b5cf6" fill-opacity="0.06" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.2"/>
   <text x="175" y="672" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">📁 FileTools</text>
-  <text x="175" y="686" text-anchor="middle" fill="#c4b5fd" font-size="8">读写 · 搜索 · file_edit 精修</text>
+  <text x="175" y="686" text-anchor="middle" fill="#c4b5fd" font-size="8">读写 · 搜索 · file_replace/file_insert 精修</text>
 
   <rect x="285" y="658" width="180" height="32" rx="6" fill="#8b5cf6" fill-opacity="0.06" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.2"/>
   <text x="375" y="672" text-anchor="middle" fill="#ddd6fe" font-size="10" font-weight="600">✅ SyntaxCheck</text>

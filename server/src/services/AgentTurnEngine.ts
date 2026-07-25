@@ -123,7 +123,7 @@ function sanitizeWriteToolArgsForClient(toolName: string, args: any, meta: Clien
         }, meta);
     }
 
-    if (toolName === "file_edit") {
+    if (toolName === "file_replace") {
         const oldTextChars = typeof args.oldText === "string" ? args.oldText.length : 0;
         const newTextChars = typeof args.newText === "string" ? args.newText.length : 0;
         const totalContentChars = oldTextChars + newTextChars;
@@ -137,7 +137,20 @@ function sanitizeWriteToolArgsForClient(toolName: string, args: any, meta: Clien
             ...args,
             oldText: oldTextChars > 0 ? hiddenTextSummary(oldTextChars, "old_text") : args.oldText,
             newText: newTextChars > 0 ? hiddenTextSummary(newTextChars, "new_text") : args.newText,
-            action: args.action,
+        }, meta);
+    }
+
+    if (toolName === "file_insert") {
+        const newTextChars = typeof args.newText === "string" ? args.newText.length : 0;
+        if (newTextChars > 0) {
+            meta.redacted = true;
+            meta.redactedStringChars += newTextChars;
+            meta.totalContentChars = newTextChars;
+        }
+
+        return sanitizeValueForClient({
+            ...args,
+            newText: newTextChars > 0 ? hiddenTextSummary(newTextChars, "new_text") : args.newText,
         }, meta);
     }
 

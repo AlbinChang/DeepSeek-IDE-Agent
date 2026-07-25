@@ -19,18 +19,30 @@ const createManager = () => {
         execute: async () => ({ status: 'success' })
     });
     manager.registerTool({
-        name: 'file_edit',
-        description: 'test file editor',
+        name: 'file_replace',
+        description: 'test file replacer',
         parameters: {
             type: 'object',
             properties: {
                 path: { type: 'string' },
-                action: { type: 'string', enum: ['replace', 'insert'] },
                 oldText: { type: 'string' },
-                newText: { type: 'string' },
-                startLine: { type: 'integer', minimum: 1 }
+                newText: { type: 'string' }
             },
-            required: ['path', 'action', 'newText']
+            required: ['path', 'oldText', 'newText']
+        },
+        execute: async () => ({ status: 'success' })
+    });
+    manager.registerTool({
+        name: 'file_insert',
+        description: 'test file inserter',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string' },
+                startLine: { type: 'integer', minimum: 1 },
+                newText: { type: 'string' }
+            },
+            required: ['path', 'startLine', 'newText']
         },
         execute: async () => ({ status: 'success' })
     });
@@ -57,19 +69,18 @@ describe('ToolManager argument validation', () => {
         }, 'trace')).rejects.toThrow('content 缺少必填字段');
     });
 
-    it('rejects file_edit when action is missing', async () => {
-        await expect(createManager().executeTool('user', 'file_edit', {
+    it('rejects file_replace when oldText is missing', async () => {
+        await expect(createManager().executeTool('user', 'file_replace', {
             path: 'report.md',
             newText: 'hello'
-        }, 'trace')).rejects.toThrow('action 缺少必填字段');
+        }, 'trace')).rejects.toThrow('oldText 缺少必填字段');
     });
 
-    it('rejects file_edit when action is invalid', async () => {
-        await expect(createManager().executeTool('user', 'file_edit', {
+    it('rejects file_insert when startLine is missing', async () => {
+        await expect(createManager().executeTool('user', 'file_insert', {
             path: 'report.md',
-            action: 'delete',
-            newText: ''
-        }, 'trace')).rejects.toThrow('action');
+            newText: 'hello'
+        }, 'trace')).rejects.toThrow('startLine 缺少必填字段');
     });
 
     it('rejects browser_mcp_call when toolName is missing', async () => {

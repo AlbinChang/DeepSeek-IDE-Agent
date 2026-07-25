@@ -25,12 +25,14 @@ describe('tool description deduplication contracts', () => {
     it('keeps write tool descriptions focused instead of repeating field contracts', async () => {
         const source = await readSource('services/AgentService.ts');
         const fileWrite = extractToolDescription(source, 'file_write');
-        const fileEdit = extractToolDescription(source, 'file_edit');
+        const fileReplace = extractToolDescription(source, 'file_replace');
+        const fileInsert = extractToolDescription(source, 'file_insert');
 
         expect(fileWrite.length).toBeLessThanOrEqual(1200);
-        expect(fileEdit.length).toBeLessThanOrEqual(3000);
+        expect(fileReplace.length).toBeLessThanOrEqual(2000);
+        expect(fileInsert.length).toBeLessThanOrEqual(1500);
         expect(countOccurrences(fileWrite, 'startLine')).toBeLessThanOrEqual(1);
-        expect(countOccurrences(fileEdit, 'oldText')).toBeLessThanOrEqual(8);
+        expect(countOccurrences(fileReplace, 'oldText')).toBeLessThanOrEqual(6);
     });
 
     it('keeps todo descriptions concise', async () => {

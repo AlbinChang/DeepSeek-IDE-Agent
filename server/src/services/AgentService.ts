@@ -236,7 +236,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_write...');
         this.toolManager.registerTool({
             name: 'file_write',
-            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_edit。返回 status，语法错误时附加 syntax 字段。',
+            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_replace 或 file_insert。返回 status，语法错误时附加 syntax 字段。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -320,7 +320,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering delete_path...');
         this.toolManager.registerTool({
             name: 'delete_path',
-            description: '⚠️ path 为必填参数，不可省略！删除文件或目录。\n\n【⛔ 严禁误用】禁止将 delete_path + file_write 组合作为"修复文件内容错误"的手段。\n修改文件内容（无论是修一行还是重写某段）请使用 file_edit。\ndelete_path 仅用于真正需要物理删除文件/目录的场景（如清理生成产物、移除不再需要的文件）。',
+            description: '⚠️ path 为必填参数，不可省略！删除文件或目录。\n\n【⛔ 严禁误用】禁止将 delete_path + file_write 组合作为"修复文件内容错误"的手段。\n修改文件内容（无论是修一行还是重写某段）请使用 file_replace 或 file_insert。\ndelete_path 仅用于真正需要物理删除文件/目录的场景（如清理生成产物、移除不再需要的文件）。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -336,20 +336,19 @@ export class AgentService extends EventEmitter {
             }
         });
 
-        console.log('[AgentService] Registering file_edit...');
+        // ── file_replace：精准文本替换 ──
+        console.log('[AgentService] Registering file_replace...');
         this.toolManager.registerTool({
-            name: 'file_edit',
-            description: '文件行级精修工具（行业最佳实践）。支持两种精准操作：\n- **replace**：基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险\n- **insert**：在指定行号 startLine 前插入 newText\n\n【replace 操作】必须传入 action: "replace"、oldText、newText。oldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n【insert 操作】必须传入 action: "insert"、startLine（>=1）、newText。startLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
+            name: 'file_replace',
+            description: '文件精准替换工具。基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险。\n\noldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    action: { type: 'string', enum: ['replace', 'insert'], description: '操作类型：replace（文本精准替换）或 insert（行号插入）' },
-                    oldText: { type: 'string', description: '[replace 必填] 要被替换的原文，必须与文件中内容完全一致（含空白、缩进、换行）。若匹配多处会返回歧义错误。' },
-                    newText: { type: 'string', description: '[replace/insert 必填] 替换后的新文本（replace）或要插入的新文本（insert）。replace 时传空字符串 "" 即删除 oldText。' },
-                    startLine: { type: 'integer', minimum: 1, description: '[insert 必填] 插入目标行号（>=1）。在指定行之前插入 newText。' }
+                    oldText: { type: 'string', description: '要被替换的原文，必须与文件中内容完全一致（含空白、缩进、换行）。若匹配多处会返回歧义错误。' },
+                    newText: { type: 'string', description: '替换后的新文本。传空字符串 "" 即删除 oldText。' }
                 },
-                required: ['path', 'action', 'newText']
+                required: ['path', 'oldText', 'newText']
             },
             execute: async (params, context) => {
                 const root = this.resolveWorkspaceRootFromContext(context);
@@ -358,76 +357,95 @@ export class AgentService extends EventEmitter {
                     return {
                         status: 'error',
                         error: 'INVALID_PARAMS',
-                        errorPhase: 'edit',
+                        errorPhase: 'replace',
                         message: 'The "path" parameter is missing or invalid.'
+                    };
+                }
+                if (typeof params.oldText !== 'string' || !params.oldText) {
+                    return {
+                        status: 'error',
+                        error: 'INVALID_PARAMS',
+                        errorPhase: 'replace',
+                        message: 'oldText 不能为空。若要插入内容请使用 file_insert。'
                     };
                 }
                 if (typeof params.newText !== 'string') {
                     return {
                         status: 'error',
                         error: 'INVALID_PARAMS',
-                        errorPhase: 'edit',
+                        errorPhase: 'replace',
                         message: 'The "newText" parameter is missing or invalid.'
                     };
                 }
-
-                if (params.action === 'replace') {
-                    if (typeof params.oldText !== 'string' || !params.oldText) {
-                        return {
-                            status: 'error',
-                            error: 'INVALID_PARAMS',
-                            errorPhase: 'edit',
-                            message: 'replace 操作必须传入非空 oldText 参数。'
-                        };
-                    }
-                    const editResult = await FileTools.editFileByReplace(root, params.path, params.oldText, params.newText);
-
-                    if (!editResult || editResult.status !== 'success') {
-                        return {
-                            ...(editResult || { status: 'error', error: 'EDIT_FAILED', message: 'Unknown edit failure' }),
-                            errorPhase: 'edit'
-                        };
-                    }
-
-                    const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
-                    const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
+                const editResult = await FileTools.editFileByReplace(root, params.path, params.oldText, params.newText);
+                if (!editResult || editResult.status !== 'success') {
                     return {
-                        ...editResult,
-                        ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
+                        ...(editResult || { status: 'error', error: 'REPLACE_FAILED', message: 'Unknown replace failure' }),
+                        errorPhase: 'replace'
                     };
                 }
-
-                if (params.action === 'insert') {
-                    if (typeof params.startLine !== 'number' || !Number.isInteger(params.startLine) || params.startLine < 1) {
-                        return {
-                            status: 'error',
-                            error: 'INVALID_PARAMS',
-                            errorPhase: 'edit',
-                            message: 'insert 操作必须传入 startLine（>= 1 的整数）。'
-                        };
-                    }
-                    const editResult = await FileTools.editFileByInsert(root, params.path, params.startLine, params.newText);
-
-                    if (!editResult || editResult.status !== 'success') {
-                        return {
-                            ...(editResult || { status: 'error', error: 'EDIT_FAILED', message: 'Unknown edit failure' }),
-                            errorPhase: 'edit'
-                        };
-                    }
-
-                    const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
-                    const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
-                    return {
-                        ...editResult,
-                        ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
-                    };
-                }
-
+                const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
+                const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                 return {
-                    status: 'error',
-                    error: 'INVALID_ACTION',
-                    errorPhase: 'edit',
-                    message: `不支持的操作类型：${params.action}。仅支持 replace 和 insert。`
+                    ...editResult,
+                    ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
+                };
+            }
+        });
+
+        // ── file_insert：行号精准插入 ──
+        console.log('[AgentService] Registering file_insert...');
+        this.toolManager.registerTool({
+            name: 'file_insert',
+            description: '文件行级插入工具。在指定行号 startLine 前插入 newText。\n\nstartLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string', description: '文件相对路径' },
+                    startLine: { type: 'integer', minimum: 1, description: '插入目标行号（>=1）。在指定行之前插入 newText。' },
+                    newText: { type: 'string', description: '要插入的新文本。' }
+                },
+                required: ['path', 'startLine', 'newText']
+            },
+            execute: async (params, context) => {
+                const root = this.resolveWorkspaceRootFromContext(context);
+                if (!root) throw new Error('Workspace not initialized');
+                if (!params || !params.path || typeof params.path !== 'string') {
+                    return {
+                        status: 'error',
+                        error: 'INVALID_PARAMS',
+                        errorPhase: 'insert',
+                        message: 'The "path" parameter is missing or invalid.'
+                    };
+                }
+                if (typeof params.startLine !== 'number' || !Number.isInteger(params.startLine) || params.startLine < 1) {
+                    return {
+                        status: 'error',
+                        error: 'INVALID_PARAMS',
+                        errorPhase: 'insert',
+                        message: 'startLine 必须为 >= 1 的整数。'
+                    };
+                }
+                if (typeof params.newText !== 'string') {
+                    return {
+                        status: 'error',
+                        error: 'INVALID_PARAMS',
+                        errorPhase: 'insert',
+                        message: 'The "newText" parameter is missing or invalid.'
+                    };
+                }
+                const editResult = await FileTools.editFileByInsert(root, params.path, params.startLine, params.newText);
+                if (!editResult || editResult.status !== 'success') {
+                    return {
+                        ...(editResult || { status: 'error', error: 'INSERT_FAILED', message: 'Unknown insert failure' }),
+                        errorPhase: 'insert'
+                    };
+                }
+                const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
+                const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
+                return {
+                    ...editResult,
+                    ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
                 };
             }
         });
@@ -435,7 +453,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_replace_all...');
         this.toolManager.registerTool({
             name: 'file_replace_all',
-            description: '文档关键词全局替换工具。将文件中**所有**出现的 oldText 替换为 newText，无需担心遗漏。\n\n与 file_edit（仅替换首次出现/需要唯一匹配）不同，本工具会替换文件中每一个匹配项，适合：\n- 全局重命名变量/函数/类名\n- 修正文档中的术语拼写\n- 统一格式化标记（如将所有制表符替换为空格）\n- 批量更新引用路径\n\n⚠️ 注意事项：\n- oldText 会作为**纯文本**进行精确匹配（含空白、缩进），不是正则表达式\n- 若未找到任何匹配项，返回错误并提示用户确认\n- 返回替换次数、替换行号列表和操作后上下文快照',
+            description: '文档关键词全局替换工具。将文件中**所有**出现的 oldText 替换为 newText，无需担心遗漏。\n\n与 file_replace（仅替换首次出现/需要唯一匹配）不同，本工具会替换文件中每一个匹配项，适合：\n- 全局重命名变量/函数/类名\n- 修正文档中的术语拼写\n- 统一格式化标记（如将所有制表符替换为空格）\n- 批量更新引用路径\n\n⚠️ 注意事项：\n- oldText 会作为**纯文本**进行精确匹配（含空白、缩进），不是正则表达式\n- 若未找到任何匹配项，返回错误并提示用户确认\n- 返回替换次数、替换行号列表和操作后上下文快照',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1101,7 +1119,7 @@ export class AgentService extends EventEmitter {
                 '- 所有 Git 操作必须分步透明：每执行一条命令，都要先观察输出再决定下一步，禁止一次拼接长命令链隐藏中间状态。',
                 '- 建议顺序：`git --version` -> `git rev-parse --is-inside-work-tree` -> (需要时) `git init` -> `git status --short --branch` -> `git add` / `git commit` / `git log` / `git diff`。',
                 '- **提交前强制门禁（MANDATORY PRE-COMMIT IGNORE HYGIENE）**：在执行 `git commit` 之前，必须先检查并补全 `.gitignore`，确保无必要文件/目录不会进入版本库。',
-                '- **强制步骤**：1) `git status --short --branch` 识别未跟踪项；2) 判断是否存在无必要文件/目录（构建产物、依赖目录、日志、缓存、临时文件、IDE 元数据、本地密钥）；3) 用 `read_file` 读取 `.gitignore`，若缺规则用 `file_edit`（insert 追加）或 `file_write`（首次创建）补齐并去重；4) 再次执行 `git status --short` 验证噪声项已被忽略；5) 仅在复检通过后再 `git add` / `git commit`。',
+                '- **强制步骤**：1) `git status --short --branch` 识别未跟踪项；2) 判断是否存在无必要文件/目录（构建产物、依赖目录、日志、缓存、临时文件、IDE 元数据、本地密钥）；3) 用 `read_file` 读取 `.gitignore`，若缺规则用 `file_insert`（追加）或 `file_write`（首次创建）补齐并去重；4) 再次执行 `git status --short` 验证噪声项已被忽略；5) 仅在复检通过后再 `git add` / `git commit`。',
                 '- 如果发现不确定是否应忽略的文件，先向用户确认，再提交。禁止在未完成忽略体检时直接提交。',
                 '- 任何会改变版本库状态的命令执行前，都应在回复中说明目的；提交完成后必须反馈 commit hash、提交信息和影响范围。',
                 '- 若用户未要求版本管理，不要擅自提交；若用户明确要求 Git 操作，优先用终端工具完成，保持全程可见、可追溯。'
@@ -1272,7 +1290,7 @@ export class AgentService extends EventEmitter {
                 `- **CMD 可用性**: ${envInfo.cmdAvailable ? `可用 (${envInfo.cmdVersion})` : '不可用 (Not Found)'}`,
                 `- **Git 命令可用性**: ${envInfo.gitAvailable ? `可用 (${envInfo.gitVersion})` : `不可用 (${envInfo.gitVersion || 'Not Found'})`}`,
                 projectJavaVersion ? `- **Java 编译目标版本**: ${projectJavaVersion}\n  ⚠️ 编写 Java 代码时必须严格遵守此版本，禁止使用高版本语言特性（如 var/record/sealed/text block 等需 Java 11+/16+/17+）。` : null,
-                projectSourceEncoding ? `- **Maven 项目源文件编码**: ${projectSourceEncoding}\n  ⚠️ 创建或覆写 Java/XML/Properties 文件时，必须将 \`encoding\` 参数显式传入 file_write 工具（如 \`encoding: "${projectSourceEncoding}"\`），防止新建文件默认 UTF-8 与项目编码不一致造成乱码。局部编辑（file_edit）会自动沿用文件原编码无需显式传 encoding。` : null,
+                projectSourceEncoding ? `- **Maven 项目源文件编码**: ${projectSourceEncoding}\n  ⚠️ 创建或覆写 Java/XML/Properties 文件时，必须将 \`encoding\` 参数显式传入 file_write 工具（如 \`encoding: "${projectSourceEncoding}"\`），防止新建文件默认 UTF-8 与项目编码不一致造成乱码。局部编辑（file_replace / file_insert）会自动沿用文件原编码无需显式传 encoding。` : null,
                 projectPythonVersion ? `- **Python 版本约束**: ${projectPythonVersion}\n  ⚠️ 编写 Python 代码时必须严格遵守此版本，禁止使用高版本语言特性。` : null,
                 projectGoVersion ? `- **Go 版本**: ${projectGoVersion}` : null,
             ].filter(Boolean).join('\n'),
