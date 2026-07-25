@@ -1046,7 +1046,18 @@ export class AgentService extends EventEmitter {
             '1. 调用 `list_todos` 获取当前任务清单；',
             '2. 对状态为 `not-started` 或 `in-progress` 的任务，调用 `update_todo` 将其状态置为 `completed` 或 `failed`；',
             '3. 确认全部任务已进入终态后，才允许输出最终答复给用户；',
-            '4. 若发现仍有任务可推进（非卡用户输入），禁止强行终态——应继续执行直到任务真正完成或确认不可达为止。'
+            '4. 若发现仍有任务可推进（非卡用户输入），禁止强行终态——应继续执行直到任务真正完成或确认不可达为止。',
+            '',
+            '**【记忆反思与持久化 — 任务完成后的知识沉淀】**：',
+            '在确认全部 TODO 任务已进入终态（completed/failed）、准备输出最终答复之前，必须执行记忆反思流程：',
+            '1. **反思本轮是否有值得持久化的知识**，逐项检查：',
+            '   - 工具失败模式 → 调用 `append_never_mistake_rule`（概括失败模式，不引用具体文件路径）',
+            '   - 用户偏好变化 → 调用 `upsert_user_preference`（type 使用 style/language/format/behavior/tool 等）',
+            '   - 项目特定知识（架构约定、端口配置、命名规范等）→ 调用 `upsert_user_preference`（type=`project`，source=`inferred`）',
+            '   - 与已有记忆冲突 → 先 `list_user_preferences` 获取冲突项 ID，通过 `conflictIds` 淘汰旧偏好',
+            '2. **持久化判断标准**（满足任一即记录）：反复使用≥2次 / 因缺少该知识走了弯路 / 对后续有明确指导价值 / 用户要求"记住"',
+            '3. **不应记录**：通用常识 / 一次性临时信息 / 已有重复内容 / 未经验证的推测',
+            '4. 若本轮无值得持久化的知识，跳过此步骤直接输出最终答复。禁止为了记录而记录。'
         ].join('\n');
 
         // 动态注入“防重复犯错”记忆规则
