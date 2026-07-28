@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Virtuoso } from 'react-virtuoso';
 import { useAgentSSE } from '@/hooks/useAgentSSE';
-import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, XCircle, Brain, Copy, ClipboardCheck, ChevronDown } from 'lucide-react';
+import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, XCircle, Brain, Copy, ClipboardCheck, ChevronDown, Bot } from 'lucide-react';
 import { TodoList } from './TodoList';
 import { SettingsModal } from '@/components/SettingsModal';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
@@ -59,7 +59,7 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                         <div className='w-3 h-3 bg-emerald-600 rounded-sm flex items-center justify-center'>
                             <Cpu className='w-2 h-2 text-white' />
                         </div>
-                        <span className='text-[8pt] font-black uppercase tracking-[0.15em] text-emerald-500'>智能助手</span>
+                        <Bot className='w-2.5 h-2.5 text-emerald-500' />
                     </div>
                 ) : (
                     <div className='flex items-center gap-1.5'>
@@ -797,7 +797,7 @@ export const AgentChat: React.FC = () => {
              <div className='flex items-center justify-between px-4 pt-px pb-1 border-b border-white/5 bg-black/50 backdrop-blur-md sticky top-0 z-10'>
                 <div className='flex items-center gap-2'>
                     <div className='w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)] animate-pulse' />
-                    <span className='text-[10px] font-black tracking-[0.2em] text-emerald-500 uppercase'>智能助手</span>
+                    <Bot className='w-3.5 h-3.5 text-emerald-500' title='智能助手' />
                     {isLoading && currentStage && (
                         <div className="flex items-center gap-1.5 ml-2 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
                             <Loader2 className="w-2.5 h-2.5 text-emerald-500 animate-spin" />
