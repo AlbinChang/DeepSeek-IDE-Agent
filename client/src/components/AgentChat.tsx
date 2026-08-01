@@ -22,6 +22,13 @@ interface ChatMessageItemProps {
     markdownComponentsTextOnly: any;
 }
 
+// ── 自动滚动常量 ──
+// USER_GESTURE_WINDOW_MS：用户真实手势（wheel / touch / 滚动条拖动）标记的存活窗口，
+// 用于在 scroll 事件中区分「用户滚动」与「程序化滚动」，根治一次性 flag 被冒名消费。
+const USER_GESTURE_WINDOW_MS = 150;
+// MAX_FOLLOW_ATTEMPTS：滚动后校验未到位时的自愈重试上限。
+const MAX_FOLLOW_ATTEMPTS = 3;
+
 const toolArgNumberFormatter = new Intl.NumberFormat('zh-CN');
 
 const formatToolArgMeta = (meta: any): string | null => {
@@ -380,14 +387,22 @@ export const AgentChat: React.FC = () => {
     }, [activeProviderConfig]);
     const thinkingEnabled = activeProviderConfig?.enableThinking !== false;
 
-    // ── Virtuoso 虚拟滚动：「写前快照」模式 ──
-    // userScrolledUpRef 仅由用户**主动**滚离底部时置 true，由用户滚回底部或
-    // 程序化 scrollToIndex 完成后置 false。不再依赖 Virtuoso 的 atBottomStateChange
-    // 异步回调，根除其内部布局重算期间 flag 污染（与 Terminal 自动滚动 bug 同源）。
+    // ── Virtuoso 虚拟滚动：用户手势标记 + 滚动后校验自愈 ──
+    // userScrolledUpRef 仅由**用户真实手势**（wheel / touch / 滚动条拖动）触发的
+    // scroll 事件更新；程序化 scrollToIndex 与布局抖动产生的 scroll 事件不携带手势
+    // 标记 → 永不污染用户意图。彻底取代「一次性 programmaticScrollRef」方案，
+    // 根除其被第三方 scroll 事件（TodoList 高度变化 / followOutput / Virtuoso 内部
+    // 重测）冒名消费后导致永久卡死的竞态。
     const virtuosoRef = useRef<React.ComponentRef<typeof Virtuoso>>(null);
     const userScrolledUpRef = useRef<boolean>(false);
     const scrollerElementRef = useRef<HTMLDivElement | null>(null);
-    const programmaticScrollRef = useRef<boolean>(false);
+    // 用户真实手势标记：最近是否发生过 wheel / touchmove / pointerdown（滚动条拖动）
+    const userGestureRef = useRef<boolean>(false);
+    // 最近一次用户手势的时间戳：用于自愈校验判断「跟随期间用户是否又操作过」
+    const lastGestureTimeRef = useRef<number>(-1);
+    const userGestureTimerRef = useRef<number | null>(null);
+    // 代际标记：使过期的自愈校验 rAF 链失效，避免与新一轮跟随冲突
+    const followGenerationRef = useRef<number>(0);
     const lastMessagesSnapshotRef = useRef<Message[]>(messages);
 
     const normalizeExternalHref = useCallback((href?: string) => {
@@ -438,23 +453,81 @@ export const AgentChat: React.FC = () => {
         setIsThinkingExpanded(prev => !prev);
     }, []);
 
-    // ── Virtuoso 自动滚动：写前快照 + 双 rAF ──
-    // followOutput='auto' 仅处理新消息追加（messages.length 变化）；
-    // 同一条消息内容增长（text/reasoning/annotation/error）由本 effect 负责。
-    // 用 messages 数组引用变化（而非 content 字符串比较）检测**任何**内容增长，
-    // 覆盖 text delta、reasoning delta、tool annotation、error 等所有路径。
-    // scrollToIndex 包裹双 requestAnimationFrame：确保浏览器 Layout→Paint
-    // 完成后再滚动，消除「差一点到底」的布局竞态。
-    useEffect(() => {
-        if (!isLoading || messages.length === 0) return;
-        const lastMsg = messages[messages.length - 1];
-        if (!lastMsg || lastMsg.role !== 'assistant') return;
+    // ── Virtuoso 自动滚动：滚动后校验 + 自愈（方案 A） ──
+    // 设计要点：
+    // 1. 用户意图标记 userScrolledUpRef 仅由真实手势（wheel/touch/滚动条拖动）
+    //    触发的 scroll 事件更新；程序化 scrollToIndex 与布局抖动永不污染它。
+    // 2. 每次跟随后在后续帧重新同步校验是否真正到达底部；未到位且期间无新的
+    //    用户手势时有限重试（自愈）——即使某次滚动落点偏短也会在下一帧恢复，
+    //    不会永久卡死。
+    // 3. 决策时用「同步判定」兜底：若用户当前实际就在底部附近，即便手势窗口期
+    //    内误置了标记，也视为未滚离并继续跟随。
+    const markUserGesture = useCallback(() => {
+        userGestureRef.current = true;
+        lastGestureTimeRef.current = Date.now();
+        if (userGestureTimerRef.current !== null) {
+            window.clearTimeout(userGestureTimerRef.current);
+        }
+        userGestureTimerRef.current = window.setTimeout(() => {
+            userGestureRef.current = false;
+            userGestureTimerRef.current = null;
+        }, USER_GESTURE_WINDOW_MS);
+    }, []);
 
-        // 用 messages 数组引用变化检测任何内容增长（而非仅 content 字段）
+    const followToBottom = useCallback((attempt: number = 0) => {
+        const virtuoso = virtuosoRef.current;
+        if (!virtuoso) return;
+
+        // 记录发起跟随时的用户手势时间：自愈重试仅当期间没有新的用户手势时进行
+        const gestureTimeAtFollow = lastGestureTimeRef.current;
+        // 本次跟随的代际：使此前过期的自愈校验链失效
+        const generation = ++followGenerationRef.current;
+        userScrolledUpRef.current = false;
+
+        virtuoso.scrollToIndex({
+            index: messages.length - 1,
+            align: 'end',
+            behavior: 'auto',
+        });
+
+        // 滚动后校验 + 自愈：等浏览器完成 Layout→Paint 后确认是否真正到底
+        if (attempt >= MAX_FOLLOW_ATTEMPTS) return;
+        requestAnimationFrame(() => {
+            if (followGenerationRef.current !== generation) return;
+            requestAnimationFrame(() => {
+                if (followGenerationRef.current !== generation) return;
+                const el = scrollerElementRef.current;
+                if (!el) return;
+                const threshold = Math.max(5, el.clientHeight * 0.05);
+                const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
+                // 跟随期间用户又进行了真实操作（滚动离开）→ 停止自愈，尊重用户意图
+                if (lastGestureTimeRef.current > gestureTimeAtFollow) return;
+                if (!atBottom) {
+                    followToBottom(attempt + 1);
+                }
+            });
+        });
+    }, [messages.length]);
+
+    useEffect(() => {
+        if (messages.length === 0) return;
+
+        // 用 messages 数组引用变化检测任何内容增长（而非仅 content 字段），
+        // 覆盖 text delta、reasoning delta、tool annotation、error、新消息等所有路径。
         const prev = lastMessagesSnapshotRef.current;
         if (prev === messages) return;
         lastMessagesSnapshotRef.current = messages;
 
+        // 同步判定（不信任异步 scroll 事件）：若用户当前实际就在底部附近，
+        // 即便 userScrolledUpRef 因手势窗口期被误置，也视为未滚离并继续跟随。
+        const el = scrollerElementRef.current;
+        if (el) {
+            const threshold = Math.max(5, el.clientHeight * 0.05);
+            const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
+            if (atBottom) {
+                userScrolledUpRef.current = false;
+            }
+        }
         if (userScrolledUpRef.current) return; // 用户主动滚离 → 不跟随
 
         let cancelled = false;
@@ -464,18 +537,23 @@ export const AgentChat: React.FC = () => {
             // 第二帧：确保 Paint 也完成，Virtuoso 内部尺寸测量为最新值
             requestAnimationFrame(() => {
                 if (cancelled) return;
-                programmaticScrollRef.current = true;
-                userScrolledUpRef.current = false;
-                virtuosoRef.current?.scrollToIndex({
-                    index: messages.length - 1,
-                    align: 'end',
-                    behavior: 'auto',
-                });
+                followToBottom(0);
             });
         });
 
         return () => { cancelled = true; };
-    }, [messages, isLoading]);
+    }, [messages, followToBottom]);
+
+    // 卸载时清理手势定时器并失效所有未完成的自愈校验链
+    useEffect(() => {
+        return () => {
+            if (userGestureTimerRef.current !== null) {
+                window.clearTimeout(userGestureTimerRef.current);
+                userGestureTimerRef.current = null;
+            }
+            followGenerationRef.current++;
+        };
+    }, []);
 
     // 流式结束：重置快照与用户滚离标记，为下一轮对话准备
     useEffect(() => {
@@ -725,10 +803,11 @@ export const AgentChat: React.FC = () => {
         </div>
     ), [messages.length, isLoading, isThinkingExpanded, toggleThinkingExpanded, markdownComponentsWithCode, markdownComponentsTextOnly]);
 
-    // ── Virtuoso 自定义 Scroller：原生 scroll 监听（「写前快照」核心） ──
-    // 接管 Virtuoso 的滚动容器，附加原生 scroll 事件监听器。
-    // 仅用户主动滚离底部时置 userScrolledUpRef = true；程序化 scrollToIndex
-    // 触发的 scroll 事件通过 programmaticScrollRef 识别并忽略。
+    // ── Virtuoso 自定义 Scroller：原生 scroll + 用户手势监听 ──
+    // 接管 Virtuoso 的滚动容器，附加原生 scroll 事件监听器与手势监听器。
+    // 仅「最近发生过用户真实手势（wheel/touch/滚动条拖动）」时的 scroll 事件
+    // 才更新 userScrolledUpRef；程序化 scrollToIndex 与 TodoList 高度变化等
+    // 布局抖动产生的 scroll 事件不携带手势标记 → 永不污染用户意图。
     // 使用 useMemo([]) 确保组件身份永不变，避免 Virtuoso 重挂载滚动容器。
     const Scroller = useMemo(() =>
         React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
@@ -750,18 +829,26 @@ export const AgentChat: React.FC = () => {
                     const el = scrollerElementRef.current;
                     if (!el) return;
                     const onScroll = () => {
-                        // 忽略程序化 scrollToIndex 触发的 scroll 事件
-                        if (programmaticScrollRef.current) {
-                            programmaticScrollRef.current = false;
-                            return;
-                        }
-                        // 用户发起的滚动：检测是否离开底部（5% 容差，抗布局抖动）
+                        // 仅当最近发生**用户真实手势**时才更新用户意图标记；
+                        // 程序化 scrollToIndex 与布局抖动产生的 scroll 事件
+                        // 不携带手势标记 → 永不污染 userScrolledUpRef。
+                        if (!userGestureRef.current) return;
+                        // 检测是否离开底部（5% 容差，抗布局抖动）
                         const threshold = Math.max(5, el.clientHeight * 0.05);
                         const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
                         userScrolledUpRef.current = !atBottom;
                     };
                     el.addEventListener('scroll', onScroll, { passive: true });
-                    return () => el.removeEventListener('scroll', onScroll);
+                    // 用户手势来源：鼠标滚轮 / 触屏滑动 / 原生滚动条拖动（pointerdown）
+                    el.addEventListener('wheel', markUserGesture, { passive: true });
+                    el.addEventListener('touchmove', markUserGesture, { passive: true });
+                    el.addEventListener('pointerdown', markUserGesture);
+                    return () => {
+                        el.removeEventListener('scroll', onScroll);
+                        el.removeEventListener('wheel', markUserGesture);
+                        el.removeEventListener('touchmove', markUserGesture);
+                        el.removeEventListener('pointerdown', markUserGesture);
+                    };
                 }, []);
 
                 return <div {...props} ref={mergedRef} />;
@@ -868,7 +955,6 @@ export const AgentChat: React.FC = () => {
                 <Virtuoso
                     ref={virtuosoRef}
                     data={messages}
-                    followOutput={'auto'}
                     itemContent={itemContent}
                     components={{ Scroller, Footer }}
                     className='flex-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent'
