@@ -884,7 +884,9 @@ export const AgentChat: React.FC = () => {
              <div className='flex items-center justify-between px-4 pt-px pb-1 border-b border-white/5 bg-black/50 backdrop-blur-md sticky top-0 z-10'>
                 <div className='flex items-center gap-2'>
                     <div className='w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)] animate-pulse' />
-                    <Bot className='w-3.5 h-3.5 text-emerald-500' title='智能助手' />
+                    <span title='智能助手'>
+                        <Bot className='w-3.5 h-3.5 text-emerald-500' />
+                    </span>
                     {isLoading && currentStage && (
                         <div className="flex items-center gap-1.5 ml-2 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
                             <Loader2 className="w-2.5 h-2.5 text-emerald-500 animate-spin" />

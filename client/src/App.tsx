@@ -1,8 +1,9 @@
 ﻿import { useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react';
 import { 
   Files, Box, Cpu, HardDrive, Terminal as TerminalIcon, 
-  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2, Clock, X, FolderOpen, AlertCircle
+  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2, Clock, X, FolderOpen, AlertCircle, MoreHorizontal
 } from 'lucide-react';
+import { TabOverflowMenu } from '@/components/TabOverflowMenu';
 import { 
   Panel, 
   Group as PanelGroup, 
@@ -54,6 +55,31 @@ function App() {
   const [openFiles, setOpenFiles] = useState<string[]>([]);
   const [activeFileIndex, setActiveFileIndex] = useState(-1);
   const activeFile = openFiles[activeFileIndex] ?? '';
+
+  // ── 标签栏溢出展开菜单（对齐 VS Code "..." 行为）──
+  const tabsScrollRef = useRef<HTMLDivElement | null>(null);
+  const [tabsOverflow, setTabsOverflow] = useState(false);
+  const [tabMenuOpen, setTabMenuOpen] = useState(false);
+
+  // 检测 Tab 是否超出可视宽度：决定是否显示右侧展开按钮
+  useEffect(() => {
+    const el = tabsScrollRef.current;
+    if (!el) return;
+    const update = () => {
+      const overflow = el.scrollWidth > el.clientWidth + 1;
+      setTabsOverflow(overflow);
+      // 当文件少到不再溢出时，自动收起展开菜单
+      if (!overflow) setTabMenuOpen(false);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    window.addEventListener('resize', update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, [openFiles]);
 
   const openFile = useCallback((filePath: string) => {
     if (!filePath) return;
@@ -461,35 +487,76 @@ function App() {
               <Panel defaultSize={75} minSize={20} className="flex flex-col overflow-hidden relative min-h-0">
                 {/* ── 多文件 Tab 栏 ── */}
                 {openFiles.length > 0 && (
-                  <div className="h-7 bg-[#050505] flex items-center border-b border-white/[0.08] shrink-0 overflow-x-auto scrollbar-thin scrollbar-thumb-white/5" data-testid="editor-tab-bar">
-                    {openFiles.map((filePath, idx) => {
-                      const isActive = idx === activeFileIndex;
-                      const fileName = filePath.split(/[/\\]/).pop() || filePath;
-                      return (
-                        <button
-                          key={filePath}
-                          onClick={() => { setActiveFileIndex(idx); setEditorMode('editor'); }}
-                          className={`h-full max-w-[200px] px-3 flex items-center gap-1 text-[9px] font-medium shrink-0 border-r border-white/[0.05] transition-colors cursor-pointer select-none ${
-                            isActive
-                              ? 'bg-[#0a0a0a] text-white/90 border-t-[1.5px] border-t-white/25'
-                              : 'text-white/35 hover:text-white/60 hover:bg-white/[0.02]'
-                          }`}
-                          title={filePath}
-                        >
-                          <span className="truncate flex-1 min-w-0">{fileName}</span>
-                          <span
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              closeFile(filePath);
-                            }}
-                            className="ml-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border border-transparent text-white/20 hover:border-white/10 hover:bg-white/10 hover:text-white/80 transition-colors"
-                            title="关闭 (Close)"
+                  <div className="relative h-7 bg-[#050505] flex items-center border-b border-white/[0.08] shrink-0" data-testid="editor-tab-bar">
+                    {/* 可横向滚动的 Tab 区域 */}
+                    <div
+                      ref={tabsScrollRef}
+                      className="h-full flex items-center flex-1 min-w-0 overflow-x-auto scrollbar-thin scrollbar-thumb-white/5"
+                    >
+                      {openFiles.map((filePath, idx) => {
+                        const isActive = idx === activeFileIndex;
+                        const fileName = filePath.split(/[/\\]/).pop() || filePath;
+                        return (
+                          <button
+                            key={filePath}
+                            data-tab-index={idx}
+                            onClick={() => { setActiveFileIndex(idx); setEditorMode('editor'); }}
+                            className={`h-full max-w-[200px] px-3 flex items-center gap-1 text-[9px] font-medium shrink-0 border-r border-white/[0.05] transition-colors cursor-pointer select-none ${
+                              isActive
+                                ? 'bg-[#0a0a0a] text-white/90 border-t-[1.5px] border-t-white/25'
+                                : 'text-white/35 hover:text-white/60 hover:bg-white/[0.02]'
+                            }`}
+                            title={filePath}
                           >
-                            <X size={9} strokeWidth={2} />
-                          </span>
-                        </button>
-                      );
-                    })}
+                            <span className="truncate flex-1 min-w-0">{fileName}</span>
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                closeFile(filePath);
+                              }}
+                              className="ml-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border border-transparent text-white/20 hover:border-white/10 hover:bg-white/10 hover:text-white/80 transition-colors"
+                              title="关闭 (Close)"
+                            >
+                              <X size={9} strokeWidth={2} />
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {/* 溢出展开按钮（仅当 Tab 放不下时显示） */}
+                    {tabsOverflow && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setTabMenuOpen((v) => !v); }}
+                        className={`h-7 w-7 shrink-0 flex items-center justify-center border-l border-white/[0.05] transition-colors ${
+                          tabMenuOpen
+                            ? 'bg-white/10 text-white'
+                            : 'text-white/40 hover:text-white/80 hover:bg-white/[0.04]'
+                        }`}
+                        title="显示所有打开的文件"
+                        data-testid="editor-tab-more"
+                        aria-haspopup="listbox"
+                        aria-expanded={tabMenuOpen}
+                      >
+                        <MoreHorizontal size={13} />
+                      </button>
+                    )}
+                    {/* 溢出文件下拉选择菜单 */}
+                    {tabMenuOpen && tabsOverflow && (
+                      <TabOverflowMenu
+                        files={openFiles}
+                        activeIndex={activeFileIndex}
+                        workspaceRoot={workspaceRoot}
+                        onSelect={(idx) => {
+                          setActiveFileIndex(idx);
+                          setEditorMode('editor');
+                          // 让对应 Tab 滚动到可视区域
+                          const tabEl = tabsScrollRef.current?.querySelector(`[data-tab-index="${idx}"]`);
+                          tabEl?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+                        }}
+                        onClose={(filePath) => closeFile(filePath)}
+                        onDismiss={() => setTabMenuOpen(false)}
+                      />
+                    )}
                   </div>
                 )}
                 {activeFile ? (
