@@ -19,6 +19,7 @@
  *  - AbortSignal 以外的并发/会话管理
  */
 
+import * as path from "path";
 import { AgentService } from "@/services/AgentService.js";
 import { TodoService } from "@/services/TodoService.js";
 import { TelemetryService } from "@/services/TelemetryService.js";
@@ -554,6 +555,15 @@ export class AgentTurnEngine {
                             console.log(`${getTS()} [AgentTurnEngine] [DEBUG] Tool ${tc.function.name} result success.`);
                         }
 
+                        // 文件编辑工具执行后附上文件路径，供前端编辑器感知刷新：
+                        // - filePath: Agent 传入的相对路径（原样）
+                        // - absolutePath: 基于工作区 root 解析的绝对路径
+                        //   前端用两者 + workspaceRoot 做归一化比较，兼容绝对/相对两种 activeFile
+                        const fileRelPath =
+                            typeof parsedArgs === 'object' && parsedArgs !== null && typeof (parsedArgs as any).path === 'string'
+                                ? (parsedArgs as any).path
+                                : null;
+
                         emit({
                             type: "annotation",
                             method: "tool/result",
@@ -561,9 +571,8 @@ export class AgentTurnEngine {
                                 toolCallId: tc.id,
                                 toolName: tc.function.name,
                                 result,
-                                // 文件编辑工具执行后附上文件路径，供前端编辑器感知刷新
-                                ...(typeof parsedArgs === 'object' && parsedArgs !== null && 'path' in parsedArgs
-                                    ? { filePath: (parsedArgs as any).path }
+                                ...(fileRelPath
+                                    ? { filePath: fileRelPath, absolutePath: path.resolve(root, fileRelPath) }
                                     : {}),
                             },
                         });

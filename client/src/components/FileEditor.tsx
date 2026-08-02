@@ -13,6 +13,7 @@ import { GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { electronBridge } from '@/services/electron-bridge';
+import { isSameFilePath } from '@/utils/path';
 
 // PDF 预览组件按需懒加载（避免为所有用户增加 ~200KB bundle）
 const PdfPreview = lazy(() => import('@/components/PdfPreview'));
@@ -731,24 +732,25 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   useEffect(() => {
     const handleFileChanged = async (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (!detail?.path) return;
-      const changedPath = String(detail.path).replace(/\\/g, '/');
-      const currentPath = activeFileRef.current?.replace(/\\/g, '/');
-      if (changedPath !== currentPath) return;
-      if (!currentPath) return;
-
-      console.log(`[Editor] File changed by agent: ${changedPath}, reloading content...`);
+      // 兼容相对 path 与绝对 absolutePath（服务端 tool/result 注解同时携带两者）
+      if (!detail?.path && !detail?.absolutePath) return;
       const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
+      const changedPath = String(detail.path || detail.absolutePath || '');
+      const currentPath = activeFileRef.current || '';
+      if (!changedPath || !currentPath) return;
+      // 统一路径归一化比较：解决 Agent 相对路径 vs 编辑器绝对/相对路径不一致导致的失配
+      if (!isSameFilePath(changedPath, currentPath, effectiveRoot)) return;
       if (!effectiveRoot) return;
 
+      console.log(`[Editor] File changed by agent: ${changedPath}, reloading content...`);
       try {
         const result = await electronBridge.readFile({
           filePath: changedPath,
           root: effectiveRoot,
         });
         if (!result || !result.content) return;
-        // 确认仍未切换到其他文件
-        if (activeFileRef.current?.replace(/\\/g, '/') !== changedPath) return;
+        // 确认仍未切换到其他文件（归一化比较，防竞态切文件）
+        if (!isSameFilePath(activeFileRef.current || '', changedPath, effectiveRoot)) return;
         setFileEncoding(result.encoding || 'utf8');
         setSavedContent(result.content);
         setIsDirty(false);

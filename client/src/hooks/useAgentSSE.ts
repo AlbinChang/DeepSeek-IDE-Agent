@@ -683,11 +683,14 @@ export function useAgentSSE() {
                     }
                 }
                 // 文件写入/编辑工具执行成功后，通知编辑器刷新
+                // detail 同时携带相对 path 与绝对 absolutePath，供 FileEditor 归一化匹配
                 const fileWriteTools = new Set(['file_write', 'file_replace', 'file_insert', 'file_replace_all', 'delete_path']);
                 if (chunk.method === 'tool/result' && fileWriteTools.has(chunk.params?.toolName)) {
                     const filePath = chunk.params?.filePath;
                     if (filePath && typeof filePath === 'string') {
-                        window.dispatchEvent(new CustomEvent('ui:file:changed', { detail: { path: filePath } }));
+                        window.dispatchEvent(new CustomEvent('ui:file:changed', {
+                            detail: { path: filePath, absolutePath: chunk.params?.absolutePath },
+                        }));
                     }
                 }
             } else if (chunk.type === 'init') {
