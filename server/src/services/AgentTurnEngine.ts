@@ -6,7 +6,8 @@
  *
  * 职责范围：
  *  - 流式调用 AI API，收集 text / reasoning / tool_calls
- *  - 网络层错误自动重试（指数退避，最多 RETRY_LIMIT 次，可通过 AGENT_API_RETRY_LIMIT 配置）
+ *  - 可重试错误自动重试（指数退避 + 抖动）：网络层按 AGENT_API_RETRY_LIMIT（默认 3 次），
+ *    服务过载 HTTP 408/429/500/502/503/504 按 AGENT_API_SERVICE_BUSY_RETRY_LIMIT（默认 10 次）
  *  - 按顺序执行工具调用，将结果推入 activeHistory
  *  - 每轮调用后执行 prepareMessages 整理上下文
  *  - 向前端 emit 事件（text / reasoning / annotation / stage / error）
@@ -25,6 +26,7 @@ import { TodoService } from "@/services/TodoService.js";
 import { TelemetryService } from "@/services/TelemetryService.js";
 import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
+import { classifyRetryableError, computeRetryDelayMs } from "@/utils/ApiRetryUtils.js";
 import { extractReasoningText } from "../utils/ReasoningUtils.js";
 
 const getTS = () => getBeijingLogTimePrefix();
@@ -34,6 +36,13 @@ const getTS = () => getBeijingLogTimePrefix();
  * 从 globalConfig.agent.apiRetryLimit 读取（可通过环境变量 AGENT_API_RETRY_LIMIT 覆盖，默认 3 次）。
  */
 const RETRY_LIMIT = globalConfig.agent.apiRetryLimit;
+/**
+ * 服务过载类错误（HTTP 408/429/500/502/503/504，如 DeepSeek 的「503 Service is too busy」）
+ * 的最大重试次数。可通过环境变量 AGENT_API_SERVICE_BUSY_RETRY_LIMIT 覆盖，默认 10 次。
+ */
+const SERVICE_BUSY_RETRY_LIMIT = globalConfig.agent.apiServiceBusyRetryLimit;
+/** 外层 while 循环需要容纳两类错误中更大的重试上限，具体次数在 catch 分支内按分类决定 */
+const MAX_ALLOWED_RETRIES = Math.max(RETRY_LIMIT, SERVICE_BUSY_RETRY_LIMIT);
 const CLIENT_INLINE_STRING_LIMIT = 1200;
 const CLIENT_MAX_ARRAY_ITEMS = 80;
 const CLIENT_MAX_OBJECT_KEYS = 80;
@@ -312,7 +321,7 @@ export class AgentTurnEngine {
             let toolCalls: any[] = [];
             let localUsage: any = null;
 
-            while (retryCount <= RETRY_LIMIT && !apiSuccess) {
+            while (retryCount <= MAX_ALLOWED_RETRIES && !apiSuccess) {
                 try {
                     fullContent = "";
                     fullReasoning = "";
@@ -449,44 +458,37 @@ export class AgentTurnEngine {
                     if (abortSignal?.aborted) throw error;
 
                     // ================================================================
-                    // 判断是否为可重试的网络层错误（连接未建立 / DNS 失败 / 流中断等）
+                    // 可重试错误分类（共享工具 ApiRetryUtils）：
+                    // - service_busy：HTTP 408/409/425/429/500/502/503/504（服务过载/临时故障）
+                    //   → 按 SERVICE_BUSY_RETRY_LIMIT（默认 10 次）重试，覆盖 DeepSeek
+                    //     「503 Service is too busy」等场景
+                    // - network：无 HTTP 响应（DNS 解析失败 / 连接被拒 / 流中断 / TLS 握手失败等）
+                    //   → 按 RETRY_LIMIT（默认 3 次）重试
+                    // 注意：error.status 有值（如 503）不代表不可重试，旧的「仅 status===undefined
+                    // 才重试」逻辑会漏掉服务过载类错误，这正是本处优化的关键。
                     // ================================================================
-                    // 核心判据：error.status === undefined 表示从未收到 HTTP 响应，
-                    // 即连接根本未到达服务器，必定是网络层问题，应重试。
-                    // 覆盖场景：DNS 解析失败(ENOTFOUND)、连接被拒(ECONNREFUSED)、
-                    // 流式中断(UND_ERR_BODY_TIMEOUT/terminated)、TLS 握手失败等。
-                    const isRetryableNetworkError =
-                        error.status === undefined ||                          // 无 HTTP 响应 = 网络层错误
-                        error.code === "ETIMEDOUT" ||
-                        error.code === "ECONNRESET" ||
-                        error.cause?.code === "ENOTFOUND" ||                  // DNS 解析失败
-                        error.cause?.code === "ECONNREFUSED" ||              // 连接被拒
-                        error.cause?.code === "ECONNRESET" ||
-                        error.cause?.code === "EAI_AGAIN" ||                  // DNS 临时失败
-                        error.cause?.code === "EPIPE" ||                     // 管道断裂
-                        error.cause?.code === "UND_ERR_BODY_TIMEOUT" ||      // undici 流读超时
-                        error.cause?.code === "UND_ERR_CONNECT_TIMEOUT" ||   // undici 连接超时
-                        (typeof error.cause?.code === 'string' && error.cause.code.startsWith("UND_ERR_")) || // 其他 undici 错误
-                        error.cause?.message?.includes("fetch failed") ||     // fetch 通用失败
-                        error.message?.includes("terminated");               // 流式连接被终止
+                    const verdict = classifyRetryableError(error);
+                    const maxRetries = verdict.category === 'service_busy' ? SERVICE_BUSY_RETRY_LIMIT : RETRY_LIMIT;
 
-                    if (isRetryableNetworkError && retryCount < RETRY_LIMIT) {
+                    if (verdict.retryable && retryCount < maxRetries) {
                         retryCount++;
-                        const errCode = error.cause?.code || error.code || error.status || 'NETWORK';
+                        const delayMs = computeRetryDelayMs(retryCount - 1, verdict.category);
+                        const errCode = error.cause?.code || error.code || (verdict.status > 0 ? `HTTP ${verdict.status}` : 'NETWORK');
+                        const label = verdict.category === 'service_busy' ? '服务过载' : '网络异常';
                         console.warn(
-                            `${getTS()} [AgentTurnEngine] 遇到网络层错误 (code=${errCode})，正在进行第 ${retryCount}/${RETRY_LIMIT} 次重试...`
+                            `${getTS()} [AgentTurnEngine] 遇到${label}错误 (${verdict.reason}, code=${errCode})，正在进行第 ${retryCount}/${maxRetries} 次重试...`
                         );
-                        emit({ type: "stage", content: `网络连接中断，正在自动进行第 ${retryCount} 次自动重试...` });
+                        emit({ type: "stage", content: `${label}（${verdict.reason}），正在自动进行第 ${retryCount} 次自动重试...` });
                         // 制造视觉断层补偿
                         emit({
                             type: "text",
-                            content: "\n\n_[网络异常，自动重新请求生成中...]_ \n\n",
+                            content: `\n\n_[${label}，自动重新请求生成中（第 ${retryCount} 次）...]_ \n\n`,
                             turn: turns * 100 + retryCount - 1,
                         });
-                        // 指数退避
-                        await new Promise((resolve) => setTimeout(resolve, 2000 * retryCount));
+                        // 指数退避 + 抖动（服务过载类退避更激进，避免惊群）
+                        await new Promise((resolve) => setTimeout(resolve, delayMs));
                     } else {
-                        throw error; // 非超时错误，或超过重试上限，向上抛出
+                        throw error; // 不可重试错误，或超过对应分类的重试上限，向上抛出
                     }
                 }
             }

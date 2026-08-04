@@ -363,6 +363,14 @@ export class SystemTools {
                 }
             });
 
+            // [2026.08 优化] 将 command 工具启动的 shell 进程登记为「可杀进程」。
+            // 这些 shell 是 Agent Server 的直接子进程，若不加登记会被 ProcessSafetyGuard 当作
+            // 「Agent 核心子进程」拦截，导致 Agent 无法终止自己通过 run_powershell_command /
+            // run_cmd_command 启动的进程（如后台服务、遗留构建任务）。登记后 Agent 可按 PID 正常杀死。
+            if (child.pid) {
+                ProcessSafetyGuard.getInstance().registerCommandChild(child.pid);
+            }
+
             // Windows: taskkill /F /T 杀整棵进程树（child.kill() 只杀顶层 PS 壳，npm/node 子进程会残留占用端口和 CPU）
             const killProc = () => {
                 if (isWin && child.pid) {
@@ -516,6 +524,8 @@ export class SystemTools {
                 resolved = true;
                 cleanup();
                 killProc();
+                // 超时路径：进程已被强杀，注销可杀登记
+                ProcessSafetyGuard.getInstance().unregisterCommandChild(child.pid ?? -1);
                 // 超时路径：异步持久化后再 resolve
                 const exitCode = 'SIGTERM';
                 const duration = Date.now() - commandStartTime;
@@ -537,6 +547,8 @@ export class SystemTools {
                 if (resolved) return; // 已由 stall/timeout 路径处理，避免双 resolve
                 resolved = true;
                 cleanup();
+                // 进程已退出，注销可杀登记
+                ProcessSafetyGuard.getInstance().unregisterCommandChild(child.pid ?? -1);
                 
                 // OOM 熔断时补充大模型可读的错误提示
                 const extraStderr = isHardKilled
@@ -563,6 +575,8 @@ export class SystemTools {
                 if (resolved) return;
                 resolved = true;
                 cleanup();
+                // spawn 失败（如 shell 不存在），注销可杀登记
+                ProcessSafetyGuard.getInstance().unregisterCommandChild(child.pid ?? -1);
                 // spawn 失败（如 shell 不存在），无需持久化
                 resolve({
                     stdout: stdout,

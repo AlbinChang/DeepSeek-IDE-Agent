@@ -7,6 +7,7 @@ import { TelemetryService } from "@/services/TelemetryService.js";
 import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
 import { EvaluationAgentService } from "@/services/EvaluationAgentService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
+import { FileIO } from "@/utils/FileIO.js";
 import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 
@@ -30,6 +31,10 @@ export class AgentChatComponent {
             console.log(`${getTS()} [AgentChat] Clearing session history for user: ${userId} in workspace: ${root}`);
             TodoService.clearAllTodos(root, userId).catch((err) => {
                 console.error(`${getTS()} [AgentChat] Failed to clear todos for user ${userId}:`, err);
+            });
+            // 清理最近一次评估报告落盘，避免跨会话残留污染新对话
+            FileIO.deletePath(".evaluate/evl_result.md", root, false).catch((err) => {
+                console.warn(`${getTS()} [AgentChat] Failed to clear evaluator report file for user ${userId}:`, err);
             });
             agentService.contextStore.updateContext(userId, { currentFile: null, selection: null, workspaceRoot: root }, root);
         }

@@ -14,7 +14,8 @@ export class FileTools {
         '.ide-agent',
         '.llm',
         '.tools',
-        '.memory'
+        '.memory',
+        '.evaluate'
     ]);
     private static readonly DIRECTORY_TREE_VISIBLE_DOT_DIR_NAMES = new Set([
         ...WORKSPACE_SKILL_CONTAINER_DIRECTORIES,

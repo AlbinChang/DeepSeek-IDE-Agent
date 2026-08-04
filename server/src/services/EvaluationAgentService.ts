@@ -4,8 +4,12 @@ import { AIProviderFactory } from "@/services/AIProviderFactory.js";
 import { HistoryOptimizerService } from "@/services/HistoryOptimizerService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
+import { FileIO } from "@/utils/FileIO.js";
 import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
+
+/** 最近一次评估报告落盘路径（工作区相对路径，系统内部上下文补充文件） */
+const EVALUATION_REPORT_RELATIVE_PATH = ".evaluate/evl_result.md";
 
 const getTS = () => getBeijingLogTimePrefix();
 
@@ -44,7 +48,8 @@ export interface EvaluationAgentOutput {
  * - 使用独立 evaluator-agent.json 系统提示词
  * - 仅注入「用户指令 + 主Agent最终回复」作为任务上下文
  * - 复用主Agent同款工具链，支持评估任务 TODO 化与工作区核验
- * - 评估结果通过内存传递，不再写入 .evaluate 文件夹
+ * - 评估结果通过内存传递；最近一次评估报告落盘 .evaluate/evl_result.md，
+ *   供多轮对话中主Agent在上下文缺少评估报告时按需检索补充（一般情况下无需读取）
  */
 export class EvaluationAgentService {
     private static instance: EvaluationAgentService;
@@ -196,6 +201,18 @@ export class EvaluationAgentService {
 
         const reportContent = finalReply;
 
+        // 【持久化】最近一次评估报告落盘到工作区 .evaluate/evl_result.md（覆盖式）。
+        // 供多轮对话中主Agent在上下文缺少评估报告时按需检索补充；一般情况下无需读取。
+        // 失败不应影响评估主流程，这里仅告警。
+        try {
+            await this.saveEvaluationReport(root, finalReply);
+        } catch (persistErr) {
+            console.warn(
+                `${getTS()} [EvaluationAgent] Failed to persist evaluation report to ${EVALUATION_REPORT_RELATIVE_PATH}:`,
+                persistErr
+            );
+        }
+
         console.log(`${getTS()} [EvaluationAgent] Evaluation finished for user: ${userId}, decision: ${decision}, issueCount: ${issueCount}, p0p1IssueCount: ${p0p1IssueCount}`);
 
         return {
@@ -204,6 +221,27 @@ export class EvaluationAgentService {
             reportContent,
             usage: turnResultUsage,
         };
+    }
+
+    /**
+     * 将最近一次评估报告写入工作区 `.evaluate/evl_result.md`（覆盖式）。
+     * - 系统内部上下文补充文件：多轮对话中主Agent若发现上下文中缺少评估报告，
+     *   可通过 read_file 读取本文件补充信息；一般情况下无需读取。
+     * - 原样保留报告正文（含一级标题「# 评估Agent的评估报告」），仅在文件头追加
+     *   HTML 注释形式的元信息，不影响 Markdown 渲染与标题识别。
+     * - 写入失败由调用方 try/catch 兜底，不影响评估主流程。
+     */
+    private async saveEvaluationReport(root: string, finalReply: string): Promise<void> {
+        const content = String(finalReply || "").trim();
+        const body = content || "(评估结论为空)";
+        const stamped = [
+            `<!-- 最近一次评估Agent评估报告 · 生成时间 ${getBeijingLogTimePrefix()} · 系统内部上下文补充文件 -->`,
+            `<!-- 多轮对话中若上下文缺少评估报告且需要补充评估信息，可用 read_file 读取本文件；一般情况下无需读取。 -->`,
+            "",
+            body,
+            "",
+        ].join("\n");
+        await FileIO.writeFile(EVALUATION_REPORT_RELATIVE_PATH, root, stamped);
     }
 
     private normalizeDecisionLine(line: string): string {

@@ -3,6 +3,8 @@ import { LiveContextStore } from "@/services/LiveContextStore.js";
 import { SettingsService } from "@/services/SettingsService.js";
 import { FileIO } from "@/utils/FileIO.js";
 import { HistoryCompressor } from "@/services/HistoryCompressor.js";
+import { withApiRetry } from "@/utils/ApiRetryUtils.js";
+import { config as globalConfig } from "@/config/index.js";
 import { extractReasoningText } from "../utils/ReasoningUtils.js";
 
 /**
@@ -114,11 +116,20 @@ export class HistoryOptimizerService {
             'history-optimizer',
             root,
         );
-        const response = await client.chat.completions.create({
-            model: modelId,
-            messages: [{ role: "user", content: prompt }],
-            ...thinkingOptions
-        } as any);
+        const response = await withApiRetry(
+            () => client.chat.completions.create({
+                model: modelId,
+                messages: [{ role: "user", content: prompt }],
+                ...thinkingOptions
+            } as any),
+            {
+                retries: globalConfig.agent.apiRetryLimit,
+                serviceBusyRetries: globalConfig.agent.apiServiceBusyRetryLimit,
+                onRetry: ({ attempt, maxAttempts, verdict, delayMs }) => {
+                    console.warn(`[HistoryOptimizer] 历史修复请求遇 ${verdict.reason}，第 ${attempt}/${maxAttempts} 次重试（${delayMs}ms 后）...`);
+                },
+            }
+        );
         const message = response.choices[0]?.message;
         const text = message?.content || extractReasoningText(message) || "";
         sessionUsage.set(userId, (sessionUsage.get(userId) || 0) + response.usage!.total_tokens);

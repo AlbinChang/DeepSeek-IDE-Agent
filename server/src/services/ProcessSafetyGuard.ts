@@ -170,6 +170,12 @@ export class ProcessSafetyGuard {
     /** 当前进程（Agent Server）的 PID 及其子进程 PID 集合 */
     private selfPid: number;
     private childPids: Set<number> = new Set();
+    /**
+     * command 工具启动的用户进程 PID 集合。
+     * 这些进程由 Agent 通过 run_powershell_command / run_cmd_command 启动（如构建、后台服务、临时脚本），
+     * 属于「用户命令进程」而非 Agent 核心运行时，允许 Agent 后续通过 kill 类命令按 PID 终止它们。
+     */
+    private commandSpawnedPids: Set<number> = new Set();
     private isWin: boolean;
 
     private constructor() {
@@ -281,10 +287,47 @@ export class ProcessSafetyGuard {
     }
 
     /**
-     * 检查给定 PID 是否属于 Agent 自身或子进程
+     * 检查给定 PID 是否属于 Agent 自身或核心子进程
+     *
+     * command 工具启动的用户进程（commandSpawnedPids）不在自我保护范围内，
+     * Agent 可以通过 kill 类命令按 PID 终止它们（仍受系统进程 / 受保护端口检测约束）。
      */
     isSelfOrChild(pid: number): boolean {
-        return pid === this.selfPid || this.childPids.has(pid);
+        if (pid === this.selfPid) return true;
+        // command 工具启动的用户进程 → 不受「自身/子进程」保护限制，允许终止
+        if (this.commandSpawnedPids.has(pid)) return false;
+        return this.childPids.has(pid);
+    }
+
+    // ========================================================================
+    // 2.5 command 工具进程登记（允许 Agent 杀死自己启动的用户进程）
+    // ========================================================================
+
+    /**
+     * 登记一个由 command 工具启动的用户进程 PID。
+     * 登记后该 PID 不再被视为「Agent 核心子进程」，Agent 可通过 kill 类命令终止它。
+     * @param pid command 工具 spawn 出的 shell 进程 PID
+     */
+    registerCommandChild(pid: number): void {
+        if (Number.isFinite(pid) && pid > 0) {
+            this.commandSpawnedPids.add(pid);
+        }
+    }
+
+    /**
+     * 注销 command 工具启动的进程（进程退出 / spawn 失败时调用）
+     */
+    unregisterCommandChild(pid: number): void {
+        if (Number.isFinite(pid) && pid > 0) {
+            this.commandSpawnedPids.delete(pid);
+        }
+    }
+
+    /**
+     * 判断 PID 是否由 command 工具启动（允许 Agent 杀死）
+     */
+    isCommandSpawned(pid: number): boolean {
+        return this.commandSpawnedPids.has(pid);
     }
 
     // ========================================================================
@@ -873,11 +916,12 @@ export class ProcessSafetyGuard {
                 continue;
             }
 
-            // 3b. Agent 自身/子进程检测
+            // 3b. Agent 自身/核心子进程检测（command 工具启动的用户进程不受此限制，可被杀）
             if (this.isSelfOrChild(pid)) {
                 blockedPids.push(pid);
                 reasons.push(
-                    `[自我保护拦截] PID ${pid} 是 Agent 运行时进程（自身或子进程），终止它会导致当前对话立即中断、DeepSeek IDE 失去响应。`
+                    `[自我保护拦截] PID ${pid} 是 Agent 核心运行时进程（自身或核心子进程，非 command 工具启动的用户进程），终止它会导致当前对话立即中断、DeepSeek IDE 失去响应。` +
+                    `（通过 run_powershell_command / run_cmd_command 启动的进程不受此限制，可按 PID 正常终止）`
                 );
                 continue;
             }

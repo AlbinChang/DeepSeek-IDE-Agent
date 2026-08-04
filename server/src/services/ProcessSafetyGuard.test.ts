@@ -263,4 +263,76 @@ describe('ProcessSafetyGuard — self-awareness', () => {
         // 99999 is unlikely to be a real process
         expect(guard.isSelfOrChild(99999)).toBe(false);
     });
+
+    it('recognizes a real child PID as self/child', async () => {
+        // spawn a transient child to get a real child PID
+        const { spawn } = await import('child_process');
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 500)']);
+        try {
+            expect(child.pid).toBeDefined();
+            await guard.refreshChildPids();
+            expect(guard.isSelfOrChild(child.pid!)).toBe(true);
+        } finally {
+            child.kill();
+        }
+    });
+
+    it('exempts command-tool spawned PIDs from self/child protection', async () => {
+        const { spawn } = await import('child_process');
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 500)']);
+        try {
+            expect(child.pid).toBeDefined();
+            // simulate command tool registration
+            guard.registerCommandChild(child.pid!);
+            await guard.refreshChildPids();
+            // even though it's a real child, it's now killable
+            expect(guard.isCommandSpawned(child.pid!)).toBe(true);
+            expect(guard.isSelfOrChild(child.pid!)).toBe(false);
+        } finally {
+            child.kill();
+            guard.unregisterCommandChild(child.pid ?? -1);
+        }
+    });
+
+    it('unregisters a command-tool spawned PID back to protected state', async () => {
+        const { spawn } = await import('child_process');
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 500)']);
+        try {
+            expect(child.pid).toBeDefined();
+            guard.registerCommandChild(child.pid!);
+            await guard.refreshChildPids();
+            expect(guard.isSelfOrChild(child.pid!)).toBe(false);
+            guard.unregisterCommandChild(child.pid!);
+            expect(guard.isCommandSpawned(child.pid!)).toBe(false);
+            expect(guard.isSelfOrChild(child.pid!)).toBe(true);
+        } finally {
+            child.kill();
+            guard.unregisterCommandChild(child.pid ?? -1);
+        }
+    });
+
+    it('allows killing a command-tool spawned PID via evaluate (unprotected)', async () => {
+        const { spawn } = await import('child_process');
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 500)']);
+        try {
+            expect(child.pid).toBeDefined();
+            guard.registerCommandChild(child.pid!);
+            const verdict = await guard.evaluate(`taskkill /F /T /PID ${child.pid}`);
+            expect(verdict.allowed).toBe(true);
+        } finally {
+            child.kill();
+            guard.unregisterCommandChild(child.pid ?? -1);
+        }
+    });
+
+    it('still blocks killing the Agent own PID even when registered', async () => {
+        guard.registerCommandChild(process.pid);
+        try {
+            const verdict = await guard.evaluate(`taskkill /F /T /PID ${process.pid}`);
+            expect(verdict.allowed).toBe(false);
+            expect(verdict.blockedPids).toContain(process.pid);
+        } finally {
+            guard.unregisterCommandChild(process.pid);
+        }
+    });
 });

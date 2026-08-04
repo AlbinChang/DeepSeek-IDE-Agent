@@ -1,6 +1,8 @@
 ﻿import { AIProviderFactory } from "@/services/AIProviderFactory.js";
 import { SettingsService } from "@/services/SettingsService.js";
 import { extractReasoningText } from "../utils/ReasoningUtils.js";
+import { withApiRetry } from "@/utils/ApiRetryUtils.js";
+import { config as globalConfig } from "@/config/index.js";
 
 export class CompletionService {
     private static userRateLimits: Map<string, { count: number, resetTime: number }> = new Map();
@@ -47,17 +49,26 @@ export class CompletionService {
         const prompt = `Complete the following code:\n\n${params.prefix}[CURSOR]${params.suffix}`;
         let systemPrompt = `You are an AI code completion engine. Output ONLY the completion text after [CURSOR]. Do not include any explanations or the original code.`;
 
-        const stream = await client.chat.completions.create({
-            model: modelId,
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: prompt }
-            ],
-            max_tokens: 300,
-            stream: true,
-            ...thinkingOptions
-            // 避免注入不稳定采样参数，提升跨模型兼容性
-        } as any) as any;
+        const stream = await withApiRetry(
+            () => client.chat.completions.create({
+                model: modelId,
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: prompt }
+                ],
+                max_tokens: 300,
+                stream: true,
+                ...thinkingOptions
+                // 避免注入不稳定采样参数，提升跨模型兼容性
+            } as any) as any,
+            {
+                retries: globalConfig.agent.apiRetryLimit,
+                serviceBusyRetries: globalConfig.agent.apiServiceBusyRetryLimit,
+                onRetry: ({ attempt, maxAttempts, verdict, delayMs }) => {
+                    console.warn(`[CompletionService] 补全请求遇 ${verdict.reason}，第 ${attempt}/${maxAttempts} 次重试（${delayMs}ms 后）...`);
+                },
+            }
+        );
 
         return stream;
     }
@@ -80,13 +91,22 @@ export class CompletionService {
         );
         // 统一使用简化补全提示，兼容不同 OpenAI-Compatible 模型
         const prompt = `Complete the following code:\n\n${params.prefix}[CURSOR]${params.suffix}`;
-        const response = await client.chat.completions.create({
-            model: modelId,
-            messages: [{ role: "user", content: prompt }],
-            max_tokens: 300,
-            ...thinkingOptions
-            // 避免注入不稳定采样参数，提升跨模型兼容性
-        } as any);
+        const response = await withApiRetry(
+            () => client.chat.completions.create({
+                model: modelId,
+                messages: [{ role: "user", content: prompt }],
+                max_tokens: 300,
+                ...thinkingOptions
+                // 避免注入不稳定采样参数，提升跨模型兼容性
+            } as any),
+            {
+                retries: globalConfig.agent.apiRetryLimit,
+                serviceBusyRetries: globalConfig.agent.apiServiceBusyRetryLimit,
+                onRetry: ({ attempt, maxAttempts, verdict, delayMs }) => {
+                    console.warn(`[CompletionService] 补全请求遇 ${verdict.reason}，第 ${attempt}/${maxAttempts} 次重试（${delayMs}ms 后）...`);
+                },
+            }
+        );
         const message = response.choices[0]?.message;
         return message?.content || extractReasoningText(message) || "";
     }
