@@ -2,7 +2,7 @@
 import { createPortal } from 'react-dom';
 import { 
   File, Folder, ChevronRight, ChevronDown, 
-  Loader2, Lock, FolderPlus, Compass, Copy, Trash2, AlertTriangle, Pencil, Clock, X, FolderOpen, Box
+  Loader2, Lock, FolderPlus, Compass, Copy, Trash2, AlertTriangle, Pencil, Clock, X, FolderOpen, Box, FilePlus
 } from 'lucide-react';
 import axios from 'axios';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
@@ -82,6 +82,14 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   const pollInFlightRef = useRef(false);
   const pollAbortRef = useRef<AbortController | null>(null);
 
+  // ── 新建文件/文件夹状态 ──
+  const [newItem, setNewItem] = useState<{ type: 'file' | 'folder'; parentPath: string } | null>(null);
+  const [newItemName, setNewItemName] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  /** 空白区域右键菜单（仅含新建文件/文件夹） */
+  const [emptyMenu, setEmptyMenu] = useState<{ x: number; y: number } | null>(null);
+
   // ── 拖拽移动状态 ──
   const [dragNodePath, setDragNodePath] = useState<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
@@ -94,7 +102,10 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   };
 
   useEffect(() => {
-    const closeContextMenu = () => setContextMenu(null);
+    const closeContextMenu = () => {
+      setContextMenu(null);
+      setEmptyMenu(null);
+    };
     window.addEventListener('click', closeContextMenu);
     return () => window.removeEventListener('click', closeContextMenu);
   }, []);
@@ -182,6 +193,119 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     } catch (err) {
       console.error('Failed to copy', err);
     }
+  };
+
+  // ── 新建文件/文件夹 (2026.08 新建文本文件功能) ──
+
+  /** 计算节点所属的父目录路径（'.' 表示工作区根目录） */
+  const getParentDirPath = (node: FileNode): string => {
+    if (node.isDirectory) return node.path;
+    return node.path.replace(/[/\\][^/\\]*$/, '') || '.';
+  };
+
+  /** 在指定目录下启动"新建"内联输入（对齐 VS Code 资源管理器行为） */
+  const startNewItem = (type: 'file' | 'folder', parentPath: string) => {
+    if (!workspaceRoot) return;
+    setNewItem({ type, parentPath });
+    setNewItemName('');
+    setCreateError(null);
+    // 目标为子目录时确保其展开，让内联输入行可见
+    if (parentPath !== '.') {
+      const parentNode = findNodeByPath(nodes, parentPath);
+      if (parentNode && parentNode.isDirectory && !parentNode.isOpen) {
+        toggleFolder(parentNode);
+      }
+    }
+  };
+
+  /** 执行新建文件/文件夹 */
+  const handleCreateNewItem = async () => {
+    if (!workspaceRoot || !newItem) return;
+    const name = newItemName.trim();
+    if (!name) {
+      setCreateError('请输入名称');
+      return;
+    }
+    if (/[\\/]/.test(name)) {
+      setCreateError('名称不能包含路径分隔符 (\\ 或 /)');
+      return;
+    }
+    if (/[\\/:*?"<>|]/.test(name)) {
+      setCreateError('名称包含非法字符');
+      return;
+    }
+    setIsCreating(true);
+    setCreateError(null);
+    try {
+      const parentDir = newItem.parentPath === '.' ? '' : newItem.parentPath;
+      const targetPath = parentDir ? `${parentDir}/${name}` : name;
+      if (electronBridge.isElectron) {
+        const result = await electronBridge.createFile({ filePath: targetPath, type: newItem.type, root: workspaceRoot });
+        if (!result.success) throw new Error(result.error || '创建失败');
+      } else {
+        await axios.post(`${API_BASE}/api/files/create`, {
+          path: targetPath,
+          type: newItem.type,
+          root: workspaceRoot,
+        });
+      }
+      // 刷新目录树
+      refreshPath(parentDir || '.');
+      // 文件创建成功后直接打开编辑器
+      if (newItem.type === 'file') {
+        onFileSelect(targetPath);
+      }
+      setNewItem(null);
+      setNewItemName('');
+    } catch (e: any) {
+      setCreateError(e.response?.data?.error || e.message || '创建失败');
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  /** 渲染新建内联输入行 */
+  const renderNewItemInput = (depth: number) => {
+    if (!newItem) return null;
+    const isFolder = newItem.type === 'folder';
+    return (
+      <div
+        style={{ paddingLeft: `${depth * 10 + 6}px` }}
+        className="flex items-center gap-1.5 py-0.5 px-2 bg-[#3B82F6]/10 border-l border-[#3B82F6]/40"
+      >
+        {isFolder ? (
+          <Folder size={11} className="text-[#3B82F6] shrink-0" />
+        ) : (
+          <File size={10} className="text-[#3B82F6] shrink-0" />
+        )}
+        <input
+          autoFocus
+          type="text"
+          value={newItemName}
+          onChange={(e) => {
+            setNewItemName(e.target.value);
+            setCreateError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleCreateNewItem();
+            } else if (e.key === 'Escape') {
+              setNewItem(null);
+              setNewItemName('');
+              setCreateError(null);
+            }
+          }}
+          disabled={isCreating}
+          className="bg-transparent outline-none text-[10px] text-white w-full min-w-0 placeholder-white/25"
+          placeholder={isFolder ? '新文件夹名称' : '新文件名 (如 notes.txt)'}
+        />
+        {isCreating && <Loader2 size={10} className="animate-spin text-[#3B82F6] shrink-0" />}
+        {createError && (
+          <span className="text-[9px] text-red-400 whitespace-nowrap" title={createError}>{createError}</span>
+        )}
+      </div>
+    );
   };
 
   // ── 拖拽移动处理 ──
@@ -733,9 +857,10 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             </span>
           </div>
         </div>
-        {(node.isDirectory || isArchiveFile(node.name)) && node.isOpen && node.children && (
+        {(node.isDirectory || isArchiveFile(node.name)) && node.isOpen && (
           <div>
-            {node.children.map(child => renderNode(child, depth + 1))}
+            {node.children && node.children.map(child => renderNode(child, depth + 1))}
+            {newItem && newItem.parentPath === node.path && !node.jarBase && renderNewItemInput(depth + 1)}
           </div>
         )}
       </div>
@@ -773,6 +898,35 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             <Copy size={12} className="opacity-50" />
             <span>复制绝对路径 (Absolute)</span>
           </div>
+          {!contextMenu.node.jarBase && (
+          <div className="border-t border-white/5 my-1" />
+          )}
+          {!contextMenu.node.jarBase && (
+          <div 
+            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              startNewItem('file', getParentDirPath(contextMenu.node));
+              setContextMenu(null);
+            }}
+          >
+            <FilePlus size={12} className="opacity-50" />
+            <span>新建文件</span>
+          </div>
+          )}
+          {!contextMenu.node.jarBase && (
+          <div 
+            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              startNewItem('folder', getParentDirPath(contextMenu.node));
+              setContextMenu(null);
+            }}
+          >
+            <FolderPlus size={12} className="opacity-50" />
+            <span>新建文件夹</span>
+          </div>
+          )}
           {!contextMenu.node.jarBase && (
           <div className="border-t border-white/5 my-1" />
           )}
@@ -832,6 +986,37 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             <span>删除{contextMenu.node.isDirectory ? '目录' : '文件'}</span>
           </div>
           )}
+        </div>
+      )}
+
+      {/* 空白区域右键菜单（新建文件/文件夹） */}
+      {emptyMenu && (
+        <div 
+          className="fixed z-50 bg-[#121212] border border-white/10 shadow-2xl py-1 text-white text-[10px] min-w-[170px] font-medium"
+          style={{ top: Math.min(emptyMenu.y, window.innerHeight - 80), left: Math.min(emptyMenu.x, window.innerWidth - 160) }}
+        >
+          <div 
+            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              startNewItem('file', '.');
+              setEmptyMenu(null);
+            }}
+          >
+            <FilePlus size={12} className="opacity-50" />
+            <span>新建文件</span>
+          </div>
+          <div 
+            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              startNewItem('folder', '.');
+              setEmptyMenu(null);
+            }}
+          >
+            <FolderPlus size={12} className="opacity-50" />
+            <span>新建文件夹</span>
+          </div>
         </div>
       )}
 
@@ -1121,20 +1306,50 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
           </div>
         </div>
       ) : (
-        <div className="flex-1 overflow-y-auto py-2">
-          {nodes.map(node => renderNode(node))}
-          {nodes.length === 0 && !isLoading && (
-            <div className="p-4 text-[11px] text-white/60 uppercase font-black tracking-[0.2em] italic text-center border-b border-white/5 mx-4 mt-8 py-4 bg-white/[0.02] shadow-inner">
-              <div className="opacity-20 mb-2">EMPTY_DIRECTORY_MIRROR</div>
-              <div className="underline decoration-white/20 underline-offset-8">未发现文件 (EMPTY_DIR)</div>
-            </div>
-          )}
-          {isLoading && nodes.length === 0 && (
-            <div className="p-4 flex items-center gap-2 text-[10px] text-white uppercase font-black tracking-widest opacity-40">
-              <Loader2 size={12} className="animate-spin" /> 正在加载 (LOADING)...
-            </div>
-          )}
-        </div>
+        <>
+          {/* 文件操作工具栏 (新建文件/文件夹) */}
+          <div className="flex items-center gap-1 px-2 py-1 border-b border-white/5 shrink-0 bg-[#0A0A0A]">
+            <button
+              onClick={() => startNewItem('file', '.')}
+              className="p-1 hover:bg-white/10 rounded-sm transition-colors text-white/50 hover:text-white"
+              title="新建文件 (New File)"
+              data-testid="new-file-btn"
+            >
+              <FilePlus size={10} />
+            </button>
+            <button
+              onClick={() => startNewItem('folder', '.')}
+              className="p-1 hover:bg-white/10 rounded-sm transition-colors text-white/50 hover:text-white"
+              title="新建文件夹 (New Folder)"
+              data-testid="new-folder-btn"
+            >
+              <FolderPlus size={10} />
+            </button>
+            <span className="ml-1 text-[7.5px] uppercase tracking-[0.2em] text-white/20 font-black select-none">新建</span>
+          </div>
+          <div
+            className="flex-1 overflow-y-auto py-2"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setEmptyMenu({ x: e.clientX, y: e.clientY });
+            }}
+          >
+            {nodes.map(node => renderNode(node))}
+            {newItem && newItem.parentPath === '.' && renderNewItemInput(0)}
+            {nodes.length === 0 && !isLoading && (
+              <div className="p-4 text-[11px] text-white/60 uppercase font-black tracking-[0.2em] italic text-center border-b border-white/5 mx-4 mt-8 py-4 bg-white/[0.02] shadow-inner">
+                <div className="opacity-20 mb-2">EMPTY_DIRECTORY_MIRROR</div>
+                <div className="underline decoration-white/20 underline-offset-8">未发现文件 (EMPTY_DIR)</div>
+              </div>
+            )}
+            {isLoading && nodes.length === 0 && (
+              <div className="p-4 flex items-center gap-2 text-[10px] text-white uppercase font-black tracking-widest opacity-40">
+                <Loader2 size={12} className="animate-spin" /> 正在加载 (LOADING)...
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

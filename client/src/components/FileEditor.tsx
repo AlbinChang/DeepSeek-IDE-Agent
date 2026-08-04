@@ -482,7 +482,8 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
             return;
           }
 
-          if (!result || !result.content) {
+          // 空文件也属于合法内容（新建文件场景），仅当 success=false 或 content 非字符串时才视为失败
+          if (!result || result.success === false || typeof result.content !== 'string') {
             throw new Error(`[IO_FAILURE] 文件读取失败 (IPC): ${result?.error || '无内容'}`);
           }
 

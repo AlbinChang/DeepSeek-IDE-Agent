@@ -302,6 +302,37 @@ export class FileIO {
     }
 
     /**
+     * 新建文件或目录 (2026.08 新建文本文件功能)
+     * 目标已存在时抛出 code=EEXIST 错误，避免误覆盖已有内容。
+     * @param isDirectory true 创建目录（含缺失的父目录），false 创建空文本文件
+     * @returns 创建成功后的绝对路径
+     */
+    static async createPath(unsafePath: string, workspaceRoot: string, isDirectory: boolean = false): Promise<string> {
+        const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
+
+        // 目标已存在则拒绝（避免误覆盖已有内容），使用 access 兼容各 Node 版本
+        let exists = false;
+        try {
+            await fs.access(fullPath);
+            exists = true;
+        } catch { /* 不存在 */ }
+        if (exists) {
+            const err: any = new Error(`Path already exists: ${unsafePath}`);
+            err.code = 'EEXIST';
+            throw err;
+        }
+
+        const dir = path.dirname(fullPath);
+        if (isDirectory) {
+            await fs.mkdir(fullPath, { recursive: true });
+        } else {
+            await fs.mkdir(dir, { recursive: true });
+            await fs.writeFile(fullPath, '');
+        }
+        return fullPath;
+    }
+
+    /**
      * 删除文件或目录
      */
     static async deletePath(unsafePath: string, workspaceRoot: string, recursive: boolean = false): Promise<void> {

@@ -259,6 +259,41 @@ export function registerFileIpc(ipcMain: IpcMain) {
         }
     });
 
+    // ── 新建文件/目录 (2026.08 新建文本文件功能) ──
+    ipcMain.handle('file:create', async (_event, params: {
+        filePath: string;
+        type?: 'file' | 'directory' | 'folder';
+        root?: string;
+    }) => {
+        try {
+            const resolvedPath = resolveSafePath(params.filePath, params.root);
+            const name = path.basename(resolvedPath);
+            if (!name || name === '.' || name === '..' || /[\\/:*?"<>|]/.test(name)) {
+                return { success: false, error: `Invalid file name: ${name}` };
+            }
+
+            if (fs.existsSync(resolvedPath)) {
+                return { success: false, error: `Path already exists: ${params.filePath}` };
+            }
+
+            const isDirectory = params.type === 'directory' || params.type === 'folder';
+            const dir = path.dirname(resolvedPath);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+
+            if (isDirectory) {
+                fs.mkdirSync(resolvedPath, { recursive: true });
+            } else {
+                fs.writeFileSync(resolvedPath, '');
+            }
+
+            return { success: true, filePath: resolvedPath, type: isDirectory ? 'directory' : 'file' };
+        } catch (err: any) {
+            return { success: false, error: err?.message || String(err) };
+        }
+    });
+
     // ── 列出目录 ──
     ipcMain.handle('file:list', async (_event, params: {
         dirPath: string;

@@ -489,6 +489,43 @@ async function bootstrap() {
             }
         });
 
+        /**
+         * 新建文件/目录接口 (2026.08 新建文本文件功能)
+         * type: 'file'（默认，创建空文本文件） | 'directory' | 'folder'（创建目录）
+         * 目标已存在时返回 409，避免误覆盖。
+         */
+        server.post('/api/files/create', async (request, reply) => {
+            const { path: filePath, type = 'file', root } = request.body as {
+                path: string,
+                type?: string,
+                root?: string,
+            };
+            if (!filePath) return reply.status(400).send({ error: 'Missing path' });
+
+            const workspaceRoot = root ? PathUtils.normalizePath(root) : undefined;
+            if (!workspaceRoot) return reply.status(412).send({ error: 'Workspace path is required' });
+
+            try {
+                const normalizedPath = PathUtils.normalizePath(filePath);
+                const name = normalizedPath.split('/').pop() || '';
+                if (!name || name === '.' || name === '..') {
+                    return reply.status(400).send({ error: 'Invalid file name' });
+                }
+                if (/[\\/:*?"<>|]/.test(name)) {
+                    return reply.status(400).send({ error: `文件名称包含非法字符: ${name}` });
+                }
+
+                const isDirectory = type === 'directory' || type === 'folder';
+                const fullPath = await FileIO.createPath(normalizedPath, workspaceRoot, isDirectory);
+                return reply.send({ status: 'success', path: fullPath, type: isDirectory ? 'directory' : 'file' });
+            } catch (error: any) {
+                if (error?.code === 'EEXIST') {
+                    return reply.status(409).send({ error: `目标已存在: ${filePath}` });
+                }
+                return reply.status(500).send({ error: error.message });
+            }
+        });
+
         // 对话Agent助手接口 (对齐 7.0 & 27.1 节，支持 20 步自主迭代)
         server.post('/api/chat', async (request, reply) => {
             const { messages, userId, traceId, locale } = request.body as any;

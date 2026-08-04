@@ -161,6 +161,9 @@ export const electronBridge = {
     async writeFile(params: { filePath: string; content: string; encoding?: string; root?: string }) {
         return callIpc('writeFile', [params]);
     },
+    async createFile(params: { filePath: string; type?: 'file' | 'directory' | 'folder'; root?: string }) {
+        return callIpc('createFile', [params]);
+    },
     async listFiles(params: { dirPath: string; depth?: number; root?: string }) {
         return callIpc('listFiles', [params]);
     },

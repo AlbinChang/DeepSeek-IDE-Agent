@@ -26,6 +26,7 @@ export interface ElectronAPI {
     readFile: (params: FileReadParams) => Promise<FileReadResult>;
     readFileBinary: (params: { filePath: string; root?: string }) => Promise<{ success: boolean; base64?: string; size?: number; mimeType?: string; error?: string }>;
     writeFile: (params: FileWriteParams) => Promise<FileWriteResult>;
+    createFile: (params: FileCreateParams) => Promise<FileCreateResult>;
     listFiles: (params: ListFilesParams) => Promise<ListFilesResult>;
     searchFiles: (params: SearchFilesParams) => Promise<SearchFilesResult>;
     getFileMd5: (params: { filePath: string }) => Promise<{ md5: string }>;
@@ -116,6 +117,8 @@ interface FileReadParams { filePath: string; startLine?: number; endLine?: numbe
 interface FileReadResult { content: string; encoding: string; lineCount: number; }
 interface FileWriteParams { filePath: string; content: string; encoding?: string; root?: string; }
 interface FileWriteResult { success: boolean; filePath: string; }
+interface FileCreateParams { filePath: string; type?: 'file' | 'directory' | 'folder'; root?: string; }
+interface FileCreateResult { success: boolean; filePath?: string; type?: 'file' | 'directory'; error?: string; }
 interface ListFilesParams { dirPath: string; depth?: number; root?: string; }
 interface ListFilesResult { files: Array<{ name: string; type: 'file' | 'directory'; path: string; }>; }
 interface SearchFilesParams { pattern: string; root?: string; maxResults?: number; }
@@ -205,6 +208,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     readFile: (params: FileReadParams) => ipcRenderer.invoke('file:read', params),
     readFileBinary: (params: { filePath: string; root?: string }) => ipcRenderer.invoke('file:readBinary', params),
     writeFile: (params: FileWriteParams) => ipcRenderer.invoke('file:write', params),
+    createFile: (params: FileCreateParams) => ipcRenderer.invoke('file:create', params),
     listFiles: (params: ListFilesParams) => ipcRenderer.invoke('file:list', params),
     searchFiles: (params: SearchFilesParams) => ipcRenderer.invoke('file:search', params),
     getFileMd5: (params: { filePath: string }) => ipcRenderer.invoke('file:md5', params),
