@@ -113,6 +113,16 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const isMountedRef = useRef(true);
   const saveFileRef = useRef<() => Promise<void>>(async () => {});
 
+  // 方案十五：编辑器实例自愈（保证 Ctrl+F / 编辑 / 补全始终可用）
+  // @monaco-editor/react 4.7 + React 19（含 StrictMode 双挂载 / HMR 时序）存在
+  // "编辑器被销毁后不再重建" 的缺陷，会留下一个没有模型/视图的空壳编辑器
+  // （症状：内容空白、Ctrl+F 无反应）。通过健康自检检测残废实例，并更换 key
+  // 强制重挂载 <Editor> 组件，重建完整实例。
+  const [editorInstanceKey, setEditorInstanceKey] = useState(0);
+  // 重挂载次数上限：防止根因未消时无限重挂载导致的 React 渲染循环
+  const editorRemountCountRef = useRef(0);
+  const editorHealthTimerRef = useRef<number | null>(null);
+
   // 方案十二：模式切换护栏，记录上一次模式，防止在同模式下错误地执行 setModel(null) 触发 wordHighlighter 销毁
   const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(mode);
 
@@ -711,7 +721,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         modelLockRef.current = false;
       }
     };
-  }, [activeFile, viewMode, fileContent, originalContent, editorReady, languageId]);
+  }, [activeFile, viewMode, fileContent, originalContent, editorReady, languageId, editorInstanceKey]);
 
   // 1. 内容初始化与同步 (对齐 4.1 节已写入物理感知的原则)
   useEffect(() => {
@@ -880,7 +890,75 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       void saveFileRef.current();
     });
+
+    // 显式绑定 Ctrl+F / Cmd+F → 打开查找组件（2026.08 修复：Ctrl+F 查找失效）
+    // 兜底：即使 Monaco 默认键位因环境 / 其他插件被覆盖或丢失，也保证查找可用。
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyF, () => {
+      const findAction = editor.getAction('actions.find');
+      if (findAction) {
+        void findAction.run();
+      }
+    });
+
+    // 自愈重挂载 / 编辑器实例重建后，立即把当前文件模型绑定到新实例，
+    // 保证内容显示与 Ctrl+F 立即可用（不依赖 setupModels 的 RAF 时序，
+    // 修复 2026.08 发现的"重挂载后模型未绑定、编辑器空白"问题）。
+    try {
+      const bindPath = activeFileRef.current;
+      if (bindPath && fileContent && !fileContent.includes('[LOADING]') && !fileContent.includes('[CRITICAL_ERROR]')) {
+        const bindUri = getFixedUri(bindPath, 'file');
+        const bindModel = monaco.editor.getModel(bindUri) || monaco.editor.createModel(fileContent, languageId, bindUri);
+        if (editor.getModel() !== bindModel) {
+          editor.setModel(bindModel);
+        }
+      }
+    } catch (err) {
+      // 首帧内容未就绪等情况：跳过，后续由 setupModels 统一绑定
+      console.warn('[Editor] onMount direct model bind skipped:', err);
+    }
   };
+
+  // 方案十五：编辑器健康自检（保证 Ctrl+F / 编辑始终可用）
+  // 挂载完成且处于 editor 模式、文件内容就绪后，短暂延迟检查主编辑器是否处于
+  // "已创建但已残废"（getDomNode 为空 = 无视图/无模型）状态；若残废则更换 key
+  // 强制重挂载 <Editor>，重建完整实例。此检查仅在 editor 模式且内容已加载时
+  // 生效，避免在 diff / preview / 模式切换过渡期误触发。
+  const isEditorHealthy = () => {
+    const ed = editorRef.current;
+    try {
+      return !!ed && typeof ed.getDomNode === 'function' && !!ed.getDomNode();
+    } catch {
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    if (!editorReady) return;
+    if (viewMode !== 'editor') return;
+    if (!activeFile || fileContent.includes('[LOADING]') || fileContent.includes('[CRITICAL_ERROR]')) return;
+    if (editorRemountCountRef.current >= 3) return; // 重挂载上限，防止死循环
+
+    if (editorHealthTimerRef.current) {
+      window.clearTimeout(editorHealthTimerRef.current);
+    }
+    editorHealthTimerRef.current = window.setTimeout(() => {
+      editorHealthTimerRef.current = null;
+      if (!isMountedRef.current) return;
+      if (isEditorHealthy()) return;
+      // 编辑器残废 → 强制重挂载（新的 key 会让 React 重建 <Editor> 组件，
+      // 重置 @monaco-editor/react 内部的 "already created" 守卫）
+      console.warn('[Editor] Detected unhealthy editor instance, force remount to restore editing / Ctrl+F');
+      editorRemountCountRef.current += 1;
+      setEditorInstanceKey(k => k + 1);
+    }, 150);
+
+    return () => {
+      if (editorHealthTimerRef.current) {
+        window.clearTimeout(editorHealthTimerRef.current);
+        editorHealthTimerRef.current = null;
+      }
+    };
+  }, [editorReady, editorInstanceKey, viewMode, activeFile, fileContent]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -898,6 +976,11 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       if (modelBindRafRef.current) {
         cancelAnimationFrame(modelBindRafRef.current);
         modelBindRafRef.current = null;
+      }
+      // 清理编辑器健康自检定时器
+      if (editorHealthTimerRef.current) {
+        window.clearTimeout(editorHealthTimerRef.current);
+        editorHealthTimerRef.current = null;
       }
       detachEditorModels();
       disposeAllEditorModels();
@@ -999,7 +1082,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           style={{ display: viewMode === 'editor' && !isTransitioning ? 'block' : 'none' }}
         >
           <Editor
-            key="fixed-editor-instance"
+            key={`fixed-editor-instance-${editorInstanceKey}`}
             height="100%"
             theme="vs-dark"
             /* 
@@ -1026,6 +1109,15 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
               wrappingStrategy: 'advanced',
               wrappingIndent: 'same',
               padding: { top: 8, bottom: 8 },
+              // 2026.08: 显式开启/配置查找组件，保证 Ctrl+F 稳定可用：
+              // - autoFindInSelection: 多行选区时 Ctrl+F 自动开启"在选区中查找"
+              // - seedSearchStringFromSelection: 从当前选中/光标处单词预填搜索词
+              // - addExtraSpaceOnTop: 保持顶部空间稳定，避免查找栏弹出时内容跳动
+              find: {
+                addExtraSpaceOnTop: false,
+                autoFindInSelection: 'multiline',
+                seedSearchStringFromSelection: 'selection',
+              },
               // 方案十四：强制禁用内置的行装饰器/行号克隆。
               // 在 React/Monaco 混合渲染且带有 model.setValue 更新时，
               // 某些版本的 Monaco 可能在 VDOM 动画期间错误地保留上一帧的行渲染。
