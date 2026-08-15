@@ -100,16 +100,73 @@ function buildMainProcess() {
     }
 }
 
-// ── 端口清理：杀掉占用目标端口的进程 ──
+// ── 全局子进程句柄与退出清理标志 ──
+let viteProcess = null;
+let electronProcess = null;
+let isCleaningUp = false;
+
+// ── 终止进程树（跨平台杀死进程及其所有子进程） ──
+function killProcessTree(proc) {
+    if (!proc || !proc.pid) return;
+    try {
+        if (process.platform === 'win32') {
+            execSync(`taskkill /PID ${proc.pid} /T /F`, { stdio: 'ignore' });
+        } else {
+            try {
+                process.kill(-proc.pid, 'SIGKILL');
+            } catch {
+                proc.kill('SIGKILL');
+            }
+        }
+    } catch {
+        try {
+            proc.kill();
+        } catch {
+            // 静默跳过
+        }
+    }
+}
+
+// ── 端口清理：强力杀掉占用目标端口的所有进程 ──
 function killPortProcess(port) {
     try {
         if (process.platform === 'win32') {
-            execSync(
-                `Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }`,
-                { shell: 'powershell.exe', stdio: 'pipe', timeout: 5000 }
-            );
+            // 方案 1: netstat + taskkill（原生秒级精准终止）
+            try {
+                const output = execSync('netstat -ano -p tcp', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+                const lines = output.split('\n');
+                const pids = new Set();
+                for (const line of lines) {
+                    if (line.includes(`:${port}`) && line.toUpperCase().includes('LISTENING')) {
+                        const parts = line.trim().split(/\s+/);
+                        const pid = parseInt(parts[parts.length - 1], 10);
+                        if (pid && pid > 4 && pid !== process.pid) {
+                            pids.add(pid);
+                        }
+                    }
+                }
+                for (const pid of pids) {
+                    try {
+                        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+                    } catch {
+                        // ignore
+                    }
+                }
+            } catch {
+                // netstat 提取失败时走 PowerShell 兜底
+            }
+
+            // 方案 2: PowerShell 兜底查询
+            try {
+                execSync(
+                    `Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -gt 4 -and $_.OwningProcess -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }`,
+                    { shell: 'powershell.exe', stdio: 'ignore', timeout: 3000 }
+                );
+            } catch {
+                // ignore
+            }
         } else {
-            execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, { stdio: 'pipe', timeout: 3000 });
+            execSync(`lsof -ti:${port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore', timeout: 3000 });
         }
         log('DEV', colors.cyan, `Port ${port} cleaned`);
     } catch {
@@ -117,61 +174,101 @@ function killPortProcess(port) {
     }
 }
 
+// ── 统一清理退出函数 ──
+function cleanup(exitCode = 0) {
+    if (isCleaningUp) return;
+    isCleaningUp = true;
+
+    log('DEV', colors.yellow, 'Shutting down dev environment and releasing port 5174...');
+
+    if (viteProcess) {
+        killProcessTree(viteProcess);
+        viteProcess = null;
+    }
+
+    if (electronProcess) {
+        killProcessTree(electronProcess);
+        electronProcess = null;
+    }
+
+    // 强力释放 Vite 端口
+    killPortProcess(VITE_PORT);
+
+    process.exit(exitCode);
+}
+
 // ── 步骤 3: 启动 Vite Dev Server ──
 function startViteDevServer() {
     return new Promise((resolve) => {
-        // 先清理端口
+        // 启动前先强力清理端口占用
         killPortProcess(VITE_PORT);
 
         log('VITE', colors.yellow, `Starting Vite dev server on port ${VITE_PORT}...`);
 
-        const vite = spawn('npx', ['vite', '--host', '0.0.0.0', '--port', VITE_PORT, '--strictPort'], {
-            cwd: CLIENT_DIR,
-            stdio: 'pipe',
-            shell: true,
-            env: { ...process.env, VITE_DEV_PORT: VITE_PORT },
-        });
+        const spawnVite = () => {
+            const vite = spawn('npx', ['vite', '--host', '0.0.0.0', '--port', VITE_PORT, '--strictPort'], {
+                cwd: CLIENT_DIR,
+                stdio: 'pipe',
+                shell: true,
+                env: { ...process.env, VITE_DEV_PORT: VITE_PORT },
+            });
 
-        let started = false;
-        let accumulated = '';
+            let started = false;
+            let accumulated = '';
 
-        vite.stdout.on('data', (data) => {
-            const text = data.toString();
-            process.stdout.write(`${colors.cyan}[VITE]${colors.reset} ${text}`);
-            accumulated += text;
+            vite.stdout.on('data', (data) => {
+                const text = data.toString();
+                process.stdout.write(`${colors.cyan}[VITE]${colors.reset} ${text}`);
+                accumulated += text;
 
-            // 累积检测：避免 "Local:" 跨 chunk 分割导致漏检
-            if (!started && (accumulated.includes('Local:') || accumulated.includes('ready in'))) {
-                started = true;
-                log('VITE', colors.green, `Dev server ready at http://localhost:${VITE_PORT}`);
-                resolve(vite);
-            }
-        });
+                // 累积检测：避免 "Local:" 跨 chunk 分割导致漏检
+                if (!started && (accumulated.includes('Local:') || accumulated.includes('ready in'))) {
+                    started = true;
+                    log('VITE', colors.green, `Dev server ready at http://localhost:${VITE_PORT}`);
+                    viteProcess = vite;
+                    resolve(vite);
+                }
+            });
 
-        vite.stderr.on('data', (data) => {
-            process.stderr.write(`${colors.red}[VITE:ERR]${colors.reset} ${data}`);
-        });
+            vite.stderr.on('data', (data) => {
+                const text = data.toString();
+                process.stderr.write(`${colors.red}[VITE:ERR]${colors.reset} ${text}`);
 
-        vite.on('error', (err) => {
-            if (!started) {
-                log('VITE', colors.red, 'Failed to start:', err.message);
-                process.exit(1);
-            }
-        });
-
-        // 超时回退（端口占用的 fallback）
-        setTimeout(() => {
-            if (!started) {
-                log('VITE', colors.yellow, 'Timeout waiting for Vite, retrying with port cleanup...');
-                vite.kill();
-                // 二次清理后重试
-                setTimeout(() => {
+                // 若发现端口被占用，立即自动清理端口并重试启动
+                if (!started && text.includes('already in use')) {
+                    log('VITE', colors.yellow, `Detected port ${VITE_PORT} collision, force killing zombie process...`);
+                    killProcessTree(vite);
                     killPortProcess(VITE_PORT);
-                    log('VITE', colors.yellow, 'Please restart manually if port is still occupied');
-                    process.exit(1);
-                }, 2000);
-            }
-        }, 15000);
+                    setTimeout(() => {
+                        if (!started) {
+                            log('VITE', colors.yellow, `Retrying Vite dev server on port ${VITE_PORT}...`);
+                            spawnVite();
+                        }
+                    }, 800);
+                }
+            });
+
+            vite.on('error', (err) => {
+                if (!started) {
+                    log('VITE', colors.red, 'Failed to start:', err.message);
+                    cleanup(1);
+                }
+            });
+
+            // 15 秒启动超时兜底
+            setTimeout(() => {
+                if (!started) {
+                    log('VITE', colors.yellow, 'Timeout waiting for Vite, retrying with port cleanup...');
+                    killProcessTree(vite);
+                    killPortProcess(VITE_PORT);
+                    cleanup(1);
+                }
+            }, 15000);
+
+            return vite;
+        };
+
+        spawnVite();
     });
 }
 
@@ -192,14 +289,23 @@ function startElectron() {
         },
     });
 
+    electronProcess = electron;
+
+    // 当用户手动关闭 Electron 主窗口或主进程退出时，自动触发全局清理（释放 Vite 与端口 5174）
     electron.on('close', (code) => {
-        log('ELECTRON', colors.yellow, `Electron exited with code ${code}`);
-        process.exit(code || 0);
+        log('ELECTRON', colors.yellow, `Electron window closed (code: ${code}). Automatically terminating Vite and cleaning port ${VITE_PORT}...`);
+        cleanup(code || 0);
+    });
+
+    electron.on('exit', (code) => {
+        if (!isCleaningUp) {
+            cleanup(code || 0);
+        }
     });
 
     electron.on('error', (err) => {
         log('ELECTRON', colors.red, 'Failed to start Electron:', err.message);
-        process.exit(1);
+        cleanup(1);
     });
 
     return electron;
@@ -212,6 +318,15 @@ async function main() {
     console.log(`${colors.green}╚══════════════════════════════════════╝${colors.reset}`);
     console.log('');
 
+    // 注册全局终止信号与退出监听
+    process.on('SIGINT', () => cleanup(0));
+    process.on('SIGTERM', () => cleanup(0));
+    process.on('SIGHUP', () => cleanup(0));
+    process.on('uncaughtException', (err) => {
+        console.error('[DEV:FATAL]', err);
+        cleanup(1);
+    });
+
     ensureDist();
 
     // 1. 编译 Preload（CJS，供 Electron 加载）
@@ -221,22 +336,10 @@ async function main() {
     buildMainProcess();
 
     // 3. 启动 Vite Dev Server
-    const viteProcess = await startViteDevServer();
+    await startViteDevServer();
 
     // 4. 启动 Electron
-    const electronProcess = startElectron();
-
-    // 清理
-    const cleanup = () => {
-        log('DEV', colors.yellow, 'Shutting down...');
-        viteProcess.kill();
-        electronProcess.kill();
-        killPortProcess(VITE_PORT);
-        process.exit(0);
-    };
-
-    process.on('SIGINT', cleanup);
-    process.on('SIGTERM', cleanup);
+    startElectron();
 }
 
 main().catch((err) => {
