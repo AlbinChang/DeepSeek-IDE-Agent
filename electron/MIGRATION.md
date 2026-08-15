@@ -56,8 +56,8 @@
 ## 运行与构建命令
 
 ```bash
-npm test                 # 运行全套 Vitest 单元测试
-npm run electron:dev     # 开发模式（esbuild + Vite + Electron）
-npm run electron:build   # 全量构建
-npm run electron:dist    # 生成桌面安装包
+pnpm test                 # 运行全套 Vitest 单元测试
+pnpm run electron:dev     # 开发模式（esbuild + Vite + Electron）
+pnpm run electron:build   # 全量构建
+pnpm run electron:dist    # 生成桌面安装包
 ```

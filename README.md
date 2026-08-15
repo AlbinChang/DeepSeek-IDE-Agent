@@ -31,14 +31,11 @@
 | 依赖 | 版本 | 说明 |
 |------|------|------|
 | **Node.js** | ≥ 20.x（推荐 20.19+ LTS） | [下载地址](https://nodejs.org/) |
-| **npm** | ≥ 10.x | 随 Node.js 附带 |
+| **pnpm** | ≥ 9.x / 10.x / 11.x | 包管理器（`npm i -g pnpm`） |
 | **Windows** | 10 / 11 x64 | 当前主要支持平台 |
 | **Git** | ≥ 2.30（可选） | 版本控制功能需要 |
 
-> ⚠️ **Windows 用户注意**：`node-pty` 包含 C++ 原生模块，需安装 [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)（勾选「使用 C++ 的桌面开发」工作负荷）。或运行：
-> ```powershell
-> npm install --global windows-build-tools
-> ```
+> ⚠️ **Windows 用户注意**：`node-pty` 包含 C++ 原生模块，需安装 [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)（勾选「使用 C++ 的桌面开发」工作负荷）。
 
 ---
 
@@ -65,24 +62,21 @@ DEEPSEEK_MODEL=deepseek-chat
 ### 2.3 安装依赖
 
 ```powershell
-# 1. 安装前端依赖（React、Monaco Editor 等）
-npm install --prefix client
-
-# 2. 安装 Electron 及原生模块（首次需下载 Electron 二进制 ~100MB）
-cd electron && npm install && cd ..
+# 一键安装全量依赖（基于 pnpm workspace，包含 client、server、electron）
+pnpm install
 ```
 
 > 下载缓慢？设置国内镜像加速：
 > ```powershell
 > $env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
-> cd electron && npm install && cd ..
+> pnpm install
 > ```
 
 ### 2.4 启动
 
 ```powershell
 # 一键启动开发模式（编译 + Vite + Electron）
-npm run electron:dev
+pnpm run electron:dev
 ```
 
 启动流程：
@@ -281,13 +275,13 @@ web-ide-agent/
 ### 单元测试
 
 ```powershell
-npm test                  # 运行全量后端及工具链 Vitest 单元测试
+pnpm test                 # 运行全量后端及工具链 Vitest 单元测试
 ```
 
 ### 本地构建
 
 ```powershell
-npm run electron:build    # 构建 preload + main + renderer
+pnpm run electron:build   # 构建 preload + main + renderer
 ```
 
 构建产物：
@@ -300,7 +294,7 @@ client/dist/                     # Vite 构建的前端静态资源
 ### 生成安装包
 
 ```powershell
-npm run electron:dist     # 生成 Windows 桌面安装包 (.exe)
+pnpm run electron:dist    # 生成 Windows 桌面安装包 (.exe)
 
 # 产物输出至 electron/release/
 ```
@@ -314,7 +308,7 @@ npm run electron:dist     # 生成 Windows 桌面安装包 (.exe)
 ### Q: 启动报错 `node-pty` 找不到？
 **A**: `node-pty` 是 C++ 原生模块，需要先安装 Visual Studio Build Tools（见[环境要求](#1-环境要求)），然后重建：
 ```powershell
-cd electron && npm rebuild node-pty && cd ..
+pnpm --filter deepseek-ide-agent-electron rebuild node-pty
 ```
 
 ### Q: Electron 窗口白屏？
@@ -337,47 +331,6 @@ cd electron && npm rebuild node-pty && cd ..
 <p align="center">
   <sub>Built with ❤️ using DeepSeek · Electron · React · TypeScript</sub>
 </p>
-}
-```
-
-工具将以 `{服务器名}__{原生工具名}` 格式注册（如 `github__search_repositories`），对 AI 模型完全透明。
-
-> **离线环境注意**：如果在无网络的生产机上使用 MCP 工具，需将 MCP 服务器的 npm 包预先打包部署。详见 [DEPLOYMENT.md](./DEPLOYMENT.md) 第 1.3.3 节。
-
-### Agent 行为契约（关键硬约束）
-
-## 6. 常见问题
-
-### Q1：启动后 Electron 白屏？
-
-检查终端中是否显示 `[VITE] Dev server ready`。手动访问 `http://localhost:5174` 确认前端可用。如果端口被占用，`dev.mjs` 会自动清理。
-
-### Q2：AI 对话无响应？
-
-确认 `.env` 中 `DEEPSEEK_API_KEY` 有效。可手动测试：
-```powershell
-Get-Content d:\web-ide-agent\.env
-```
-
-### Q3：如何离线部署？
-
-构建安装包后直接分发 `electron/release/` 中的 `.exe` 文件即可，无需 Node.js 环境。
-
-### Q4：`node-pty` 编译失败？
-
-安装 [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)，勾选 "Desktop development with C++"。
-
-
-```bash
-# 1. 拷贝项目
-cp -r deepseek-ide-agent deepseek-ide-agent-2    # macOS/Linux
-
-
-## 7. 项目结构
-
-```
-web-ide-agent/
-├── .env                    ← API Key 配置
 ├── package.json            ← 根级脚本
 ├── client/                 ← 前端（React 19 + Vite + Monaco Editor）
 │   └── src/

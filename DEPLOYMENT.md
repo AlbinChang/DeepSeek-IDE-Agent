@@ -7,12 +7,11 @@
 ```powershell
 cd d:\web-ide-agent
 
-# 确保依赖已安装
-npm install --prefix client
-cd electron && npm install && cd ..
+# 安装全量依赖（基于 pnpm workspace）
+pnpm install
 
 # 生成桌面安装包
-npm run electron:dist
+pnpm run electron:dist
 ```
 
 产物位于 `electron/release/`：

@@ -54,7 +54,7 @@ function buildPreload() {
     log('PRELOAD', colors.magenta, 'Building preload script...');
     try {
         execSync(
-            `npx esbuild src/main/preload.ts --bundle --platform=node --target=node20 --outfile=dist/preload.cjs --format=cjs --external:electron`,
+            `pnpm exec esbuild src/main/preload.ts --bundle --platform=node --target=node20 --outfile=dist/preload.cjs --format=cjs --external:electron`,
             { cwd: ELECTRON_ROOT, stdio: 'pipe' }
         );
         log('PRELOAD', colors.green, 'Preload built → dist/preload.cjs');
@@ -71,7 +71,7 @@ function buildMainProcess() {
         // ESM 格式，external 所有 Electron 运行时提供的模块
         execSync(
             [
-                'npx esbuild src/main/index.ts',
+                'pnpm exec esbuild src/main/index.ts',
                 '--bundle',
                 '--platform=node',
                 '--target=node20',
@@ -206,7 +206,7 @@ function startViteDevServer() {
         log('VITE', colors.yellow, `Starting Vite dev server on port ${VITE_PORT}...`);
 
         const spawnVite = () => {
-            const vite = spawn('npx', ['vite', '--host', '0.0.0.0', '--port', VITE_PORT, '--strictPort'], {
+            const vite = spawn('pnpm', ['exec', 'vite', '--host', '0.0.0.0', '--port', VITE_PORT, '--strictPort'], {
                 cwd: CLIENT_DIR,
                 stdio: 'pipe',
                 shell: true,
@@ -276,7 +276,11 @@ function startViteDevServer() {
 function startElectron() {
     log('ELECTRON', colors.green, 'Starting Electron...');
 
-    const electronBin = path.join(ELECTRON_ROOT, 'node_modules', '.bin', 'electron.cmd');
+    const isWin = process.platform === 'win32';
+    const binName = isWin ? 'electron.cmd' : 'electron';
+    const localBin = path.join(ELECTRON_ROOT, 'node_modules', '.bin', binName);
+    const rootBin = path.join(PROJECT_ROOT, 'node_modules', '.bin', binName);
+    const electronBin = fs.existsSync(localBin) ? localBin : (fs.existsSync(rootBin) ? rootBin : binName);
 
     const electron = spawn(electronBin, ['.'], {
         cwd: ELECTRON_ROOT,

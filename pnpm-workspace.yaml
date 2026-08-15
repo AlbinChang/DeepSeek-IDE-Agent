@@ -1,0 +1,9 @@
+packages:
+  - 'client'
+  - 'server'
+  - 'electron'
+
+allowBuilds:
+  electron: true
+  esbuild: true
+  node-pty: true

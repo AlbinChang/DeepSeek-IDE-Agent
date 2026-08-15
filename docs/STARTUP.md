@@ -15,14 +15,11 @@
 | 依赖 | 版本要求 | 说明 |
 |------|----------|------|
 | **Node.js** | ≥ 20.x | 推荐 20.19+ LTS |
-| **npm** | ≥ 10.x | 随 Node.js 附带 |
+| **pnpm** | ≥ 9.x / 10.x / 11.x | 包管理器（`npm i -g pnpm`） |
 | **Windows** | 10/11 x64 | 开发 & 打包平台 |
 | **Git** | ≥ 2.30 | 源码管理功能需要 |
 
-> **注意**：`node-pty` 包含 C++ 原生模块，Windows 上需要 **Microsoft Visual C++ Build Tools** 或 **Windows SDK**。如遇 `node-pty` 安装失败，运行：
-> ```powershell
-> npm install --global windows-build-tools
-> ```
+> **注意**：`node-pty` 包含 C++ 原生模块，Windows 上需要 **Microsoft Visual C++ Build Tools** 或 **Windows SDK**。如遇 `node-pty` 编译失败，安装 Visual Studio Build Tools（勾选「使用 C++ 的桌面开发」）。
 
 ---
 
@@ -46,17 +43,14 @@ DEEPSEEK_API_KEY=sk-your-api-key-here
 ```powershell
 cd d:\web-ide-agent
 
-# 安装前端依赖
-npm install --prefix client
-
-# 安装 Electron 及原生模块（含 electron 二进制 ~100MB，需等待）
-cd electron && npm install && cd ..
+# 安装项目全量依赖（基于 pnpm workspace，自动安装 client、server、electron 所有依赖）
+pnpm install
 ```
 
 > 如果下载 `electron` 二进制缓慢，可设置国内镜像：
 > ```powershell
 > $env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
-> cd electron && npm install && cd ..
+> pnpm install
 > ```
 
 ### 2.3 启动开发模式
@@ -65,7 +59,7 @@ cd electron && npm install && cd ..
 cd d:\web-ide-agent
 
 # 一键启动（编译 preload → 启动 Vite → 启动 Electron）
-npm run electron:dev
+pnpm run electron:dev
 ```
 
 启动后会自动：
@@ -104,7 +98,7 @@ npm run electron:dev
 cd d:\web-ide-agent
 
 # 构建所有组件（preload + main process + renderer）
-npm run electron:build
+pnpm run electron:build
 ```
 
 构建产物：
@@ -122,18 +116,18 @@ client/dist/                # Vite 构建的前端静态文件
 cd d:\web-ide-agent
 
 # 仅打包目录（测试用，不生成安装包）
-npm run electron:pack
+pnpm run electron:pack
 
 # 生成安装包
-npm run electron:dist       # 当前平台
+pnpm run electron:dist       # 当前平台
 ```
 
 平台特定打包：
 ```powershell
 cd electron
-npm run dist:win            # Windows .exe (NSIS 安装包)
-npm run dist:mac            # macOS .dmg
-npm run dist:linux          # Linux .AppImage
+pnpm run dist:win            # Windows .exe (NSIS 安装包)
+pnpm run dist:mac            # macOS .dmg
+pnpm run dist:linux          # Linux .AppImage
 ```
 
 打包产物位于 `electron/release/`。
@@ -226,13 +220,10 @@ web-ide-agent/
 
 ## 5. 常见问题
 
-### Q: `npm install` 在 electron/ 目录失败？
+### Q: `pnpm install` 在 electron/ 目录失败？
 
 A: `node-pty` 是 C++ 原生模块，需要编译工具链。
-```powershell
-# 安装 Windows 构建工具（管理员终端）
-npm install --global --production windows-build-tools
-```
+请安装 Visual Studio Build Tools（勾选「使用 C++ 的桌面开发」工作负荷）。
 
 ### Q: `electron:dev` 启动后白屏？
 
@@ -254,7 +245,7 @@ A: 开发模式下自动打开 DevTools。Main Process 日志输出在启动终�
 A: 设置环境变量后启动：
 ```powershell
 $env:VITE_DEV_PORT="5175"
-npm run electron:dev
+pnpm run electron:dev
 ```
 
 ---
@@ -265,17 +256,16 @@ npm run electron:dev
 # ═══════════════════════════════════════
 # 首次安装
 # ═══════════════════════════════════════
-npm install --prefix client
-cd electron && npm install && cd ..
+pnpm install
 
 # ═══════════════════════════════════════
 # 日常开发
 # ═══════════════════════════════════════
-npm run electron:dev     # 启动 Electron 开发模式
+pnpm run electron:dev     # 启动 Electron 开发模式
 
 # ═══════════════════════════════════════
 # 构建 & 部署
 # ═══════════════════════════════════════
-npm run electron:build   # 构建应用
-npm run electron:dist    # 生成桌面安装包
+pnpm run electron:build   # 构建应用
+pnpm run electron:dist    # 生成桌面安装包
 ```

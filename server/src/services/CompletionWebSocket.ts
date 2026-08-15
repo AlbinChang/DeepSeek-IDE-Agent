@@ -124,7 +124,7 @@ export function setupCompletionWebSocket(fastify: FastifyInstance, agentService:
                             socket.send(JSON.stringify({ jsonrpc: '2.0', id, result: 'started' }));
                         }
 
-                        const result = await CompletionService.streamCompletion({
+                        const result: any = await CompletionService.streamCompletion({
                             workspaceRoot: root,
                             userId,
                             prefix,
