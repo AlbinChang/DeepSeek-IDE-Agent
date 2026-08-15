@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
 import { electronBridge } from '@/services/electron-bridge';
+import { resolveWorkspaceRelativePath } from '@/utils/markdownLinks';
 
 const Mermaid = lazy(() => import('@/components/Mermaid').then((mod) => ({ default: mod.Mermaid })));
 
@@ -26,14 +27,6 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
     if (content.length <= MARKDOWN_PREVIEW_CHAR_LIMIT) return content;
     return `${content.slice(0, MARKDOWN_PREVIEW_CHAR_LIMIT)}\n\n> Markdown 预览内容过长，已截断渲染以避免页面内存溢出；原始字符数：${content.length.toLocaleString('zh-CN')}`;
   }, [content]);
-
-  const normalizeExternalHref = (href?: string) => {
-    const raw = String(href || '').trim();
-    if (!raw) return '#';
-    if (/^(https?:|mailto:|tel:)/i.test(raw)) return raw;
-    if (raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../') || raw.startsWith('#')) return raw;
-    return '#';
-  };
 
   return (
     <div className="h-full w-full overflow-auto bg-[#0a0a0a] px-8 pb-8 pt-px font-sans scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
@@ -84,11 +77,13 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
             ),
             th: ({ children }) => <th className="border-b border-white/10 px-4 py-3 bg-white/5 font-bold text-left text-white/60 uppercase tracking-tighter">{children}</th>,
             td: ({ children }) => <td className="border-b border-white/5 px-4 py-3 text-white/80 font-mono italic">{children}</td>,
-            // 链接
+            // 链接（区分外部 URL / 工作区相对链接 / 锚点）
+            // 2026.08 修复：preview 中点击工作区内的 .md / 文件链接不再新开窗口，
+            // 而是解析为工作区相对路径，并通过 ui:file:select 在当前窗口的编辑器中打开。
             a: ({ href, children }) => (
-              <a href={normalizeExternalHref(href)} target="_blank" rel="noopener noreferrer nofollow" className="text-white underline decoration-white/20 hover:decoration-white/60 transition-all">
+              <MarkdownLink href={href} filePath={filePath} workspaceRoot={workspaceRoot}>
                 {children}
-              </a>
+              </MarkdownLink>
             ),
             // 图片渲染（支持外部URL、本地相对路径、加载失败回退）
             img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} filePath={filePath} workspaceRoot={workspaceRoot} />,
@@ -134,6 +129,63 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
         }
       `}</style>
     </div>
+  );
+};
+
+// ── 链接渲染组件（区分外部 URL / 工作区相对链接 / 锚点） ──
+// 2026.08 修复：preview 视图中点击工作区内的文件链接（如 docs/user/guide/python-sdk.md）时，
+// 之前在 target=_blank 下新开窗口（裸相对路径甚至退化为 href="#"），
+// 现改为解析为「相对于 workspaceRoot 的相对路径」，并通过 ui:file:select
+// 事件在当前窗口的文件编辑器中打开；仅 http/https/mailto/tel 外部链接保持新窗口。
+
+interface MarkdownLinkProps {
+  href?: string;
+  children?: React.ReactNode;
+  filePath?: string;
+  workspaceRoot?: string | null;
+}
+
+const MarkdownLink: React.FC<MarkdownLinkProps> = ({ href, children, filePath }) => {
+  const raw = String(href || '').trim();
+  const isExternal = /^(https?:|mailto:|tel:)/i.test(raw);
+
+  const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!raw || raw === '#') return;
+
+    // 锚点：在当前预览内滚动定位（不再新开窗口）
+    if (raw.startsWith('#')) {
+      e.preventDefault();
+      const id = raw.slice(1);
+      if (id) {
+        const target = document.getElementById(id);
+        target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      return;
+    }
+
+    // 工作区相对链接：解析路径 → 在当前窗口的编辑器中打开
+    if (!isExternal) {
+      e.preventDefault();
+      const resolved = resolveWorkspaceRelativePath(raw, filePath);
+      if (resolved) {
+        console.log(`[MarkdownPreview] Opening workspace file from link: ${resolved}`);
+        window.dispatchEvent(new CustomEvent('ui:file:select', { detail: resolved }));
+      }
+      return;
+    }
+    // 外部链接：保持默认行为（新窗口）
+  };
+
+  return (
+    <a
+      href={isExternal ? raw : raw.startsWith('#') ? raw : '#'}
+      target={isExternal ? '_blank' : undefined}
+      rel="noopener noreferrer nofollow"
+      onClick={handleClick}
+      className="text-white underline decoration-white/20 hover:decoration-white/60 transition-all"
+    >
+      {children}
+    </a>
   );
 };
 

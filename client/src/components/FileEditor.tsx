@@ -14,6 +14,7 @@ import { useAgentContext } from '@/providers/AgentContext';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { electronBridge } from '@/services/electron-bridge';
 import { isSameFilePath } from '@/utils/path';
+import { resolveWorkspaceRelativePath } from '@/utils/markdownLinks';
 
 // PDF 预览组件按需懒加载（避免为所有用户增加 ~200KB bundle）
 const PdfPreview = lazy(() => import('@/components/PdfPreview'));
@@ -122,6 +123,8 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   // 重挂载次数上限：防止根因未消时无限重挂载导致的 React 渲染循环
   const editorRemountCountRef = useRef(0);
   const editorHealthTimerRef = useRef<number | null>(null);
+  // Markdown 文件链接提供器（Ctrl+悬停手势 / Ctrl+点击打开文件的注册句柄）
+  const markdownLinkProviderRef = useRef<monaco.IDisposable | null>(null);
 
   // 方案十二：模式切换护栏，记录上一次模式，防止在同模式下错误地执行 setModel(null) 触发 wordHighlighter 销毁
   const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(mode);
@@ -846,7 +849,54 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     } else {
         console.error('[Editor] _codeEditorService not found on editor instance');
     }
-    
+
+    // ── Markdown 文件链接提供器（2026.08：编辑模式下 Ctrl+悬停显示超链接手势、Ctrl+点击打开文件） ──
+    // Monaco 默认仅检测 http(s)/mailto 等 URL；对于 `[text](docs/user/guide/python-sdk.md)` 这类
+    // 工作区相对链接，需要自定义 LinkProvider 提供 range + file:// URI 才能被识别。
+    // 完整链路：检测到链接（下划线）→ Ctrl/Cmd+悬停显示手型光标（isEnabled 检查 hasTriggerModifier）
+    // → Ctrl/Cmd+点击 → LinkDetector.openLinkOccurrence → openerService.open(file://uri)
+    // → EditorOpener → _codeEditorService.openCodeEditor（上方已重写）→ ui:file:select → 打开文件。
+    if (markdownLinkProviderRef.current) {
+        markdownLinkProviderRef.current.dispose();
+        markdownLinkProviderRef.current = null;
+    }
+    try {
+        markdownLinkProviderRef.current = monaco.languages.registerLinkProvider('markdown', {
+            provideLinks: (model) => {
+                const content = model.getValue();
+                // 从模型 URI 推导当前 MD 文件的工作区相对路径（用于解析 ./ 与 ../）
+                const sourceFilePath = model.uri?.scheme === 'file'
+                    ? String(model.uri.path || '').replace(/^\/+/, '')
+                    : '';
+                const links: monaco.languages.ILink[] = [];
+                // 匹配 [text](url)（URL 不含空格/换行；忽略 title 语法）
+                const linkRegex = /\[([^\]]*)\]\(([^)\s]+)\)/g;
+                let m: RegExpExecArray | null;
+                while ((m = linkRegex.exec(content)) !== null) {
+                    const rawUrl = (m[2] || '').trim();
+                    if (!rawUrl || rawUrl.startsWith('#')) continue; // 空链接 / 锚点
+                    if (/^(https?:|mailto:|tel:)/i.test(rawUrl)) continue; // 外部协议走默认行为
+                    // URL 在内容中的偏移：'[' + text + '](' 之后
+                    const urlStart = m.index + (m[1]?.length || 0) + 3;
+                    const urlEnd = urlStart + rawUrl.length;
+                    const resolved = resolveWorkspaceRelativePath(rawUrl, sourceFilePath);
+                    if (!resolved) continue;
+                    const start = model.getPositionAt(urlStart);
+                    const end = model.getPositionAt(urlEnd);
+                    links.push({
+                        range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column),
+                        url: monaco.Uri.parse(`file:///${resolved.replace(/\\/g, '/')}`),
+                        tooltip: `打开文件: ${resolved}`,
+                    });
+                }
+                return { links };
+            },
+        });
+        console.log('[Editor] markdown link provider registered (Ctrl+hover → hand cursor, Ctrl+click → open file)');
+    } catch (err) {
+        console.warn('[Editor] markdown link provider registration failed:', err);
+    }
+
     // 监听选择变更
     editor.onDidChangeCursorSelection((e) => {
 
@@ -981,6 +1031,15 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       if (editorHealthTimerRef.current) {
         window.clearTimeout(editorHealthTimerRef.current);
         editorHealthTimerRef.current = null;
+      }
+      // 注销 Markdown 链接提供器
+      if (markdownLinkProviderRef.current) {
+        try {
+          markdownLinkProviderRef.current.dispose();
+        } catch {
+          /* silent */
+        }
+        markdownLinkProviderRef.current = null;
       }
       detachEditorModels();
       disposeAllEditorModels();
@@ -1124,7 +1183,10 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
               // 缩减装饰器宽度，并依赖 fixed-editor-instance 模式下的原生单层渲染。
               fixedOverflowWidgets: true,
               glyphMargin: false, 
-              folding: true
+              folding: true,
+              // 2026.08: 显式开启链接检测（配合自定义 markdown LinkProvider，
+              // 支持 [text](相对路径) 的 Ctrl+悬停手型光标与 Ctrl+点击打开文件）
+              links: true
             }}
           />
         </div>
