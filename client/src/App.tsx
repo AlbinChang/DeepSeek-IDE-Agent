@@ -102,6 +102,7 @@ function App() {
     if (index < 0) return;
     const newFiles = openFiles.filter(f => f !== filePath);
     setOpenFiles(newFiles);
+    window.dispatchEvent(new CustomEvent('ui:file:close', { detail: { filePath } }));
     if (newFiles.length === 0) {
       setActiveFileIndex(-1);
       setEditorMode('editor');

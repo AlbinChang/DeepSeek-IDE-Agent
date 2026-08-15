@@ -27,6 +27,22 @@ const PdfPreview = lazy(() => import('@/components/PdfPreview'));
 const editorViewStateCache = new Map<string, monaco.editor.IEditorViewState | null>();
 
 /**
+ * 文件内容内存缓存（跨 Tab 切换无感秒切，避免重复读取与重新渲染闪烁）
+ * Key: 文件相对路径, Value: 文件文本内容
+ */
+const fileContentCache = new Map<string, string>();
+
+/**
+ * 文件已保存物理内容缓存（记录最后一次从磁盘读取或保存成功时的内容，用于准确计算 isDirty）
+ */
+const fileSavedContentCache = new Map<string, string>();
+
+/**
+ * 文件编码缓存
+ */
+const fileEncodingCache = new Map<string, string>();
+
+/**
  * 文件视图模式缓存（跨文件切换保持各自的查看模式：如 md 的 preview、csv 的 table）
  * Key: 文件相对路径, Value: 'editor' | 'preview' | 'table' | 'pdf' | 'image' | 'diff'
  */
@@ -60,6 +76,14 @@ function resolveTargetViewMode(
   return 'editor';
 }
 
+/**
+ * 生成固定 URI（全局静态函数）
+ */
+function getFixedUri(path: string, type: 'file' | 'git-original' | 'git-modified') {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return monaco.Uri.parse(`${type}://${normalizedPath}`);
+}
+
 interface FileEditorProps {
   activeFile: string;
   isLocked: boolean;
@@ -79,9 +103,21 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const [editorReady, setEditorReady] = useState(false);
   const activeFileRef = useRef(activeFile);
-  const [fileContent, setFileContent] = useState<string>('');
-  const [savedContent, setSavedContent] = useState<string>('');
-  const [fileEncoding, setFileEncoding] = useState<string>('utf8');
+  const [fileContent, setFileContent] = useState<string>(() => {
+    if (!activeFile) return '';
+    const mainUri = getFixedUri(activeFile, 'file');
+    const existingModel = monaco.editor.getModel(mainUri);
+    if (existingModel) return existingModel.getValue();
+    return fileContentCache.get(activeFile) || '';
+  });
+  const [savedContent, setSavedContent] = useState<string>(() => {
+    if (!activeFile) return '';
+    return fileSavedContentCache.get(activeFile) || '';
+  });
+  const [fileEncoding, setFileEncoding] = useState<string>(() => {
+    if (!activeFile) return 'utf8';
+    return fileEncodingCache.get(activeFile) || 'utf8';
+  });
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [originalContent, setOriginalContent] = useState<string>('');
@@ -213,6 +249,8 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       if (!result.success) throw new Error(result.error || 'File write failed');
 
       if (!isMountedRef.current) return;
+      fileSavedContentCache.set(activeFile, contentToSave);
+      fileContentCache.set(activeFile, contentToSave);
       setSavedContent(contentToSave);
       setFileContent(contentToSave);
       setIsDirty(false);
@@ -374,12 +412,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   // 2. 移除所有自动管理的 Props (path, value, original, modified)，改用 100% 手动 setModel。
   // 3. 模型托管在 Ref 中，异步清理，防止同步销毁引发的断言错误。
 
-  // 生成固定 URI
-  const getFixedUri = (path: string, type: 'file' | 'git-original' | 'git-modified') => {
-    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    return monaco.Uri.parse(`${type}://${normalizedPath}`);
-  };
-
   const detachEditorModels = () => {
     if (editorRef.current) {
       const currentModel = editorRef.current.getModel();
@@ -392,29 +424,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       try { editorRef.current.setModel(null); } catch (e) { /* silent skip */ }
     }
     if (diffEditorRef.current) {
-      try { diffEditorRef.current.setModel(null); } catch (e) { /* silent skip */ }
-    }
-  };
-
-  const detachModelsForPath = (targetPath: string) => {
-    if (!targetPath) return;
-    const mainUri = getFixedUri(targetPath, 'file').toString();
-    const originalUri = getFixedUri(targetPath, 'git-original').toString();
-    const modifiedUri = getFixedUri(targetPath, 'git-modified').toString();
-
-    if (editorRef.current?.getModel()?.uri.toString() === mainUri) {
-      // 在解除绑定前保存光标/滚动位置，以便重新打开时恢复
-      const state = editorRef.current.saveViewState();
-      if (state) {
-        editorViewStateCache.set(targetPath, state);
-      }
-      try { editorRef.current.setModel(null); } catch (e) { /* silent skip */ }
-    }
-
-    const diffModel = diffEditorRef.current?.getModel?.();
-    const diffOriginalUri = diffModel?.original?.uri?.toString?.();
-    const diffModifiedUri = diffModel?.modified?.uri?.toString?.();
-    if (diffOriginalUri === originalUri || diffModifiedUri === modifiedUri) {
       try { diffEditorRef.current.setModel(null); } catch (e) { /* silent skip */ }
     }
   };
@@ -443,6 +452,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   useEffect(() => {
     if (!activeFile) {
         setFileContent('');
+        setSavedContent('');
         return;
     }
 
@@ -457,15 +467,48 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       return;
     }
 
+    // 在切换目标文件前，保存前一个文件的光标/滚动位置
+    const previousFile = activeFileRef.current;
+    if (previousFile && previousFile !== activeFile && editorRef.current) {
+      const state = editorRef.current.saveViewState();
+      if (state) {
+        editorViewStateCache.set(previousFile, state);
+      }
+    }
+    activeFileRef.current = activeFile;
+
+    const mainUri = getFixedUri(activeFile, 'file');
+    const existingModel = monaco.editor.getModel(mainUri);
+    const cachedContent = existingModel ? existingModel.getValue() : fileContentCache.get(activeFile);
+
+    // ── 内存缓存快速恢复（0ms 无感秒切）──
+    // 当文件此前已打开过（Model 或 Cache 存在），直接复用内存状态，绝不设置 [LOADING] 占位符，
+    // 避免重复从磁盘拉取导致的白屏/黑屏闪烁，同时完整保留未保存的编辑内容与光标/撤销栈。
+    if (cachedContent !== undefined) {
+      const saved = fileSavedContentCache.get(activeFile) ?? cachedContent;
+      const encoding = fileEncodingCache.get(activeFile) || 'utf8';
+      setFileEncoding(encoding);
+      setSavedContent(saved);
+      setFileContent(cachedContent);
+      setIsDirty(cachedContent !== saved);
+
+      if (viewMode === 'diff') {
+        const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
+        if (effectiveRoot) {
+          electronBridge.gitDiff({ root: effectiveRoot, file: activeFile })
+            .then((gitResult: any) => setOriginalContent(gitResult?.content || ''))
+            .catch(() => setOriginalContent(''));
+        }
+      }
+      return;
+    }
+
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const signal = controller.signal;
 
     const loadingPlaceholder = `/** \n * [LOADING] ${fileName}...\n * SYSTEM: 正在从服务器提取物理内容\n */`;
-    
-    // 方案九：在 Loading 阶段也不再直接 setValue，而是等待 fetch 结束后统一进 setupModels 绑定
     setFileContent(loadingPlaceholder);
-    activeFileRef.current = activeFile;
 
     const fetchContent = async () => {
       try {
@@ -492,10 +535,15 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
             }
 
             console.log(`[Editor] JAR entry fetched for ${activeFile}, length: ${jarResult.content?.length || 0}`);
-            setFileEncoding(jarResult.encoding || 'utf8');
-            setSavedContent(jarResult.content || '');
+            const content = jarResult.content || '';
+            const encoding = jarResult.encoding || 'utf8';
+            fileContentCache.set(activeFile, content);
+            fileSavedContentCache.set(activeFile, content);
+            fileEncodingCache.set(activeFile, encoding);
+            setFileEncoding(encoding);
+            setSavedContent(content);
             setIsDirty(false);
-            setFileContent(jarResult.content || '');
+            setFileContent(content);
             return;
           }
 
@@ -516,10 +564,15 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           }
 
           console.log(`[Editor] Content fetched (IPC) for ${activeFile}, length: ${result.content.length}`);
-          setFileEncoding(result.encoding || 'utf8');
-          setSavedContent(result.content || '');
+          const content = result.content;
+          const encoding = result.encoding || 'utf8';
+          fileContentCache.set(activeFile, content);
+          fileSavedContentCache.set(activeFile, content);
+          fileEncodingCache.set(activeFile, encoding);
+          setFileEncoding(encoding);
+          setSavedContent(content);
           setIsDirty(false);
-          setFileContent(result.content || '');
+          setFileContent(content);
 
           // Diff 模式：通过 IPC 获取 Git 原始版本
           if (viewMode === 'diff') {
@@ -556,35 +609,24 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         abortControllerRef.current = null;
       }
     };
-  }, [activeFile, fileName, isPdf, viewMode, workspaceRoot]);
+  }, [activeFile, fileName, isPdf, isImage, viewMode, workspaceRoot]);
 
-  // [Section 方案九] 删除原先 262 行的独立 useEffect 逻辑以避免多头管理
-  /* 
-    旧逻辑：
-    useEffect(() => {
-    if (editorReady && editorRef.current && fileContent) { ... editorRef.current.setValue(fileContent); ... }
-    }, [editorReady, fileContent]);
-  */
-
-  // 2. 编辑器模型生命周期管理
-  const isDiffMode = useMemo(() => viewMode === 'diff', [viewMode]);
-
+  // 监听 Tab 关闭事件，释放被关闭文件的模型与缓存（防内存泄漏）
   useEffect(() => {
-    // 在卸载或切换前断开模型引用，避免 Monaco 内部状态污染。
-    return () => {
-      // 关键：在卸载或切换前，先清理编辑器对各模型的引用，防止物理渲染与 VDOM 逻辑冲突导致 TextModel disposed 错误
-      detachEditorModels();
+    const handleFileClosed = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const closedPath = detail?.filePath;
+      if (!closedPath) return;
+      disposeModelsForPath(closedPath);
+      editorViewStateCache.delete(closedPath);
+      fileContentCache.delete(closedPath);
+      fileSavedContentCache.delete(closedPath);
+      fileEncodingCache.delete(closedPath);
+      fileViewModeCache.delete(closedPath);
     };
-  }, [languageId, activeFile, editorReady, workspaceRoot, isDiffMode]);
-
-  useEffect(() => {
-    if (!activeFile) return;
-    const pathToDetach = activeFile;
-
-    return () => {
-      detachModelsForPath(pathToDetach);
-    };
-  }, [activeFile, workspaceRoot]);
+    window.addEventListener('ui:file:close', handleFileClosed);
+    return () => window.removeEventListener('ui:file:close', handleFileClosed);
+  }, []);
 
   // 3. 语义热键与配置同步 (对齐 20.0 节)
   useEffect(() => {
@@ -685,7 +727,9 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
             if (viewMode !== lastModeRef.current && diffEditorRef.current) {
                diffEditorRef.current.setModel(null);
             }
-            editorRef.current.setModel(mainModel);
+            if (editorRef.current.getModel() !== mainModel) {
+              editorRef.current.setModel(mainModel);
+            }
             // 恢复上次关闭/切换前的光标和滚动位置
             const savedState = editorViewStateCache.get(activeFile);
             if (savedState && editorRef.current) {
@@ -702,17 +746,14 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
             if (viewMode !== lastModeRef.current && editorRef.current) {
                const editorState = editorRef.current.saveViewState();
                if (editorState) editorViewStateCache.set(activeFile, editorState);
-               editorRef.current.setModel(null);
             }
             diffEditorRef.current.setModel({ original: originalModel, modified: modifiedModel });
           } else {
-            // 进入非编辑模式（preview/pdf/image/table 等）前保存当前光标位置并解绑模型
+            // 进入非编辑模式（preview/pdf/image/table 等）前保存当前光标位置
             if (viewMode !== lastModeRef.current && editorRef.current) {
                const editorState = editorRef.current.saveViewState();
                if (editorState) editorViewStateCache.set(activeFile, editorState);
             }
-            editorRef.current?.setModel(null);
-            diffEditorRef.current?.setModel(null);
           }
           lastModeRef.current = viewMode;
         } catch (err: any) {
@@ -775,6 +816,17 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           root: effectiveRoot,
         });
         if (!result || !result.content) return;
+        fileContentCache.set(changedPath, result.content);
+        fileSavedContentCache.set(changedPath, result.content);
+        fileEncodingCache.set(changedPath, result.encoding || 'utf8');
+
+        // 同步更新已存在的 Monaco 模型
+        const modelUri = getFixedUri(changedPath, 'file');
+        const existingModel = monaco.editor.getModel(modelUri);
+        if (existingModel && existingModel.getValue() !== result.content) {
+          existingModel.setValue(result.content);
+        }
+
         // 确认仍未切换到其他文件（归一化比较，防竞态切文件）
         if (!isSameFilePath(activeFileRef.current || '', changedPath, effectiveRoot)) return;
         setFileEncoding(result.encoding || 'utf8');
@@ -946,6 +998,9 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     editor.onDidChangeModelContent(() => {
       const current = editor.getValue();
       setFileContent(current);
+      if (activeFileRef.current) {
+        fileContentCache.set(activeFileRef.current, current);
+      }
       setIsDirty(current !== savedContentRef.current);
     });
 
