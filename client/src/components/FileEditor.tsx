@@ -88,7 +88,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(() =>
     resolveTargetViewMode(activeFile, mode)
   );
-  const [isTransitioning, setIsTransitioning] = useState(false);
   const diffEditorRef = useRef<any>(null);
   const savedContentRef = useRef('');
   const modelBindRafRef = useRef<number | null>(null);
@@ -252,16 +251,12 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     }
   }, [activeFile]);
 
-  // 同步外部 mode 与当前文件对应的 viewMode (附带渲染屏障防止 Monaco 竞争)
+  // 同步外部 mode 与当前文件对应的 viewMode
   useEffect(() => {
     const targetMode = resolveTargetViewMode(activeFile, mode);
     if (targetMode !== viewMode) {
-      console.log(`[Editor] Switching mode for ${activeFile} from ${viewMode} to ${targetMode} (Manual Ownership Active)`);
-      setIsTransitioning(true);
+      console.log(`[Editor] Switching mode for ${activeFile} from ${viewMode} to ${targetMode}`);
       setViewMode(targetMode);
-      // 给 React 一个 Tick(20ms) 来彻底卸载旧组件，避免 TextModel 泄露
-      const timer = setTimeout(() => setIsTransitioning(false), 20);
-      return () => clearTimeout(timer);
     }
   }, [activeFile, mode, viewMode]);
 
@@ -387,6 +382,13 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
   const detachEditorModels = () => {
     if (editorRef.current) {
+      const currentModel = editorRef.current.getModel();
+      if (currentModel && activeFileRef.current) {
+        const state = editorRef.current.saveViewState();
+        if (state) {
+          editorViewStateCache.set(activeFileRef.current, state);
+        }
+      }
       try { editorRef.current.setModel(null); } catch (e) { /* silent skip */ }
     }
     if (diffEditorRef.current) {
@@ -577,13 +579,10 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
   useEffect(() => {
     if (!activeFile) return;
-    const pathToDispose = activeFile;
+    const pathToDetach = activeFile;
 
     return () => {
-      window.setTimeout(() => {
-        detachModelsForPath(pathToDispose);
-        disposeModelsForPath(pathToDispose);
-      }, 0);
+      detachModelsForPath(pathToDetach);
     };
   }, [activeFile, workspaceRoot]);
 
@@ -706,8 +705,8 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                editorRef.current.setModel(null);
             }
             diffEditorRef.current.setModel({ original: originalModel, modified: modifiedModel });
-          } else if (viewMode === 'preview' || viewMode === 'image') {
-            // 进入非编辑模式前保存当前光标位置
+          } else {
+            // 进入非编辑模式（preview/pdf/image/table 等）前保存当前光标位置并解绑模型
             if (viewMode !== lastModeRef.current && editorRef.current) {
                const editorState = editorRef.current.saveViewState();
                if (editorState) editorViewStateCache.set(activeFile, editorState);
@@ -1151,7 +1150,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         {/* 1. 普通编辑层 (Editor Layer) */}
         <div 
           className="absolute inset-0" 
-          style={{ display: viewMode === 'editor' && !isTransitioning ? 'block' : 'none' }}
+          style={{ display: viewMode === 'editor' ? 'block' : 'none' }}
         >
           <Editor
             key={`fixed-editor-instance-${editorInstanceKey}`}
@@ -1207,7 +1206,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         {/* 2. 差异对比层 (Diff Layer) */}
         <div 
           className="absolute inset-0" 
-          style={{ display: viewMode === 'diff' && !isTransitioning ? 'block' : 'none' }}
+          style={{ display: viewMode === 'diff' ? 'block' : 'none' }}
         >
           <DiffEditor
             key="fixed-diff-instance"
@@ -1312,13 +1311,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                 <span className="text-[8pt]">请切换到编辑视图查看原始内容</span>
               </div>
             )}
-          </div>
-        )}
-
-        {/* 4. 过渡占位符 */}
-        {isTransitioning && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-10 animate-in fade-in duration-200">
-            <div className="text-[9px] font-black tracking-[0.4em] text-white/40 uppercase italic">Rebuilding_Monaco_State...</div>
           </div>
         )}
       </div>
