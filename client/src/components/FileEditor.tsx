@@ -103,6 +103,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const [editorReady, setEditorReady] = useState(false);
   const activeFileRef = useRef(activeFile);
+  const [prevActiveFile, setPrevActiveFile] = useState(activeFile);
   const [fileContent, setFileContent] = useState<string>(() => {
     if (!activeFile) return '';
     const mainUri = getFixedUri(activeFile, 'file');
@@ -124,6 +125,43 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(() =>
     resolveTargetViewMode(activeFile, mode)
   );
+
+  // 关键：当 activeFile 切换时，在 render 阶段立即同步目标文件状态与 viewMode，
+  // 彻底消除跨 Tab 切换时的 1 帧陈旧数据传递（解决 md 预览切回其他文件时的内容错乱）
+  if (activeFile !== prevActiveFile) {
+    setPrevActiveFile(activeFile);
+    const targetViewMode = resolveTargetViewMode(activeFile, mode);
+    setViewMode(targetViewMode);
+
+    if (!activeFile) {
+      setFileContent('');
+      setSavedContent('');
+      setFileEncoding('utf8');
+      setIsDirty(false);
+      setOriginalContent('');
+    } else {
+      const mainUri = getFixedUri(activeFile, 'file');
+      const existingModel = monaco.editor.getModel(mainUri);
+      const cachedContent = existingModel ? existingModel.getValue() : fileContentCache.get(activeFile);
+      const cachedSaved = fileSavedContentCache.get(activeFile);
+      const cachedEncoding = fileEncodingCache.get(activeFile) || 'utf8';
+
+      if (cachedContent !== undefined) {
+        setFileContent(cachedContent);
+        const saved = cachedSaved ?? cachedContent;
+        setSavedContent(saved);
+        setFileEncoding(cachedEncoding);
+        setIsDirty(cachedContent !== saved);
+      } else {
+        const initialFileName = activeFile.split(/[/\\]/).pop() || activeFile;
+        const loadingPlaceholder = `/** \n * [LOADING] ${initialFileName}...\n * SYSTEM: 正在从服务器提取物理内容\n */`;
+        setFileContent(loadingPlaceholder);
+        setSavedContent('');
+        setIsDirty(false);
+      }
+    }
+  }
+
   const diffEditorRef = useRef<any>(null);
   const savedContentRef = useRef('');
   const modelBindRafRef = useRef<number | null>(null);
@@ -467,12 +505,14 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       return;
     }
 
-    // 在切换目标文件前，保存前一个文件的光标/滚动位置
+    // 在切换目标文件前，保存前一个文件的光标/滚动位置（根据当前 Model 真实路径精准缓存）
     const previousFile = activeFileRef.current;
     if (previousFile && previousFile !== activeFile && editorRef.current) {
+      const curModel = editorRef.current.getModel();
+      const curModelPath = curModel?.uri.scheme === 'file' ? curModel.uri.path.replace(/^\/+/, '') : previousFile;
       const state = editorRef.current.saveViewState();
-      if (state) {
-        editorViewStateCache.set(previousFile, state);
+      if (state && curModelPath) {
+        editorViewStateCache.set(curModelPath, state);
       }
     }
     activeFileRef.current = activeFile;
@@ -540,10 +580,25 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
             fileContentCache.set(activeFile, content);
             fileSavedContentCache.set(activeFile, content);
             fileEncodingCache.set(activeFile, encoding);
-            setFileEncoding(encoding);
-            setSavedContent(content);
-            setIsDirty(false);
-            setFileContent(content);
+
+            // 精准同步/创建对应 activeFile 的 Model
+            const targetUri = getFixedUri(activeFile, 'file');
+            let model = monaco.editor.getModel(targetUri);
+            if (!model) {
+              model = monaco.editor.createModel(content, languageId, targetUri);
+            } else if (model.getValue() !== content) {
+              model.setValue(content);
+            }
+
+            if (activeFileRef.current === activeFile) {
+              setFileEncoding(encoding);
+              setSavedContent(content);
+              setIsDirty(false);
+              setFileContent(content);
+              if (editorRef.current && model && editorRef.current.getModel() !== model) {
+                editorRef.current.setModel(model);
+              }
+            }
             return;
           }
 
@@ -569,10 +624,25 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           fileContentCache.set(activeFile, content);
           fileSavedContentCache.set(activeFile, content);
           fileEncodingCache.set(activeFile, encoding);
-          setFileEncoding(encoding);
-          setSavedContent(content);
-          setIsDirty(false);
-          setFileContent(content);
+
+          // 精准同步/创建对应 activeFile 的 Model
+          const targetUri = getFixedUri(activeFile, 'file');
+          let model = monaco.editor.getModel(targetUri);
+          if (!model) {
+            model = monaco.editor.createModel(content, languageId, targetUri);
+          } else if (model.getValue() !== content) {
+            model.setValue(content);
+          }
+
+          if (activeFileRef.current === activeFile) {
+            setFileEncoding(encoding);
+            setSavedContent(content);
+            setIsDirty(false);
+            setFileContent(content);
+            if (editorRef.current && model && editorRef.current.getModel() !== model) {
+              editorRef.current.setModel(model);
+            }
+          }
 
           // Diff 模式：通过 IPC 获取 Git 原始版本
           if (viewMode === 'diff') {
@@ -609,7 +679,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         abortControllerRef.current = null;
       }
     };
-  }, [activeFile, fileName, isPdf, isImage, viewMode, workspaceRoot]);
+  }, [activeFile, fileName, isPdf, isImage, viewMode, workspaceRoot, languageId]);
 
   // 监听 Tab 关闭事件，释放被关闭文件的模型与缓存（防内存泄漏）
   useEffect(() => {
@@ -685,28 +755,41 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   // 手动控制内容同步与模型绑定
   useEffect(() => {
     if (!activeFile || !editorReady) return;
+    const targetFile = activeFile;
 
-    const mainUri = getFixedUri(activeFile, 'file');
-    const originalUri = getFixedUri(activeFile, 'git-original');
-    const modifiedUri = getFixedUri(activeFile, 'git-modified');
+    const mainUri = getFixedUri(targetFile, 'file');
+    const originalUri = getFixedUri(targetFile, 'git-original');
+    const modifiedUri = getFixedUri(targetFile, 'git-modified');
 
     const setupModels = () => {
-      // 屏障控制：如果内容还在加载中，跳过绑定以防闪烁或任务取消异常
-      if (fileContent.includes('[LOADING]')) return;
       if (modelLockRef.current) return;
       modelLockRef.current = true;
 
-      // 获取或创建模型
-      const mainModel = monaco.editor.getModel(mainUri) || monaco.editor.createModel(fileContent, languageId, mainUri);
-      const originalModel = monaco.editor.getModel(originalUri) || monaco.editor.createModel(originalContent, languageId, originalUri);
-      const modifiedModel = monaco.editor.getModel(modifiedUri) || monaco.editor.createModel(fileContent, languageId, modifiedUri);
+      // 1. 获取或创建属于当前 targetFile 的 mainModel
+      const cachedContent = fileContentCache.get(targetFile);
+      const initialText = cachedContent !== undefined ? cachedContent : fileContent;
+      let mainModel = monaco.editor.getModel(mainUri);
+      if (!mainModel) {
+        mainModel = monaco.editor.createModel(initialText, languageId, mainUri);
+      }
 
-      // 同步内容 (仅在差异时更新)
-      if (mainModel.getValue() !== fileContent) mainModel.setValue(fileContent);
-      if (modifiedModel.getValue() !== fileContent) modifiedModel.setValue(fileContent);
-      if (originalModel.getValue() !== originalContent) originalModel.setValue(originalContent);
+      // 2. 获取或创建 originalModel 与 modifiedModel（用于 diff）
+      let originalModel = monaco.editor.getModel(originalUri);
+      if (!originalModel) {
+        originalModel = monaco.editor.createModel(originalContent, languageId, originalUri);
+      } else if (originalModel.getValue() !== originalContent) {
+        originalModel.setValue(originalContent);
+      }
 
-      // 方案十三：帧对齐绑定 + 绝对应对隔离
+      let modifiedModel = monaco.editor.getModel(modifiedUri);
+      const modContent = mainModel.getValue();
+      if (!modifiedModel) {
+        modifiedModel = monaco.editor.createModel(modContent, languageId, modifiedUri);
+      } else if (modifiedModel.getValue() !== modContent) {
+        modifiedModel.setValue(modContent);
+      }
+
+      // 3. 方案十三：帧对齐绑定 + 绝对应对隔离
       // 使用 requestAnimationFrame 将 setModel 彻底推入下一帧，
       // 确保 React VDOM 所有的物理切换（Editor/Diff 显示隐藏）已在硬件层面渲染完成。
       if (modelBindRafRef.current) {
@@ -716,13 +799,13 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       modelBindRafRef.current = requestAnimationFrame(() => {
         modelBindRafRef.current = null;
         // 增加 Final Guard: 如果在等待帧的过程中 activeFile 已经变了，放弃本次绑定
-        if (!isMountedRef.current || activeFileRef.current !== activeFile) {
+        if (!isMountedRef.current || activeFileRef.current !== targetFile) {
           modelLockRef.current = false;
           return;
         }
 
         try {
-          if (viewMode === 'editor' && editorRef.current) {
+          if (viewMode === 'editor' && editorRef.current && mainModel) {
             // 仅在显式模式切换时解绑，以减少 wordHighlighter 的 dispose 压力
             if (viewMode !== lastModeRef.current && diffEditorRef.current) {
                diffEditorRef.current.setModel(null);
@@ -731,28 +814,32 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
               editorRef.current.setModel(mainModel);
             }
             // 恢复上次关闭/切换前的光标和滚动位置
-            const savedState = editorViewStateCache.get(activeFile);
+            const savedState = editorViewStateCache.get(targetFile);
             if (savedState && editorRef.current) {
               try {
                 editorRef.current.restoreViewState(savedState as monaco.editor.ICodeEditorViewState);
                 editorRef.current.focus();
               } catch (e) {
                 // 如果内容发生了根本变化（如行数大幅增减），恢复可能失败，清除过期缓存
-                editorViewStateCache.delete(activeFile);
+                editorViewStateCache.delete(targetFile);
               }
             }
-          } else if (viewMode === 'diff' && diffEditorRef.current) {
+          } else if (viewMode === 'diff' && diffEditorRef.current && originalModel && modifiedModel) {
             // 从 editor 切到 diff 模式前保存当前光标位置
             if (viewMode !== lastModeRef.current && editorRef.current) {
                const editorState = editorRef.current.saveViewState();
-               if (editorState) editorViewStateCache.set(activeFile, editorState);
+               if (editorState) editorViewStateCache.set(targetFile, editorState);
             }
             diffEditorRef.current.setModel({ original: originalModel, modified: modifiedModel });
           } else {
             // 进入非编辑模式（preview/pdf/image/table 等）前保存当前光标位置
-            if (viewMode !== lastModeRef.current && editorRef.current) {
+            if (viewMode !== lastModeRef.current && editorRef.current && editorRef.current.getModel()) {
                const editorState = editorRef.current.saveViewState();
-               if (editorState) editorViewStateCache.set(activeFile, editorState);
+               if (editorState) {
+                 const curModel = editorRef.current.getModel();
+                 const curPath = curModel?.uri.scheme === 'file' ? curModel.uri.path.replace(/^\/+/, '') : targetFile;
+                 if (curPath) editorViewStateCache.set(curPath, editorState);
+               }
             }
           }
           lastModeRef.current = viewMode;
@@ -777,7 +864,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         modelLockRef.current = false;
       }
     };
-  }, [activeFile, viewMode, fileContent, originalContent, editorReady, languageId, editorInstanceKey]);
+  }, [activeFile, viewMode, originalContent, editorReady, languageId, editorInstanceKey]);
 
   // 1. 内容初始化与同步 (对齐 4.1 节已写入物理感知的原则)
   useEffect(() => {
@@ -996,12 +1083,22 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     });
 
     editor.onDidChangeModelContent(() => {
-      const current = editor.getValue();
-      setFileContent(current);
-      if (activeFileRef.current) {
-        fileContentCache.set(activeFileRef.current, current);
+      const model = editor.getModel();
+      if (!model) return;
+      const modelUriPath = model.uri.scheme === 'file'
+        ? model.uri.path.replace(/^\/+/, '')
+        : '';
+      const current = model.getValue();
+
+      if (modelUriPath) {
+        fileContentCache.set(modelUriPath, current);
       }
-      setIsDirty(current !== savedContentRef.current);
+
+      if (modelUriPath && isSameFilePath(modelUriPath, activeFileRef.current, workspaceRoot)) {
+        setFileContent(current);
+        const saved = fileSavedContentCache.get(modelUriPath) ?? current;
+        setIsDirty(current !== saved);
+      }
     });
 
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
@@ -1022,10 +1119,14 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     // 修复 2026.08 发现的"重挂载后模型未绑定、编辑器空白"问题）。
     try {
       const bindPath = activeFileRef.current;
-      if (bindPath && fileContent && !fileContent.includes('[LOADING]') && !fileContent.includes('[CRITICAL_ERROR]')) {
+      if (bindPath) {
         const bindUri = getFixedUri(bindPath, 'file');
-        const bindModel = monaco.editor.getModel(bindUri) || monaco.editor.createModel(fileContent, languageId, bindUri);
-        if (editor.getModel() !== bindModel) {
+        const cached = fileContentCache.get(bindPath);
+        let bindModel = monaco.editor.getModel(bindUri);
+        if (!bindModel && cached && !cached.includes('[LOADING]') && !cached.includes('[CRITICAL_ERROR]')) {
+          bindModel = monaco.editor.createModel(cached, languageId, bindUri);
+        }
+        if (bindModel && editor.getModel() !== bindModel) {
           editor.setModel(bindModel);
         }
       }
