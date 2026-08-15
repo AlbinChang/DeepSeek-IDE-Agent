@@ -1,4 +1,4 @@
-﻿import React, { Suspense, lazy, useState, useEffect } from 'react';
+﻿import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -18,6 +18,17 @@ interface MarkdownPreviewProps {
 
 const MARKDOWN_PREVIEW_CHAR_LIMIT = 200_000;
 
+// ── 阅读位置跨生命周期缓存（与 FileEditor 的 editorViewStateCache 同模式）──
+// 背景：MarkdownPreview 在 FileEditor 中是「条件挂载」的（viewMode === 'preview' 才存在）。
+// 用户切换到编辑视图 / 其他文件 / 其他预览类型时，整个子树被 React 卸载，滚动位置
+// （scrollTop）作为纯 DOM 状态随之销毁；切回预览时重新挂载，scrollTop 归零 → 阅读位置丢失。
+// 修复：以文件路径为键缓存 scrollTop，卸载前保存、重挂载后恢复。
+const markdownPreviewScrollCache = new Map<string, number>();
+// 内容稳定判定：ResizeObserver 观察期内 scrollHeight 连续 N 次不变，视为图片/Mermaid 已加载完成
+const SCROLL_STABLE_COUNT = 2;
+// 校正安全超时：超过该时长强制结束校正（兜底防泄漏）
+const SCROLL_RESTORE_TIMEOUT_MS = 2000;
+
 /**
  * 对应技术规范：Markdown 预览增强系统 (极简黑白版)
  * 移除所有彩色标题，锁定为黑白灰色调，仅通过字重和边框区分。
@@ -28,8 +39,102 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
     return `${content.slice(0, MARKDOWN_PREVIEW_CHAR_LIMIT)}\n\n> Markdown 预览内容过长，已截断渲染以避免页面内存溢出；原始字符数：${content.length.toLocaleString('zh-CN')}`;
   }, [content]);
 
+  // ── 阅读位置保持（scroll 恢复）──
+  // 卸载前保存、重挂载后恢复；因图片懒加载 / Mermaid 异步渲染导致内容高度持续增长，
+  // 用 ResizeObserver 在内容稳定前反复校正 scrollTop，避免恢复到错误位置。
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const restoreTargetRef = useRef<number | null>(null);
+  const restoreStableCountRef = useRef(0);
+  const restoreRafRef = useRef<number | null>(null);
+  const restoreObserverRef = useRef<ResizeObserver | null>(null);
+  const restoreTimeoutRef = useRef<number | null>(null);
+
+  // 卸载时保存当前阅读位置（key 为文件路径，React 先移除 DOM 节点后再执行 cleanup，
+  // 此时 scrollTop 仍可读）
+  useEffect(() => {
+    return () => {
+      const key = filePath || '';
+      const container = scrollContainerRef.current;
+      if (key && container) {
+        markdownPreviewScrollCache.set(key, container.scrollTop);
+      }
+    };
+  }, [filePath]);
+
+  // 挂载后恢复上次阅读位置，并在内容高度稳定前持续校正
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    const key = filePath || '';
+    const saved = key ? markdownPreviewScrollCache.get(key) : undefined;
+    if (!container || typeof saved !== 'number' || saved <= 0) return;
+
+    restoreTargetRef.current = saved;
+    restoreStableCountRef.current = 0;
+    container.scrollTop = saved;
+
+    let lastHeight = container.scrollHeight;
+    const applyRestore = () => {
+      if (restoreTargetRef.current == null) return;
+      container.scrollTop = restoreTargetRef.current;
+    };
+    const scheduleApply = () => {
+      if (restoreRafRef.current !== null) return;
+      restoreRafRef.current = requestAnimationFrame(() => {
+        restoreRafRef.current = null;
+        applyRestore();
+      });
+    };
+
+    // 内容高度随图片/Mermaid 异步加载而增长，直接设置 scrollTop 会被后续布局覆盖。
+    // 监听高度变化：变化则重置稳定计数并重新校正；连续两次观察高度不变 → 内容已稳定 → 结束校正。
+    const observer = new ResizeObserver(() => {
+      const h = container.scrollHeight;
+      if (h !== lastHeight) {
+        lastHeight = h;
+        restoreStableCountRef.current = 0;
+        scheduleApply();
+      } else {
+        restoreStableCountRef.current++;
+        if (restoreStableCountRef.current >= SCROLL_STABLE_COUNT) {
+          restoreTargetRef.current = null;
+          observer.disconnect();
+          restoreObserverRef.current = null;
+          return;
+        }
+        scheduleApply();
+      }
+    });
+    restoreObserverRef.current = observer;
+    observer.observe(container);
+
+    // 安全兜底：无论高度是否稳定，超时后强制结束校正（防止观察器长期残留）
+    restoreTimeoutRef.current = window.setTimeout(() => {
+      restoreTargetRef.current = null;
+      if (restoreObserverRef.current) {
+        restoreObserverRef.current.disconnect();
+        restoreObserverRef.current = null;
+      }
+      restoreTimeoutRef.current = null;
+    }, SCROLL_RESTORE_TIMEOUT_MS);
+
+    return () => {
+      if (restoreObserverRef.current) {
+        restoreObserverRef.current.disconnect();
+        restoreObserverRef.current = null;
+      }
+      if (restoreRafRef.current !== null) {
+        cancelAnimationFrame(restoreRafRef.current);
+        restoreRafRef.current = null;
+      }
+      if (restoreTimeoutRef.current !== null) {
+        window.clearTimeout(restoreTimeoutRef.current);
+        restoreTimeoutRef.current = null;
+      }
+    };
+  }, [filePath]);
+
   return (
-    <div className="h-full w-full overflow-auto bg-[#0a0a0a] px-8 pb-8 pt-px font-sans scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+    <div ref={scrollContainerRef} className="h-full w-full overflow-auto bg-[#0a0a0a] px-8 pb-8 pt-px font-sans scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
       <div className="markdown-body max-w-4xl mx-auto">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
