@@ -1,6 +1,6 @@
 ﻿import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
-import { USER_ID, API_BASE } from '@/config';
+import { USER_ID } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 import { addRecentWorkspace } from '@/services/RecentWorkspaces';
 
@@ -238,25 +238,11 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     useEffect(() => {
         const initSettings = async () => {
             try {
-                if (electronBridge.isElectron) {
-                    // Electron IPC 直读设置
-                    const result = await electronBridge.getSettings(USER_ID);
-                    if (result?.success && result?.settings?.providers?.length > 0) {
-                        const normalized = normalizeSettings(result.settings);
-                        applySettingsState(normalized);
-                        console.log('[Settings] Restored via Electron IPC');
-                    }
-                } else {
-                    const rootParam = workspaceRoot ? `&root=${encodeURIComponent(workspaceRoot)}` : '';
-                    const res = await fetch(`${API_BASE}/api/settings?userId=${USER_ID}${rootParam}`);
-                    if (res.ok && res.status !== 204) {
-                        const data = await res.json();
-                        if (data && data.providers && data.providers.length > 0) {
-                            const normalized = normalizeSettings(data);
-                            applySettingsState(normalized);
-                            console.log('[Settings] Successfully restored from backend persistent store');
-                        }
-                    }
+                const result = await electronBridge.getSettings(USER_ID);
+                if (result?.success && result?.settings?.providers?.length > 0) {
+                    const normalized = normalizeSettings(result.settings);
+                    applySettingsState(normalized);
+                    console.log('[Settings] Restored via Electron IPC');
                 }
             } catch (e) {
                 console.warn('[Settings] Initial backend restore skipped:', e);
@@ -275,25 +261,11 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     // 同步配置到后端Agent助手服务
     const syncSettingsWithServer = useCallback(async (currentSettings: UserSettings) => {
         try {
-            if (electronBridge.isElectron) {
-                await electronBridge.syncSettings({
-                    userId: USER_ID,
-                    settings: currentSettings,
-                    root: workspaceRoot || undefined,
-                });
-            } else {
-                const res = await fetch(`${API_BASE}/api/settings/sync`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        userId: USER_ID,
-                        workspaceRoot: workspaceRoot || undefined,
-                        settings: currentSettings
-                    })
-                });
-                const result = await res.json();
-                console.log('[Settings] Database Sync Status:', result.status);
-            }
+            await electronBridge.syncSettings({
+                userId: USER_ID,
+                settings: currentSettings,
+                root: workspaceRoot || undefined,
+            });
         } catch (e) {
             console.error('[Settings] Persistence failed:', e);
         }
@@ -308,21 +280,11 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
 
     const refreshSettings = async () => {
         try {
-            if (electronBridge.isElectron) {
-                const result = await electronBridge.getSettings(USER_ID);
-                if (result?.success && result?.settings?.providers?.length > 0) {
-                    const normalized = normalizeSettings(result.settings);
-                    applySettingsState(normalized);
-                    console.log('[Settings] Refreshed via Electron IPC:', normalized);
-                }
-            } else {
-                const rootParam = workspaceRoot ? `&root=${encodeURIComponent(workspaceRoot)}` : '';
-                const res = await fetch(`${API_BASE}/api/settings?userId=${USER_ID}${rootParam}`);
-                if (!res.ok || res.status === 204) return;
-                const data = await res.json();
-                const normalized = normalizeSettings(data);
+            const result = await electronBridge.getSettings(USER_ID);
+            if (result?.success && result?.settings?.providers?.length > 0) {
+                const normalized = normalizeSettings(result.settings);
                 applySettingsState(normalized);
-                console.log('[Settings] Current Workspace Config:', normalized);
+                console.log('[Settings] Refreshed via Electron IPC:', normalized);
             }
         } catch (e) {
             console.error('Failed to fetching settings:', e);

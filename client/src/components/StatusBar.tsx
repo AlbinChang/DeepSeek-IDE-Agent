@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useState } from 'react';
 import { GitBranch, Hash, Activity, User, Code2 } from 'lucide-react';
-import { USER_ID, API_BASE, GATEWAY_EVENT } from '@/config';
+import { USER_ID, GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { electronBridge } from '@/services/electron-bridge';
 
@@ -62,52 +62,27 @@ export const StatusBar: React.FC = () => {
     };
 
     useEffect(() => {
-        // 1. 实现 2 秒轮询机制 (对齐 36.1 节规范)
-        // 使用轮询代替纯 WS 推送，确保在网络不稳定时状态依然能最终一致
+        // 1. 系统状态更新
         const fetchStatus = async () => {
             try {
-                // Electron 模式：跳过 HTTP 轮询，使用本地系统信息
-                if (electronBridge.isElectron) {
-                    // 获取真实 Windows 用户名
-                    let username = 'Electron';
-                    try {
-                        const appInfo = await electronBridge.getAppInfo();
-                        if (appInfo?.username) {
-                            username = appInfo.username;
-                        }
-                    } catch {
-                        // 获取失败时回退到默认值
+                let username = 'Electron';
+                try {
+                    const appInfo = await electronBridge.getAppInfo();
+                    if (appInfo?.username) {
+                        username = appInfo.username;
                     }
-                    setStatus(prev => ({
-                        ...prev,
-                        user: { id: username, name: username },
-                        model: { provider: prev?.model?.provider || 'local', id: prev?.model?.id || 'electron' },
-                        git: prev?.git || { branch: '', isDirty: false, initialized: false },
-                        tokens: prev?.tokens || { total: 0 },
-                    }));
-                    return;
+                } catch {
+                    // 获取失败时回退到默认值
                 }
-                // 对齐 33.1 节：使用全局配置的 API_BASE，并关联当前 workspaceRoot
-                const url = new URL(`${API_BASE}/api/system/status/realtime`);
-                url.searchParams.set('userId', USER_ID);
-                if (workspaceRoot) {
-                    url.searchParams.set('root', workspaceRoot);
-                }
-
-                const response = await fetch(url.toString());
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                if (data.status === 'success' && data.payload) {
-                    // 已静默：轮询状态更新 (移除 console.log 以优化浏览器控制台性能)
-                    setStatus(data.payload);
-                }
+                setStatus(prev => ({
+                    ...prev,
+                    user: { id: username, name: username },
+                    model: { provider: prev?.model?.provider || 'local', id: prev?.model?.id || 'electron' },
+                    git: prev?.git || { branch: '', isDirty: false, initialized: false },
+                    tokens: prev?.tokens || { total: 0 },
+                }));
             } catch (err) {
-                // Electron 模式下不打印错误（预期行为）
-                if (!electronBridge.isElectron) {
-                    console.error('[StatusBar] Polling failed:', err);
-                }
+                // 忽略错误
             }
         };
 

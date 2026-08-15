@@ -36,9 +36,8 @@ describe('tool description deduplication contracts', () => {
     });
 
     it('keeps todo descriptions concise', async () => {
-        // 注：browser_mcp_call 已随 2026.05 BrowserMcpAdapter 重构移除（见 BrowserAutomationTools.ts 顶部
-        // @deprecated 说明）。浏览器工具现由 Playwright MCP 动态桥接为 playwright__* 工具，
-        // 描述文本在运行时由 BrowserMcpAdapter.buildToolDescription() 动态生成，不再是可静态扫描的源码字面量。
+        // 注：浏览器工具由 Playwright MCP 动态桥接为 playwright__* 工具，
+        // 描述文本在运行时由 BrowserMcpAdapter.buildToolDescription() 动态生成。
         const todoSource = await readSource('tools/TodoTools.ts');
         const appendTodo = extractToolDescription(todoSource, 'append_todo');
 

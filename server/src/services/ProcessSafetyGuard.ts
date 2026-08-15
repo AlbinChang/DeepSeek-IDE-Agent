@@ -199,7 +199,7 @@ export class ProcessSafetyGuard {
     // ========================================================================
 
     /**
-     * 从三个 server_conf.json 刷新受保护端口列表
+     * 刷新受保护端口列表（服务与开发端口）
      * 同时在每次检查前调用，确保端口变更能被感知
      */
     refreshProtectedPorts(): void {
@@ -214,7 +214,7 @@ export class ProcessSafetyGuard {
         addPort(globalConfig.servicePorts?.serverPort, 3001);
         // client/server_conf.json → devPort / staticPort
         addPort(globalConfig.servicePorts?.clientDevPort, 5174);
-        // terminal-server/server_conf.json → port
+        // terminal 端口保护
         addPort(globalConfig.servicePorts?.terminalPort, 3003);
 
         // 同时扫描环境变量中的端口覆盖

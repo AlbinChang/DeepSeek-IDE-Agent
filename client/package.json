@@ -5,21 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test:e2e": "playwright test tests/e2e-filetree-comprehensive.spec.ts",
-    "test:e2e:agent-chat-stability": "playwright test tests/e2e-agent-chat-dedup-final-chunk.spec.ts tests/e2e-agent-chat-no-switch-waterfall.spec.ts",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@fastify/static": "^9.0.0",
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/typography": "^0.5.19",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "axios": "^1.8.2",
     "dexie": "^4.0.11",
-    "fastify": "^5.8.2",
     "lucide-react": "^0.479.0",
     "mermaid": "^11.12.3",
     "monaco-editor": "^0.52.2",

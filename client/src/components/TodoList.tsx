@@ -1,9 +1,7 @@
 import React, { useEffect } from 'react';
 import { CheckCircle2, Circle, Clock } from 'lucide-react';
-import axios from 'axios';
-import { USER_ID, API_BASE, GATEWAY_EVENT } from '@/config';
+import { GATEWAY_EVENT } from '@/config';
 import { useAgentContext, useTodoContext } from '@/providers/AgentContext';
-import { electronBridge } from '@/services/electron-bridge';
 
 export const TodoList: React.FC = () => {
     const { workspaceRoot } = useAgentContext();
@@ -17,21 +15,6 @@ export const TodoList: React.FC = () => {
     useEffect(() => {
         // 防御：工作空间切换时立即清空旧 todos，避免闪现上一个工作空间的任务
         setContextTodos([]);
-
-        const fetchTodos = async () => {
-            if (!workspaceRoot) return;
-            // Electron 模式：跳过 HTTP 请求，依赖 GATEWAY_EVENT 接收 Agent 端推送
-            if (electronBridge.isElectron) return;
-            try {
-                // 2026.03 解耦重构: 使用显式 root 路径拉取任务清单
-                const res = await axios.get(`${API_BASE}/api/todos?userId=${USER_ID}&root=${encodeURIComponent(workspaceRoot)}`);
-                setContextTodos(res.data);
-            } catch (e) {
-                console.error('Failed to fetch initial todos');
-            }
-        };
-
-        fetchTodos();
 
         const handleSync = (e: any) => {
             // 仅处理 todo/update 类型的推送，防止其他 GATEWAY_EVENT 污染 todos 状态
@@ -49,7 +32,7 @@ export const TodoList: React.FC = () => {
 
         window.addEventListener(GATEWAY_EVENT, handleSync);
         return () => window.removeEventListener(GATEWAY_EVENT, handleSync);
-    }, [workspaceRoot]);
+    }, [workspaceRoot, setContextTodos]);
 
     // 防御：确保 contextTodos 是数组
     if (!Array.isArray(contextTodos) || contextTodos.length === 0) return null;

@@ -261,49 +261,8 @@ messages.append({
 
 且在 Turn 2 的请求中，我们仍然携带着 Turn 1 所产生的 `reasoning_content` 给 API。
 
-该代码的样例输出如下：
-
-```text
-Turn 1.1
-reasoning_content="The user is asking about the weather in Hangzhou tomorrow. I need to get tomorrow's date first, then call the weather function."
-content="Let me check tomorrow's weather in Hangzhou for you. First, let me get tomorrow's date."
-tool_calls=[ChatCompletionMessageFunctionToolCall(id='call_00_kw66qNnNto11bSfJVIdlV5Oo', function=Function(arguments='{}', name='get_date'), type='function', index=0)]
-tool result for get_date: 2026-04-19
-
-Turn 1.2
-reasoning_content="Today is 2026-04-19, so tomorrow is 2026-04-20. Now I'll call the weather function for Hangzhou."
-content=''
-tool_calls=[ChatCompletionMessageFunctionToolCall(id='call_00_H2SCW6136vWJGq9SQlBuhVt4', function=Function(arguments='{"location": "Hangzhou", "date": "2026-04-20"}', name='get_weather'), type='function', index=0)]
-tool result for get_weather: Cloudy 7~13°C
-
-Turn 1.3
-reasoning_content='The weather result is in. Let me share this with the user.'
-content="Here's the weather forecast for **Hangzhou tomorrow (April 20, 2026)**:\n\n- 🌤 **Condition:** Cloudy  \n- 🌡 **Temperature:** 7°C ~ 13°C (45°F ~ 55°F)\n\nIt'll be on the cooler side, so you might want to bring a light jacket if you're heading out! Let me know if you need anything else."
-tool_calls=None
-
-Turn 2.1
-reasoning_content='The user is asking about the weather in Guangzhou tomorrow. Today is 2026-04-19, so tomorrow is 2026-04-20. I can directly call the weather function.'
-content=''
-tool_calls=[ChatCompletionMessageFunctionToolCall(id='call_00_8URkLt5NjmNkVKhDmMcNq9Mo', function=Function(arguments='{"location": "Guangzhou", "date": "2026-04-20"}', name='get_weather'), type='function', index=0)]
-tool result for get_weather: Cloudy 7~13°C
-
-Turn 2.2
-reasoning_content='The weather result for Guangzhou is the same as Hangzhou. Let me share this with the user.'
-content="Here's the weather forecast for **Guangzhou tomorrow (April 20, 2026)**:\n\n- 🌤 **Condition:** Cloudy  \n- 🌡 **Temperature:** 7°C ~ 13°C (45°F ~ 55°F)\n\nIt'll be cool and cloudy, so a light jacket would be a good idea if you're going out. Let me know if there's anything else you'd like to know!"
-tool_calls=None
-```
-
 ---
 
 ## 本次同步变更摘要（相对旧版）
 
 1. **默认模型更新**：示例模型由 `deepseek-reasoner` / `deepseek-chat` 统一为 **`deepseek-v4-pro`**。
-2. **新增思考强度控制**：引入 `reasoning_effort`（OpenAI 格式 `high`/`max`）与 `output_config.effort`（Anthropic 格式）。
-    - 默认 `effort = high`；复杂 Agent 类请求（Claude Code、OpenCode 等）自动设为 `max`。
-    - 兼容映射：`low`/`medium` → `high`，`xhigh` → `max`。
-3. **思考开关默认 `enabled`**。
-4. **多轮上下文拼接规则细化**：
-    - 无工具调用轮次的 `reasoning_content` 即使回传 API 也会被忽略（可直接 `messages.append(response.choices[0].message)`）。
-    - 有工具调用的轮次，后续所有请求**必须**完整回传 `reasoning_content`，否则返回 400。
-5. **不支持参数列表精简**：仅列出 `temperature`、`top_p`、`presence_penalty`、`frequency_penalty`（设置不生效但不报错）。
-6. **工具调用示意图地址**更新为 `thinking_with_tools.jpg`。

@@ -1,8 +1,6 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { DiffEditor } from '@monaco-editor/react';
 import { X, Check } from 'lucide-react';
-import axios from 'axios';
-import { API_BASE } from '@/config';
 
 interface DiffModalProps {
     isOpen: boolean;
@@ -12,7 +10,7 @@ interface DiffModalProps {
     original: string;
     modified: string;
     fileName: string;
-    toolCallId?: string; // 加入 toolCallId 用于心跳 (Section 15.1)
+    toolCallId?: string;
     isConflict?: boolean; 
     batchInfo?: {
         current: number;
@@ -22,27 +20,8 @@ interface DiffModalProps {
 }
 
 export const DiffModal: React.FC<DiffModalProps> = ({ 
-    isOpen, onClose, onAccept, onReject, original, modified, fileName, toolCallId, isConflict, batchInfo
+    isOpen, onClose, onAccept, onReject, original, modified, fileName, isConflict, batchInfo
 }) => {
-    // 对齐 15.1 节：锁心跳机制 (Lock Heartbeat)
-    // 当审阅窗口打开时，每 10 秒向后端发送一次心跳以维持文件锁
-    useEffect(() => {
-        let interval: any;
-        if (isOpen && toolCallId) {
-            interval = setInterval(async () => {
-                try {
-                    await axios.post(`${API_BASE}/api/lock/heartbeat`, {
-                        path: fileName,
-                        toolCallId
-                    });
-                } catch (e) {
-                    console.warn('[DiffModal] Heartbeat failed:', e);
-                }
-            }, 10000); 
-        }
-        return () => clearInterval(interval);
-    }, [isOpen, toolCallId, fileName]);
-
     if (!isOpen) return null;
 
     const getLanguage = (file: string) => {

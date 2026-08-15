@@ -8,9 +8,8 @@ import {
         Clock3,
         FileClock
 } from 'lucide-react';
-import axios from 'axios';
 import { useAgentContext } from '@/providers/AgentContext';
-import { API_BASE, GATEWAY_EVENT } from '@/config';
+import { GATEWAY_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 
 interface GitFileStatus {
@@ -179,42 +178,22 @@ export const SourceControl: React.FC = () => {
     try {
                 setErrorMessage(null);
 
-                if (electronBridge.isElectron) {
-                    // Electron IPC 直调 simple-git
-                    const result = await electronBridge.gitStatus({ root: workspaceRoot });
-                    if (!result.success) {
-                        if (result.error?.toLowerCase().includes('not a git repository')) {
-                            setIsUninitialized(true);
-                            setStatus(null);
-                            return;
-                        }
-                        throw new Error(result.error || 'Git status failed');
-                    }
-                    setIsUninitialized(false);
-                    setStatus(result as GitStatus);
-                } else {
-                    // Web 模式：通过 REST API
-                    const res = await axios.get(`${API_BASE}/api/git/status?path=${encodeURIComponent(workspaceRoot)}`);
-                    const gitStatus = res.data?.status;
-
-                    if (res.data?.status === 'uninitialized') {
+                const result = await electronBridge.gitStatus({ root: workspaceRoot });
+                if (!result.success) {
+                    if (result.error?.toLowerCase().includes('not a git repository')) {
                         setIsUninitialized(true);
                         setStatus(null);
                         return;
                     }
-
-                    if (!gitStatus || !Array.isArray(gitStatus.files)) {
-                        throw new Error('Git 状态数据格式异常');
-                    }
-
-                    setIsUninitialized(false);
-                    setStatus(gitStatus as GitStatus);
+                    throw new Error(result.error || 'Git status failed');
                 }
+                setIsUninitialized(false);
+                setStatus(result as GitStatus);
         } catch (e: any) {
                 console.error('Failed to fetch Git status:', e);
                 setStatus(null);
                 setIsUninitialized(false);
-                setErrorMessage(e?.response?.data?.error || e?.message || '无法获取 Git 状态');
+                setErrorMessage(e?.message || '无法获取 Git 状态');
     } finally {
         if (!silent) setIsLoading(false);
     }
@@ -227,23 +206,17 @@ export const SourceControl: React.FC = () => {
         try {
             setHistoryError(null);
 
-            if (electronBridge.isElectron) {
-                const result = await electronBridge.gitLog({ root: workspaceRoot, maxCount: HISTORY_LIMIT });
-                if (result.success) {
-                    const commits = Array.isArray(result.all) ? result.all : [];
-                    setRepoHistory(commits as GitCommitRecord[]);
-                } else {
-                    throw new Error(result.error || 'Git log failed');
-                }
-            } else {
-                const res = await axios.get(`${API_BASE}/api/git/history?path=${encodeURIComponent(workspaceRoot)}&limit=${HISTORY_LIMIT}`);
-                const commits = Array.isArray(res.data?.commits) ? res.data.commits : [];
+            const result = await electronBridge.gitLog({ root: workspaceRoot, maxCount: HISTORY_LIMIT });
+            if (result.success) {
+                const commits = Array.isArray(result.all) ? result.all : [];
                 setRepoHistory(commits as GitCommitRecord[]);
+            } else {
+                throw new Error(result.error || 'Git log failed');
             }
         } catch (e: any) {
             console.error('Failed to fetch Git history:', e);
             setRepoHistory([]);
-            setHistoryError(e?.response?.data?.error || e?.message || '无法获取 Git 提交历史');
+            setHistoryError(e?.message || '无法获取 Git 提交历史');
         } finally {
             if (!silent) setIsHistoryLoading(false);
         }
@@ -256,23 +229,17 @@ export const SourceControl: React.FC = () => {
         try {
             setHistoryError(null);
 
-            if (electronBridge.isElectron) {
-                const result = await electronBridge.gitFileHistory({ root: workspaceRoot, filePath });
-                if (result.success) {
-                    const commits = Array.isArray(result.all) ? result.all : [];
-                    setFileHistory(commits as GitCommitRecord[]);
-                } else {
-                    throw new Error(result.error || 'File history failed');
-                }
-            } else {
-                const res = await axios.get(`${API_BASE}/api/git/file-history?path=${encodeURIComponent(workspaceRoot)}&filePath=${encodeURIComponent(filePath)}&limit=${HISTORY_LIMIT}`);
-                const commits = Array.isArray(res.data?.commits) ? res.data.commits : [];
+            const result = await electronBridge.gitFileHistory({ root: workspaceRoot, filePath });
+            if (result.success) {
+                const commits = Array.isArray(result.all) ? result.all : [];
                 setFileHistory(commits as GitCommitRecord[]);
+            } else {
+                throw new Error(result.error || 'File history failed');
             }
         } catch (e: any) {
             console.error('Failed to fetch file history:', e);
             setFileHistory([]);
-            setHistoryError(e?.response?.data?.error || e?.message || '无法获取文件历史');
+            setHistoryError(e?.message || '无法获取文件历史');
         } finally {
             if (!silent) setIsHistoryLoading(false);
         }
@@ -285,27 +252,18 @@ export const SourceControl: React.FC = () => {
         try {
             setHistoryError(null);
 
-            if (electronBridge.isElectron) {
-                const result = await electronBridge.gitDiff({ root: workspaceRoot, file: filePath });
-                if (result.success) {
-                    setSelectedCommitHash(commitHash);
-                    setSelectedCommitDiff(String(result.diff || ''));
-                } else {
-                    throw new Error(result.error || 'Diff failed');
-                }
-            } else {
-                const query = filePath
-                    ? `${API_BASE}/api/git/commit-diff?path=${encodeURIComponent(workspaceRoot)}&commit=${encodeURIComponent(commitHash)}&filePath=${encodeURIComponent(filePath)}`
-                    : `${API_BASE}/api/git/commit-diff?path=${encodeURIComponent(workspaceRoot)}&commit=${encodeURIComponent(commitHash)}`;
-                const res = await axios.get(query);
+            const result = await electronBridge.gitDiff({ root: workspaceRoot, file: filePath });
+            if (result.success) {
                 setSelectedCommitHash(commitHash);
-                setSelectedCommitDiff(String(res.data?.diff || ''));
+                setSelectedCommitDiff(String(result.diff || ''));
+            } else {
+                throw new Error(result.error || 'Diff failed');
             }
         } catch (e: any) {
             console.error('Failed to fetch commit diff:', e);
             setSelectedCommitHash(commitHash);
             setSelectedCommitDiff('');
-            setHistoryError(e?.response?.data?.error || e?.message || '无法获取提交差异');
+            setHistoryError(e?.message || '无法获取提交差异');
         } finally {
             setIsDiffLoading(false);
         }
@@ -367,18 +325,13 @@ export const SourceControl: React.FC = () => {
     
     setIsLoading(true);
     try {
-                setErrorMessage(null);
-                if (electronBridge.isElectron) {
-                    const result = await electronBridge.gitInit({ root: workspaceRoot });
-                    if (!result.success) throw new Error(result.error || 'Git init failed');
-                } else {
-                    // 解耦重构: 显式传递路径以完成初始化操作，不再依赖 userId/session
-                    await axios.post(`${API_BASE}/api/git/init`, { path: workspaceRoot });
-                }
+        setErrorMessage(null);
+        const result = await electronBridge.gitInit({ root: workspaceRoot });
+        if (!result.success) throw new Error(result.error || 'Git init failed');
         await fetchStatus();
-        } catch (e: any) {
+    } catch (e: any) {
         console.error('Failed to init repo:', e);
-                setErrorMessage(e?.response?.data?.error || e?.message || '初始化存储库失败');
+        setErrorMessage(e?.message || '初始化存储库失败');
     } finally {
         setIsLoading(false);
     }

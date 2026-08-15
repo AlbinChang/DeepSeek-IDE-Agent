@@ -34,8 +34,3 @@ export const USER_ID = getBrowserUserId();
 export const GATEWAY_EVENT = 'ui:gateway:message';
 export const LEGACY_WS_EVENT = 'ui:ws:message';
 
-// @deprecated 桌面应用模式下不再使用 HTTP/WS 端点，保留导出以兼容未清理的旧代码路径
-export const API_BASE = 'http://localhost:3001';
-export const WS_BASE = 'ws://localhost:3001';
-export const TERMINAL_HTTP_BASE = 'http://localhost:3003';
-

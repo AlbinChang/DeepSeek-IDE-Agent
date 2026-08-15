@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, FileText, Loader2, Box } from 'lucide-react';
-import axios from 'axios';
-import { API_BASE } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { electronBridge } from '@/services/electron-bridge';
 
@@ -41,24 +39,14 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFi
     setIsLoading(true);
     debounceTimer.current = setTimeout(async () => {
       try {
-        if (electronBridge.isElectron) {
-          // Electron IPC 直搜文件系统（免 HTTP 往返）
-          const result = await electronBridge.searchFiles({
-            pattern: trimmed,
-            root: workspaceRoot,
-            maxResults: 100,
-          });
-          setResults(result.success && Array.isArray(result.results)
-            ? result.results.map((r: { path: string }) => r.path)
-            : []);
-        } else {
-          // Web 模式：通过 REST API
-          const res = await axios.get(
-            `${API_BASE}/api/search?q=${encodeURIComponent(trimmed)}&root=${encodeURIComponent(workspaceRoot)}`,
-            { timeout: 8000 }
-          );
-          setResults(Array.isArray(res.data) ? res.data : []);
-        }
+        const result = await electronBridge.searchFiles({
+          pattern: trimmed,
+          root: workspaceRoot,
+          maxResults: 100,
+        });
+        setResults(result.success && Array.isArray(result.results)
+          ? result.results.map((r: { path: string }) => r.path)
+          : []);
       } catch {
         setResults([]);
       } finally {

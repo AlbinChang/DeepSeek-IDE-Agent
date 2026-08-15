@@ -1,5 +1,6 @@
 {
   "scripts": {
+    "test": "npm test --prefix server",
     "electron:dev": "node electron/scripts/dev.mjs",
     "electron:build": "npm run electron:build:preload && npm run electron:build:main && npm run build --prefix client",
     "electron:build:preload": "cd electron && npx esbuild src/main/preload.ts --bundle --platform=node --target=node20 --outfile=dist/preload.cjs --format=cjs --external:electron",

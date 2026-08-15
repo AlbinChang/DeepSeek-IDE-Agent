@@ -57,15 +57,9 @@ function loadClientConf(): ClientConf {
 }
 
 function loadTerminalConf(): TerminalConf {
-    const confPath = path.join(PROJECT_ROOT, 'terminal-server', 'server_conf.json');
-    try {
-        if (!fs.existsSync(confPath)) return {};
-        const raw = fs.readFileSync(confPath, 'utf-8');
-        const parsed = JSON.parse(raw);
-        return (parsed && typeof parsed === 'object') ? parsed : {};
-    } catch {
-        return {};
-    }
+    return {
+        port: parsePositiveInt(process.env.TERMINAL_PORT, 3003, 1),
+    };
 }
 
 // 多环境适配：尝试加载不同位置的 .env

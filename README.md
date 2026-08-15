@@ -233,37 +233,56 @@ npm run electron:dev
 ```
 web-ide-agent/
 ├── .env                          # API Key（不提交 Git）
-├── package.json                  # 根 scripts
-├── README.md
-├── docs/                         # 文档 & 架构图
-│   ├── STARTUP.md
-│   ├── functional-architecture.svg
-│   └── technical-architecture.svg
+├── package.json                  # 根 scripts（构建、启动、测试）
+├── README.md                     # 项目介绍与使用指南
+├── DEPLOYMENT.md                 # 生产打包与分发部署说明
+├── docs/                         # 技术架构与规范文档
+│   ├── STARTUP.md                # 启动与调试指南
+│   ├── deepseek-rate-limit.md    # API 限流与重试策略
+│   ├── deepseek-tool-calls.md    # 工具调用与思维链协议
+│   ├── deepseek_official_stream_response.md # SSE 流响应格式
+│   ├── deepseek_official_thinking_mode.md   # 思考模式技术说明
+│   ├── evaluation-feedback-loop-analysis.md # 评估闭环分析
+│   ├── functional-architecture.svg          # 功能架构图
+│   └── technical-architecture.svg           # 技术架构图
 │
-├── client/                       # 前端 React 应用（渲染进程）
-│   └── src/
-│       ├── components/           # UI 组件（AgentChat、FileEditor、Terminal 等）
-│       ├── hooks/                # React Hooks（useAgentSSE、useTerminalConnection）
-│       ├── services/             # 服务层（electron-bridge IPC 桥接）
-│       └── providers/            # 全局状态（AgentContext）
+├── client/                       # 前端 React 19 应用（渲染进程）
+│   ├── src/
+│   │   ├── components/           # UI 组件（AgentChat、FileEditor、Terminal、SourceControl 等）
+│   │   ├── hooks/                # React Hooks（useAgentSSE、useInlineCompletions）
+│   │   ├── services/             # 服务层（electronBridge IPC 桥接、db 本地存储）
+│   │   ├── providers/            # 全局状态（AgentContext、TodoContext、ProblemContext）
+│   │   └── utils/                # 辅助工具（id、markdownLinks、path 等）
+│   ├── package.json
+│   └── vite.config.ts
 │
-├── server/                       # Agent 核心逻辑（主进程引用）
+├── server/                       # Agent 核心领域引擎（被主进程打包引用）
 │   └── src/
-│       ├── services/             # AgentService、SyntaxCheckService、工具实现
+│       ├── services/             # AgentService、AgentTurnEngine、SyntaxCheckService、WebPageSaver 等
 │       ├── config/               # Agent 提示词 & 模型配置
-│       └── tools/                # 自定义工具（CalculatorTool 等）
+│       ├── tools/                # 内置工具集（FileTools、SystemTools、TodoTools 等）
+│       └── utils/                # 辅助工具（ApiRetryUtils、PathUtils、ReasoningUtils 等）
 │
-└── electron/                     # Electron 桌面壳
+└── electron/                     # Electron 桌面端宿主
     ├── src/main/
-    │   ├── index.ts              # 主进程入口
-    │   ├── preload.ts            # 预加载脚本（contextBridge）
-    │   └── ipc/                  # IPC 处理器（文件、终端、Git、诊断等）
-    └── electron-builder.yml      # 打包配置
+    │   ├── index.ts              # 主进程入口（窗口管理、生命周期）
+    │   ├── preload.ts            # 预加载脚本（contextBridge 安全注入）
+    │   └── ipc/                  # IPC 处理器（agent, file, terminal, git, settings, context 等）
+    ├── scripts/
+    │   └── dev.mjs               # 开发模式一键编排脚本
+    ├── package.json
+    └── electron-builder.yml      # 跨平台桌面打包配置
 ```
 
 ---
 
 ## 6. 构建 & 打包
+
+### 单元测试
+
+```powershell
+npm test                  # 运行全量后端及工具链 Vitest 单元测试
+```
 
 ### 本地构建
 
@@ -273,20 +292,20 @@ npm run electron:build    # 构建 preload + main + renderer
 
 构建产物：
 ```
-electron/dist/preload.cjs        # 编译后的 preload
+electron/dist/preload.cjs        # 编译后的 preload 脚本
 electron/dist/main/index.js      # 编译后的主进程
-client/dist/                     # Vite 构建的前端静态文件
+client/dist/                     # Vite 构建的前端静态资源
 ```
 
 ### 生成安装包
 
 ```powershell
-npm run electron:dist     # 生成当前平台的桌面安装包
+npm run electron:dist     # 生成 Windows 桌面安装包 (.exe)
 
-# 产物位于 electron/release/
+# 产物输出至 electron/release/
 ```
 
-> 📦 详细打包配置见 [electron-builder.yml](electron/electron-builder.yml)
+> 📦 详细打包与部署配置见 [DEPLOYMENT.md](DEPLOYMENT.md) 与 [electron/electron-builder.yml](electron/electron-builder.yml)
 
 ---
 

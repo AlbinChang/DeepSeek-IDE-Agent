@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useAgentContext } from '@/providers/AgentContext';
 import type { ModelProviderConfig } from '@/providers/AgentContext';
 import { X, Save, Cloud, Hammer, Globe, ChevronDown, Plus, Trash2, Loader2, ShieldCheck, AlertTriangle } from 'lucide-react';
-import { USER_ID, API_BASE } from '@/config';
+import { USER_ID } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 
 interface SettingsModalProps {
@@ -194,71 +194,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         }));
 
         try {
-            if (electronBridge.isElectron) {
-                // Electron IPC 测试连接（主进程直连 AI API）
-                const result = await electronBridge.testConnection({
-                    userId: USER_ID,
-                    workspaceRoot: workspaceRoot || undefined,
-                    provider: {
-                        id: providerConfig.id,
-                        name: providerConfig.name,
-                        type: 'openai-compatible',
-                        modelId: (providerConfig.modelId || '').trim(),
-                        apiKey: (providerConfig.apiKey || '').trim(),
-                        baseURL: (providerConfig.baseURL || '').trim(),
-                        enableThinking: providerConfig.enableThinking !== false,
-                        defaultReasoningEffort: providerConfig.defaultReasoningEffort === 'max' ? 'max' : 'high',
-                    }
-                });
-
-                if (!result.success) {
-                    throw new Error(result.error || '连接测试失败');
+            const result = await electronBridge.testConnection({
+                userId: USER_ID,
+                workspaceRoot: workspaceRoot || undefined,
+                provider: {
+                    id: providerConfig.id,
+                    name: providerConfig.name,
+                    type: 'openai-compatible',
+                    modelId: (providerConfig.modelId || '').trim(),
+                    apiKey: (providerConfig.apiKey || '').trim(),
+                    baseURL: (providerConfig.baseURL || '').trim(),
+                    enableThinking: providerConfig.enableThinking !== false,
+                    defaultReasoningEffort: providerConfig.defaultReasoningEffort === 'max' ? 'max' : 'high',
                 }
+            });
 
-                const latencyText = typeof result?.latencyMs === 'number' ? `（${result.latencyMs}ms）` : '';
-                setConnectionTests((prev) => ({
-                    ...prev,
-                    [providerConfig.id]: {
-                        status: 'success',
-                        latencyMs: result?.latencyMs,
-                        message: `连接成功 ${latencyText}`.trim()
-                    }
-                }));
-            } else {
-                const response = await fetch(`${API_BASE}/api/settings/test-connection`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        userId: USER_ID,
-                        workspaceRoot: workspaceRoot || undefined,
-                        provider: {
-                            id: providerConfig.id,
-                            name: providerConfig.name,
-                            type: 'openai-compatible',
-                            modelId: (providerConfig.modelId || '').trim(),
-                            apiKey: (providerConfig.apiKey || '').trim(),
-                            baseURL: (providerConfig.baseURL || '').trim(),
-                            enableThinking: providerConfig.enableThinking !== false,
-                            defaultReasoningEffort: providerConfig.defaultReasoningEffort === 'max' ? 'max' : 'high',
-                        }
-                    })
-                });
-
-                const data = await response.json().catch(() => ({}));
-                if (!response.ok || data?.status === 'error') {
-                    throw new Error(data?.error || `连接测试失败 (HTTP ${response.status})`);
-                }
-
-                const latencyText = typeof data?.latencyMs === 'number' ? `（${data.latencyMs}ms）` : '';
-                setConnectionTests((prev) => ({
-                    ...prev,
-                    [providerConfig.id]: {
-                        status: 'success',
-                        latencyMs: data?.latencyMs,
-                        message: `连接成功 ${latencyText}`.trim()
-                    }
-                }));
+            if (!result.success) {
+                throw new Error(result.error || '连接测试失败');
             }
+
+            const latencyText = typeof result?.latencyMs === 'number' ? `（${result.latencyMs}ms）` : '';
+            setConnectionTests((prev) => ({
+                ...prev,
+                [providerConfig.id]: {
+                    status: 'success',
+                    latencyMs: result?.latencyMs,
+                    message: `连接成功 ${latencyText}`.trim()
+                }
+            }));
         } catch (error: any) {
             setConnectionTests((prev) => ({
                 ...prev,

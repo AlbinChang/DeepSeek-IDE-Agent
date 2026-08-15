@@ -26,6 +26,40 @@ const PdfPreview = lazy(() => import('@/components/PdfPreview'));
  */
 const editorViewStateCache = new Map<string, monaco.editor.IEditorViewState | null>();
 
+/**
+ * 文件视图模式缓存（跨文件切换保持各自的查看模式：如 md 的 preview、csv 的 table）
+ * Key: 文件相对路径, Value: 'editor' | 'preview' | 'table' | 'pdf' | 'image' | 'diff'
+ */
+const fileViewModeCache = new Map<string, 'editor' | 'preview' | 'table' | 'pdf' | 'image' | 'diff'>();
+
+function resolveTargetViewMode(
+  filePath: string,
+  externalMode: 'editor' | 'diff' = 'editor'
+): 'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table' {
+  if (!filePath) return 'editor';
+  if (externalMode === 'diff') return 'diff';
+
+  const lower = filePath.toLowerCase();
+  const ext = lower.split('.').pop() || '';
+
+  if (lower.endsWith('.pdf')) return 'pdf';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'tiff', 'tif'].includes(ext)) return 'image';
+
+  const cached = fileViewModeCache.get(filePath);
+
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) {
+    if (cached === 'preview' || cached === 'editor') return cached;
+    return 'editor';
+  }
+
+  if (lower.endsWith('.csv') || lower.endsWith('.tsv')) {
+    if (cached === 'table' || cached === 'editor') return cached;
+    return 'table';
+  }
+
+  return 'editor';
+}
+
 interface FileEditorProps {
   activeFile: string;
   isLocked: boolean;
@@ -51,7 +85,9 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [originalContent, setOriginalContent] = useState<string>('');
-  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(mode);
+  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(() =>
+    resolveTargetViewMode(activeFile, mode)
+  );
   const [isTransitioning, setIsTransitioning] = useState(false);
   const diffEditorRef = useRef<any>(null);
   const savedContentRef = useRef('');
@@ -216,30 +252,36 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     }
   }, [activeFile]);
 
-  // 修改：当文件改变时，将不匹配的 viewMode 重置为 editor（或 Markdown 的 preview）
+  // 同步外部 mode 与当前文件对应的 viewMode (附带渲染屏障防止 Monaco 竞争)
   useEffect(() => {
-    if (activeFile && !activeFile.toLowerCase().endsWith('.md') && viewMode === 'preview') {
-      console.log(`[Editor] Auto-switching from preview to editor because ${activeFile} is not Markdown`);
-      setViewMode('editor');
+    const targetMode = resolveTargetViewMode(activeFile, mode);
+    if (targetMode !== viewMode) {
+      console.log(`[Editor] Switching mode for ${activeFile} from ${viewMode} to ${targetMode} (Manual Ownership Active)`);
+      setIsTransitioning(true);
+      setViewMode(targetMode);
+      // 给 React 一个 Tick(20ms) 来彻底卸载旧组件，避免 TextModel 泄露
+      const timer = setTimeout(() => setIsTransitioning(false), 20);
+      return () => clearTimeout(timer);
     }
-    // 当文件改变且非图片时，从 image 模式切回 editor
-    if (activeFile && !isImage && viewMode === 'image') {
-      console.log(`[Editor] Auto-switching from image to editor because ${activeFile} is not an image`);
-      setViewMode('editor');
-    }
-    // 当文件改变且非 PDF 时，从 pdf 模式切回 editor（或 Markdown 的 preview）
-    if (activeFile && !isPdf && viewMode === 'pdf') {
-      console.log(`[Editor] Auto-switching from pdf to ${activeFile.toLowerCase().endsWith('.md') ? 'preview' : 'editor'} because ${activeFile} is not a PDF`);
-      setViewMode(activeFile.toLowerCase().endsWith('.md') ? 'preview' : 'editor');
-    }
-    // 当文件改变且非 CSV 时，从 table 模式切回 editor
-    if (activeFile && !isCsv && viewMode === 'table') {
-      console.log(`[Editor] Auto-switching from table to editor because ${activeFile} is not a CSV`);
-      setViewMode('editor');
-    }
-  }, [activeFile]);
+  }, [activeFile, mode, viewMode]);
 
-  // PDF 文件：自动切换为 pdf 预览模式并加载二进制内容
+  const handleToggleMarkdownView = () => {
+    const nextMode = viewMode === 'preview' ? 'editor' : 'preview';
+    if (activeFile) {
+      fileViewModeCache.set(activeFile, nextMode);
+    }
+    setViewMode(nextMode);
+  };
+
+  const handleToggleCsvView = () => {
+    const nextMode = viewMode === 'table' ? 'editor' : 'table';
+    if (activeFile) {
+      fileViewModeCache.set(activeFile, nextMode);
+    }
+    setViewMode(nextMode);
+  };
+
+  // PDF 文件：加载二进制内容
   useEffect(() => {
     if (!activeFile || !isPdf) {
       setPdfBase64(null);
@@ -248,11 +290,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     }
 
     let cancelled = false;
-
-    // PDF 文件自动进入预览模式
-    if (viewMode !== 'pdf') {
-      setViewMode('pdf');
-    }
 
     setPdfLoading(true);
     setPdfBase64(null);
@@ -289,7 +326,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     return () => { cancelled = true; };
   }, [activeFile, isPdf, workspaceRoot]);
 
-  // 图片文件：自动切换为 image 预览模式并加载二进制内容
+  // 图片文件：加载二进制内容
   useEffect(() => {
     if (!activeFile || !isImage) {
       setImageBase64(null);
@@ -299,10 +336,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     }
 
     let cancelled = false;
-
-    if (viewMode !== 'image') {
-      setViewMode('image');
-    }
 
     setImageLoading(true);
     setImageBase64(null);
@@ -339,26 +372,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     return () => { cancelled = true; };
   }, [activeFile, isImage, workspaceRoot]);
-
-  // CSV 文件：自动进入表格预览模式，同时保留文本内容供编辑器使用
-  useEffect(() => {
-    if (!activeFile || !isCsv) return;
-    if (viewMode !== 'table' && viewMode !== 'editor') {
-      setViewMode('table');
-    }
-  }, [activeFile, isCsv]);
-
-  // 同步外部 mode 到内部 viewMode (附带渲染屏障防止 Monaco 竞争)
-  useEffect(() => {
-    if (mode !== viewMode) {
-      console.log(`[Editor] Switching mode from ${viewMode} to ${mode} (Manual Ownership Active)`);
-      setIsTransitioning(true);
-      setViewMode(mode);
-      // 给 React 一个 Tick(16ms) 来彻底卸载旧组件，避免 TextModel 泄露
-      const timer = setTimeout(() => setIsTransitioning(false), 20);
-      return () => clearTimeout(timer);
-    }
-  }, [mode]);
 
   // 方案六：行业级“无感切换”架构 (Global Model + Fixed Editor Instance)
   // 此方案模拟 VS Code 内部逻辑：
@@ -1093,7 +1106,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           <div className="flex items-center gap-2 shrink-0 ml-2">
               {isMarkdown && (
                 <button 
-                  onClick={() => setViewMode(viewMode === 'preview' ? 'editor' : 'preview')}
+                  onClick={handleToggleMarkdownView}
                   className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all ${
                     viewMode === 'preview' 
                       ? 'bg-white/20 text-white border border-white/20' 
@@ -1106,7 +1119,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
               )}
               {isCsv && (
                 <button 
-                  onClick={() => setViewMode(viewMode === 'table' ? 'editor' : 'table')}
+                  onClick={handleToggleCsvView}
                   className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all ${
                     viewMode === 'table' 
                       ? 'bg-white/20 text-white border border-white/20' 

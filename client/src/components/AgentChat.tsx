@@ -8,8 +8,6 @@ import { TodoList } from './TodoList';
 import { SettingsModal } from '@/components/SettingsModal';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
 import { useAgentContext, useTodoContext } from '@/providers/AgentContext';
-import { USER_ID, API_BASE } from '@/config';
-import { electronBridge } from '@/services/electron-bridge';
 import type { Message, MessagePart, StreamProgress } from '@/hooks/useAgentSSE';
 
 interface ChatMessageItemProps {
@@ -255,32 +253,19 @@ export const AgentChat: React.FC = () => {
     // 初次加载和回车发送后加载记录
     const fetchInstructHistory = async () => {
         if (!workspaceRoot) return;
-        // Electron 模式：从 localStorage 读取本地历史
-        if (electronBridge.isElectron) {
-            try {
-                const raw = historyStorageKey ? localStorage.getItem(historyStorageKey) : null;
-                const parsed = raw ? JSON.parse(raw) : [];
-                setInstructHistory(Array.isArray(parsed) ? parsed : []);
-            } catch {
-                setInstructHistory([]);
-            }
-            return;
-        }
         try {
-            const res = await fetch(`${API_BASE}/api/chat/instructs?userId=${USER_ID}&workspace=${encodeURIComponent(workspaceRoot)}`);
-            const _data = await res.json();
-            if (Array.isArray(_data)) {
-                setInstructHistory(_data);
-            }
-        } catch (error) {
-            console.error('Failed to fetch instruct history:', error);
+            const raw = historyStorageKey ? localStorage.getItem(historyStorageKey) : null;
+            const parsed = raw ? JSON.parse(raw) : [];
+            setInstructHistory(Array.isArray(parsed) ? parsed : []);
+        } catch {
+            setInstructHistory([]);
         }
     };
 
-    // 本地保存用户指令到 localStorage（Electron 模式）
+    // 本地保存用户指令到 localStorage
     // 存储顺序：[最新, ..., 最旧]，与 ArrowUp 从 index 0 开始匹配
     const saveLocalInstruct = useCallback((content: string) => {
-        if (!electronBridge.isElectron || !historyStorageKey || !content.trim()) return;
+        if (!historyStorageKey || !content.trim()) return;
         try {
             const raw = localStorage.getItem(historyStorageKey);
             const existing: string[] = raw ? JSON.parse(raw) : [];
@@ -294,14 +279,14 @@ export const AgentChat: React.FC = () => {
 
     // 监听新用户消息 → 自动保存到本地历史
     useEffect(() => {
-        if (!electronBridge.isElectron || messages.length === 0) return;
+        if (messages.length === 0) return;
         const lastMsg = messages[messages.length - 1];
         if (lastMsg?.role === 'user' && lastMsg?.content) {
             saveLocalInstruct(String(lastMsg.content));
             // 刷新列表
             fetchInstructHistory();
         }
-    }, [messages.length]);
+    }, [messages.length, saveLocalInstruct]);
 
     useEffect(() => {
         fetchInstructHistory();

@@ -1,6 +1,6 @@
 ﻿import { useState, useCallback, useEffect, useRef } from "react";
 import Dexie from "dexie";
-import { USER_ID, API_BASE } from "@/config";
+import { USER_ID } from "@/config";
 import { useAgentContext, useTodoContext, useProblemContext } from "@/providers/AgentContext";
 import { db } from "@/services/db";
 import { createClientId } from "@/utils/id";
@@ -354,19 +354,8 @@ export function useAgentSSE() {
             abortControllerRef.current.abort();
             abortControllerRef.current = null;
         }
-        if (!electronBridge.isElectron) {
-            try {
-                await fetch(`${API_BASE}/api/chat/stop`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ userId: USER_ID, workspaceRoot })
-                });
-            } catch (e) {
-                console.error("Failed to stop chat:", e);
-            }
-        }
         setIsLoading(false);
-    }, [workspaceRoot]);
+    }, []);
 
     const append = useCallback(async (msg: { id: string, role: 'user', content: string }) => {
         if (!workspaceRoot) return;
@@ -730,124 +719,31 @@ export function useAgentSSE() {
                 : undefined;
 
             // ═══════════════════════════════════════
-            // Electron IPC 路径（替换 SSE fetch）
+            // Electron IPC 路径
             // ═══════════════════════════════════════
-            if (electronBridge.isElectron) {
-                await electronBridge.startAgentChat(
-                    {
-                        userId: USER_ID,
-                        userInstruct,
-                        root: workspaceRoot,
-                        locale,
-                        provider,
-                        model,
-                        traceId: currentTraceId,
-                        reasoningEffort: reasoningEffortValue,
-                    },
-                    (chunk) => {
-                        processStreamChunk(chunk);
-                    },
-                    controller.signal
-                );
-                
-                // 流结束后刷新 pending
-                if (rafId !== null) {
-                    cancelAnimationFrame(rafId);
-                    rafId = null;
-                }
-                flushAllPending();
-            } else {
-
-            // ═══════════════════════════════════════
-            // Web SSE 路径（原有逻辑）
-            // ═══════════════════════════════════════
-            const res = await fetch(`${API_BASE}/api/chat/sse`, {
-                method: "POST", 
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ 
-                    userId: USER_ID, 
-                    userInstruct, 
-                    root: workspaceRoot, 
+            await electronBridge.startAgentChat(
+                {
+                    userId: USER_ID,
+                    userInstruct,
+                    root: workspaceRoot,
                     locale,
                     provider,
                     model,
                     traceId: currentTraceId,
                     reasoningEffort: reasoningEffortValue,
-                }),
-                signal: controller.signal
-            });
-
-            if (!res.ok) {
-                const errorData = await res.json().catch(() => ({}));
-                throw new Error(errorData.error || "Request failed");
-            }
-
-            const reader = res.body?.getReader();
-            if (!reader) throw new Error("ReadableStream not available");
-
-            const decoder = new TextDecoder();
-            let buf = "";
-            const processedSseIds = new Set<string>();
-            const processedSseIdQueue: string[] = [];
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                
-                buf += decoder.decode(value, { stream: true });
-                
-                let boundary = buf.indexOf("\n\n");
-                while (boundary !== -1) {
-                    const block = buf.substring(0, boundary).trim();
-                    buf = buf.substring(boundary + 2);
-                    boundary = buf.indexOf("\n\n");
-
-                    if (!block) continue;
-                    
-                    const lines = block.split("\n");
-                    let dataString = "";
-                    let eventName = "";
-                    for (const line of lines) {
-                        if (line.startsWith("data:")) {
-                            dataString += line.substring(5).trim();
-                        } else if (line.startsWith("event:")) {
-                            eventName = line.substring(6).trim();
-                        }
-                    }
-                    
-                    if (eventName === "heartbeat") continue;
-
-                    if (dataString) {
-                        try {
-                            const chunk = JSON.parse(dataString);
-                            const sseId = (chunk as any).sseId;
-
-                            if (sseId) {
-                                if (processedSseIds.has(sseId)) continue;
-                                processedSseIds.add(sseId);
-                                processedSseIdQueue.push(sseId);
-                                if (processedSseIdQueue.length > 5000) {
-                                    const oldId = processedSseIdQueue.shift();
-                                    if (oldId) processedSseIds.delete(oldId);
-                                }
-                            }
-                            
-                            // 统一使用 processStreamChunk（与 Electron IPC 路径共享逻辑）
-                            processStreamChunk(chunk);
-                        } catch (e) {
-                            console.error("Failed to parse SSE chunk", e, dataString);
-                        }
-                    }
-                }
-            }
-
-            // 流式结束后刷新所有尚未提交的 pending
+                },
+                (chunk) => {
+                    processStreamChunk(chunk);
+                },
+                controller.signal
+            );
+            
+            // 流结束后刷新 pending
             if (rafId !== null) {
                 cancelAnimationFrame(rafId);
                 rafId = null;
             }
             flushAllPending();
-            } // 结束 else 块（Web SSE 路径）
         } catch (e: any) { 
             // 异常时也刷新剩余的 pending
             if (rafId !== null) {
@@ -882,17 +778,8 @@ export function useAgentSSE() {
         // 禁止在此使用 window.confirm —— Electron 中原生对话框关闭后会破坏渲染窗口的
         // 键盘焦点状态，导致输入框长时间无法聚焦（Chromium 已知 bug）。
         try {
-            if (electronBridge.isElectron) {
-                // Electron 模式：通过 IPC 调用主进程清空会话（含 TODO 持久化清理）
-                await electronBridge.clearSession({ userId: USER_ID, workspaceRoot });
-            } else {
-                // Web 模式：通过 HTTP API 清空会话
-                await fetch(`${API_BASE}/api/chat/clear`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ userId: USER_ID, workspaceRoot })
-                });
-            }
+            // Electron 模式：通过 IPC 调用主进程清空会话（含 TODO 持久化清理）
+            await electronBridge.clearSession({ userId: USER_ID, workspaceRoot });
             // 清空本地 IndexedDB
             await db.chatHistory.where("workspaceRoot").equals(workspaceRoot).delete();
             setMessages([]);

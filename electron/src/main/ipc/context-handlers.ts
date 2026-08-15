@@ -5,6 +5,7 @@
  * 编辑器上下文同步 + AI 代码补全。
  */
 import { IpcMain, BrowserWindow } from 'electron';
+import { CompletionService } from '@/services/CompletionService.js';
 
 // 上下文存储（内存中）
 interface EditorContext {
@@ -51,13 +52,13 @@ export function registerContextIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) 
     console.log('[ContextIPC] Context IPC handlers registered');
 }
 
-// ── 代码补全（简化实现，完整版需对接 CompletionService） ──
+// ── 代码补全（对接 CompletionService） ──
 export function registerCompletionIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
     
     const activeCompletions = new Map<string, AbortController>();
 
     // ── 请求代码补全 ──
-    ipcMain.handle('completion:request', async (event, params: {
+    ipcMain.handle('completion:request', async (_event, params: {
         userId: string;
         filePath: string;
         position: { line: number; column: number };
@@ -66,23 +67,51 @@ export function registerCompletionIpc(ipcMain: IpcMain, mainWindow: BrowserWindo
     }) => {
         const completionId = `comp-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
         
-        // TODO: 对接 CompletionService 进行实际 AI 补全
-        // 目前返回占位实现
         console.log(`[CompletionIPC] Completion requested: ${completionId}, file=${params.filePath}`);
         
-        try {
-            // 延迟发送结果（模拟异步补全）
+        if (params.root) {
+            const controller = new AbortController();
+            activeCompletions.set(completionId, controller);
+            (async () => {
+                try {
+                    const text = await CompletionService.getCompletion({
+                        workspaceRoot: params.root,
+                        userId: params.userId,
+                        prefix: params.context || '',
+                        suffix: '',
+                        filePath: params.filePath,
+                    });
+                    if (!mainWindow.isDestroyed() && !controller.signal.aborted) {
+                        mainWindow.webContents.send('completion:result', {
+                            completionId,
+                            text: text || '',
+                            isFinal: true,
+                        });
+                    }
+                } catch (err: any) {
+                    console.error('[CompletionIPC] Completion error:', err);
+                    if (!mainWindow.isDestroyed() && !controller.signal.aborted) {
+                        mainWindow.webContents.send('completion:result', {
+                            completionId,
+                            text: '',
+                            error: err?.message || 'Completion failed',
+                            isFinal: true,
+                        });
+                    }
+                } finally {
+                    activeCompletions.delete(completionId);
+                }
+            })();
+        } else {
             setTimeout(() => {
                 if (!mainWindow.isDestroyed()) {
                     mainWindow.webContents.send('completion:result', {
                         completionId,
-                        text: '', // 实际补全结果
+                        text: '',
                         isFinal: true,
                     });
                 }
-            }, 100);
-        } catch (err) {
-            console.error('[CompletionIPC] Error:', err);
+            }, 50);
         }
 
         return completionId;
