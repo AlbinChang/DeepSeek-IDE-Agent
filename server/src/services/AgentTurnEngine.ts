@@ -562,8 +562,14 @@ export class AgentTurnEngine {
                         // - absolutePath: 基于工作区 root 解析的绝对路径
                         //   前端用两者 + workspaceRoot 做归一化比较，兼容绝对/相对两种 activeFile
                         const fileRelPath =
-                            typeof parsedArgs === 'object' && parsedArgs !== null && typeof (parsedArgs as any).path === 'string'
-                                ? (parsedArgs as any).path
+                            typeof parsedArgs === 'object' && parsedArgs !== null
+                                ? (typeof (parsedArgs as any).path === 'string'
+                                    ? (parsedArgs as any).path
+                                    : (typeof (parsedArgs as any).filePath === 'string'
+                                        ? (parsedArgs as any).filePath
+                                        : (typeof (parsedArgs as any).targetPath === 'string'
+                                            ? (parsedArgs as any).targetPath
+                                            : null)))
                                 : null;
 
                         emit({

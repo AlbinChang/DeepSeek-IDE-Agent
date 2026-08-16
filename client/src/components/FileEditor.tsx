@@ -80,7 +80,8 @@ function resolveTargetViewMode(
  * 生成固定 URI（全局静态函数）
  */
 function getFixedUri(path: string, type: 'file' | 'git-original' | 'git-modified') {
-  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const clean = path.replace(/\\/g, '/');
+  const normalizedPath = clean.startsWith('/') ? clean : `/${clean}`;
   return monaco.Uri.parse(`${type}://${normalizedPath}`);
 }
 
@@ -882,44 +883,119 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     };
   }, [isLocked]);
 
-  // Agent 文件写入后自动刷新编辑器内容
+  // Agent 文件写入后自动刷新编辑器内容（全量模型与缓存同步）
   useEffect(() => {
     const handleFileChanged = async (e: Event) => {
       const detail = (e as CustomEvent).detail;
       // 兼容相对 path 与绝对 absolutePath（服务端 tool/result 注解同时携带两者）
       if (!detail?.path && !detail?.absolutePath) return;
       const effectiveRoot = workspaceRoot || new URLSearchParams(window.location.search).get('root');
-      const changedPath = String(detail.path || detail.absolutePath || '');
-      const currentPath = activeFileRef.current || '';
-      if (!changedPath || !currentPath) return;
-      // 统一路径归一化比较：解决 Agent 相对路径 vs 编辑器绝对/相对路径不一致导致的失配
-      if (!isSameFilePath(changedPath, currentPath, effectiveRoot)) return;
       if (!effectiveRoot) return;
 
-      console.log(`[Editor] File changed by agent: ${changedPath}, reloading content...`);
+      const targetPath = String(detail.absolutePath || detail.path || '');
+      if (!targetPath) return;
+
+      console.log(`[Editor] File changed by agent: ${targetPath}, reloading content...`);
       try {
         const result = await electronBridge.readFile({
-          filePath: changedPath,
+          filePath: targetPath,
           root: effectiveRoot,
         });
-        if (!result || !result.content) return;
-        fileContentCache.set(changedPath, result.content);
-        fileSavedContentCache.set(changedPath, result.content);
-        fileEncodingCache.set(changedPath, result.encoding || 'utf8');
 
-        // 同步更新已存在的 Monaco 模型
-        const modelUri = getFixedUri(changedPath, 'file');
-        const existingModel = monaco.editor.getModel(modelUri);
-        if (existingModel && existingModel.getValue() !== result.content) {
-          existingModel.setValue(result.content);
+        // 处理文件被物理删除场景
+        if (!result || result.success === false) {
+          const errMsg = String(result?.error || '');
+          if (/File not found|ENOENT/i.test(errMsg)) {
+            // 清理缓存
+            for (const key of Array.from(fileContentCache.keys())) {
+              if (isSameFilePath(key, targetPath, effectiveRoot)) {
+                fileContentCache.delete(key);
+                fileSavedContentCache.delete(key);
+                fileEncodingCache.delete(key);
+                editorViewStateCache.delete(key);
+              }
+            }
+            // 同步已存在的模型
+            const allModels = monaco.editor.getModels();
+            for (const model of allModels) {
+              if (model.uri.scheme === 'file') {
+                const modelPath = model.uri.path.replace(/^\/+/, '');
+                if (isSameFilePath(modelPath, targetPath, effectiveRoot)) {
+                  model.setValue(`/** [DELETED_FILE] ${targetPath} */`);
+                }
+              }
+            }
+            if (isSameFilePath(activeFileRef.current || '', targetPath, effectiveRoot)) {
+              setFileContent(`/** [DELETED_FILE] ${targetPath} */`);
+              setSavedContent(`/** [DELETED_FILE] ${targetPath} */`);
+              setIsDirty(false);
+            }
+          }
+          return;
         }
 
-        // 确认仍未切换到其他文件（归一化比较，防竞态切文件）
-        if (!isSameFilePath(activeFileRef.current || '', changedPath, effectiveRoot)) return;
-        setFileEncoding(result.encoding || 'utf8');
-        setSavedContent(result.content);
-        setIsDirty(false);
-        setFileContent(result.content);
+        if (typeof result.content !== 'string') return;
+        const newContent = result.content;
+        const encoding = result.encoding || 'utf8';
+
+        // 1. 同步更新所有匹配的内存缓存项（无论是相对路径、绝对路径还是不同斜杠格式）
+        for (const key of Array.from(fileContentCache.keys())) {
+          if (isSameFilePath(key, targetPath, effectiveRoot)) {
+            fileContentCache.set(key, newContent);
+            fileSavedContentCache.set(key, newContent);
+            fileEncodingCache.set(key, encoding);
+          }
+        }
+        if (detail.path) {
+          fileContentCache.set(detail.path, newContent);
+          fileSavedContentCache.set(detail.path, newContent);
+          fileEncodingCache.set(detail.path, encoding);
+        }
+        if (detail.absolutePath) {
+          fileContentCache.set(detail.absolutePath, newContent);
+          fileSavedContentCache.set(detail.absolutePath, newContent);
+          fileEncodingCache.set(detail.absolutePath, encoding);
+        }
+        if (activeFileRef.current && isSameFilePath(activeFileRef.current, targetPath, effectiveRoot)) {
+          fileContentCache.set(activeFileRef.current, newContent);
+          fileSavedContentCache.set(activeFileRef.current, newContent);
+          fileEncodingCache.set(activeFileRef.current, encoding);
+        }
+
+        // 2. 同步更新所有已存在的 Monaco 模型（覆盖当前激活和后台已打开的 Tab）
+        const allModels = monaco.editor.getModels();
+        for (const model of allModels) {
+          if (model.uri.scheme === 'file') {
+            const modelPath = model.uri.path.replace(/^\/+/, '');
+            if (isSameFilePath(modelPath, targetPath, effectiveRoot)) {
+              if (model.getValue() !== newContent) {
+                model.setValue(newContent);
+              }
+            }
+          }
+        }
+
+        // 3. 若变更的文件为当前正处于激活状态的文件，立即更新 React 状态与视图
+        const currentActive = activeFileRef.current || '';
+        if (isSameFilePath(currentActive, targetPath, effectiveRoot)) {
+          // 确保当前编辑器绑定的模型内容最新
+          const currentEditorModel = editorRef.current?.getModel();
+          if (currentEditorModel && currentEditorModel.getValue() !== newContent) {
+            currentEditorModel.setValue(newContent);
+          }
+
+          setFileEncoding(encoding);
+          setSavedContent(newContent);
+          setIsDirty(false);
+          setFileContent(newContent);
+
+          // Diff 模式下自动刷新 Git 差异对比
+          if (viewMode === 'diff') {
+            electronBridge.gitDiff({ root: effectiveRoot, file: currentActive })
+              .then((gitResult: any) => setOriginalContent(gitResult?.content || ''))
+              .catch(() => setOriginalContent(''));
+          }
+        }
       } catch (err) {
         console.warn('[Editor] Failed to reload file after agent change:', err);
       }
@@ -927,7 +1003,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     window.addEventListener('ui:file:changed', handleFileChanged);
     return () => window.removeEventListener('ui:file:changed', handleFileChanged);
-  }, [workspaceRoot]);
+  }, [workspaceRoot, viewMode]);
 
   // 监听 Problems 面板的行跳转请求
   useEffect(() => {
