@@ -1289,7 +1289,8 @@ export class AgentService extends EventEmitter {
             // 3. 工作区维度的稳定上下文（同一 workspace 内不变）
             '### 静态环境与项目元信息 (Static Workspace Profile)',
             [
-                `- **工作目录**: ${root}`,
+                `- **工作目录（唯一作业边界）**: ${root}`,
+                `  ⚠️ 【工作区隔离绝对铁律】：当前任务的唯一作业边界为上述工作目录。用户在指令中提及的 .env、配置文件、源代码、依赖等 100% 严格限定在上述工作目录内部（如 \`${root}/.env\`）。严禁跨出此目录去探索、读取、修改或引用 DeepSeek IDE / Agent 宿主自身的工程目录（如 IDE 自身源码、IDE 启动用 .env、DEEPSEEK_API_KEY 等）！`,
                 `- **用户标识**: ${userId}`,
                 `- **操作系统**: ${envInfo.os} (${envInfo.arch})`,
                 `- **Node.js**: ${envInfo.nodeVersion}`,

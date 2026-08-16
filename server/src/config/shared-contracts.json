@@ -1,6 +1,16 @@
 {
   "_description": "Agent 共享契约基础 — 主Agent与评估Agent共同遵循的不可变约束。此文件不直接加载，仅供 JSON 配置文件引用和文档说明。",
   "shared_contracts": {
+    "workspace_host_isolation": {
+      "id": "workspace-host-isolation",
+      "description": "【P0】工作空间与 IDE 宿主环境绝对隔离约束 — 用户工作空间是唯一作业上下文，严禁越界操作 IDE 自身文件",
+      "rules": [
+        "【工作区唯一边界】当前用户任务的唯一作业边界为系统注入的当前工作目录（workspaceRoot）。所有文件读写（read_file、file_write、file_replace、file_insert）、目录扫描（list_files）、终端命令（run_powershell_command、run_cmd_command）必须严格在当前工作区内部执行，严禁跨出工作区根目录探索或操作外部文件系统。",
+        "【.env 与环境变量绝对归属】用户在指令中提及的 .env、环境变量、API Key、数据库连接、业务配置等，100% 严格指向用户当前工作空间根目录下的 .env（${workspaceRoot}/.env）。严禁寻找、读取、修改或引用 DeepSeek IDE / Agent 自身的 .env 文件（如 D:\\web-ide-agent\\.env 或 IDE 安装目录下的 .env）！",
+        "【严禁泄露与混淆 IDE 凭据】严禁将 IDE 自身启动运行所使用的 DEEPSEEK_API_KEY、IDE 内部端口、IDE 自身工程配置或 IDE 源码作为用户任务的答案、代码或配置输出给用户。用户工程与 IDE 宿主系统配置完全物理隔离，用户项目必须使用其自身的业务配置与 API 密钥。",
+        "【严禁越界访问 IDE 自身工程】严禁使用任何工具读取、修改、删除或搜索 IDE 自身的源码与安装目录（如 D:\\web-ide-agent 及其子目录 server/、client/、electron/、.env、.env.example、package.json 等），除非用户当前打开的工作空间本身就是该目录且有明确指令。"
+      ]
+    },
     "tool_call_schema_compliance": {
       "id": "tool-call-schema-compliance",
       "description": "工具调用参数 Schema 合规性约束",
