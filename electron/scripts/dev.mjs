@@ -49,6 +49,50 @@ function ensureDist() {
     }
 }
 
+// ── 预检与自愈 Electron 预编译二进制 ──
+function ensureElectronBinary() {
+    try {
+        let electronPkgDir = null;
+        try {
+            const resolvedPath = fileURLToPath(import.meta.resolve('electron', import.meta.url));
+            electronPkgDir = path.dirname(resolvedPath);
+        } catch {
+            const localPkg = path.join(ELECTRON_ROOT, 'node_modules', 'electron');
+            const rootPkg = path.join(PROJECT_ROOT, 'node_modules', 'electron');
+            electronPkgDir = fs.existsSync(localPkg) ? localPkg : (fs.existsSync(rootPkg) ? rootPkg : null);
+        }
+
+        if (electronPkgDir && fs.existsSync(electronPkgDir)) {
+            const pathTxt = path.join(electronPkgDir, 'path.txt');
+            let binaryReady = false;
+            if (fs.existsSync(pathTxt)) {
+                const binRelative = fs.readFileSync(pathTxt, 'utf8').trim();
+                const binFull = path.join(electronPkgDir, 'dist', binRelative);
+                if (binRelative && (fs.existsSync(binFull) || fs.existsSync(path.join(electronPkgDir, binRelative)))) {
+                    binaryReady = true;
+                }
+            }
+
+            if (!binaryReady) {
+                log('ELECTRON', colors.yellow, 'Electron prebuilt binary missing. Running install script with mirror...');
+                const installScript = path.join(electronPkgDir, 'install.js');
+                if (fs.existsSync(installScript)) {
+                    execSync(`node "${installScript}"`, {
+                        stdio: 'inherit',
+                        env: {
+                            ...process.env,
+                            ELECTRON_MIRROR: process.env.ELECTRON_MIRROR || 'https://npmmirror.com/mirrors/electron/'
+                        }
+                    });
+                    log('ELECTRON', colors.green, 'Electron binary downloaded successfully.');
+                }
+            }
+        }
+    } catch (err) {
+        log('ELECTRON', colors.yellow, 'Electron binary check skipped:', err.message);
+    }
+}
+
 // ── 步骤 1: 编译 Preload ──
 function buildPreload() {
     log('PRELOAD', colors.magenta, 'Building preload script...');
@@ -277,15 +321,46 @@ function startElectron() {
     log('ELECTRON', colors.green, 'Starting Electron...');
 
     const isWin = process.platform === 'win32';
-    const binName = isWin ? 'electron.cmd' : 'electron';
-    const localBin = path.join(ELECTRON_ROOT, 'node_modules', '.bin', binName);
-    const rootBin = path.join(PROJECT_ROOT, 'node_modules', '.bin', binName);
-    const electronBin = fs.existsSync(localBin) ? localBin : (fs.existsSync(rootBin) ? rootBin : binName);
+    let electronExecutable = null;
 
-    const electron = spawn(electronBin, ['.'], {
+    try {
+        let electronPkgDir = null;
+        try {
+            const resolvedPath = fileURLToPath(import.meta.resolve('electron', import.meta.url));
+            electronPkgDir = path.dirname(resolvedPath);
+        } catch {
+            const localPkg = path.join(ELECTRON_ROOT, 'node_modules', 'electron');
+            const rootPkg = path.join(PROJECT_ROOT, 'node_modules', 'electron');
+            electronPkgDir = fs.existsSync(localPkg) ? localPkg : (fs.existsSync(rootPkg) ? rootPkg : null);
+        }
+
+        if (electronPkgDir) {
+            const pathTxt = path.join(electronPkgDir, 'path.txt');
+            if (fs.existsSync(pathTxt)) {
+                const rel = fs.readFileSync(pathTxt, 'utf8').trim();
+                const directExe = path.join(electronPkgDir, 'dist', rel);
+                if (fs.existsSync(directExe)) {
+                    electronExecutable = directExe;
+                }
+            }
+        }
+    } catch {
+        // fallback to standard bin
+    }
+
+    if (!electronExecutable) {
+        const binName = isWin ? 'electron.cmd' : 'electron';
+        const localBin = path.join(ELECTRON_ROOT, 'node_modules', '.bin', binName);
+        const rootBin = path.join(PROJECT_ROOT, 'node_modules', '.bin', binName);
+        electronExecutable = fs.existsSync(localBin) ? localBin : (fs.existsSync(rootBin) ? rootBin : binName);
+    }
+
+    const isDirectExe = isWin && typeof electronExecutable === 'string' && electronExecutable.endsWith('.exe');
+
+    const electron = spawn(electronExecutable, ['.'], {
         cwd: ELECTRON_ROOT,
         stdio: 'inherit',
-        shell: true,
+        shell: !isDirectExe,
         env: {
             ...process.env,
             NODE_ENV: 'development',
@@ -332,6 +407,9 @@ async function main() {
     });
 
     ensureDist();
+
+    // 0. 预检 Electron 二进制完整性
+    ensureElectronBinary();
 
     // 1. 编译 Preload（CJS，供 Electron 加载）
     buildPreload();
