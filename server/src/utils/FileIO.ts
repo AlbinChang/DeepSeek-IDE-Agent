@@ -415,24 +415,51 @@ export class FileIO {
     /**
      * 全局路径模糊搜索 (返回绝对路径列表)
      */
-    static async searchFiles(workspaceRoot: string, query: string): Promise<string[]> {
+    static async searchFiles(workspaceRoot: string, query: string, maxResults: number = 100): Promise<string[]> {
         const normRoot = PathUtils.normalizePath(workspaceRoot);
         const results: string[] = [];
-        const lowerQuery = query.toLowerCase();
+        const lowerQuery = query.toLowerCase().trim();
+        if (!lowerQuery) return [];
 
-        async function walk(dir: string) {
-            const files = await fs.readdir(dir, { withFileTypes: true });
-            for (const file of files) {
-                const fullPath = PathUtils.normalizePath(path.join(dir, file.name));
-                if (file.name === 'node_modules' || file.name === 'dist' || file.name === '.git') continue;
-                if (file.isDirectory()) {
-                    await walk(fullPath);
-                } else if (file.name.toLowerCase().includes(lowerQuery)) {
-                    results.push(fullPath);
+        const skipDirs = new Set([
+            '.git', '.svn', '.hg', 'node_modules', 'bower_components', 'vendor', 'dist', 'build',
+            'out', 'target', '.next', '.nuxt', '.turbo', '.cache', '.output', '.venv', 'venv', 'env',
+            '.idea', '.vscode', '.ide-agent', '__pycache__', 'coverage', 'tmp', 'temp'
+        ]);
+
+        const queue: Array<{ dir: string; depth: number }> = [{ dir: normRoot, depth: 0 }];
+        const visited = new Set<string>();
+        const maxDepth = 15;
+        let scanned = 0;
+
+        while (queue.length > 0 && results.length < maxResults) {
+            const current = queue.shift()!;
+            if (visited.has(current.dir) || current.depth > maxDepth) continue;
+            visited.add(current.dir);
+
+            try {
+                const files = await fs.readdir(current.dir, { withFileTypes: true });
+                for (const file of files) {
+                    const fullPath = PathUtils.normalizePath(path.join(current.dir, file.name));
+                    if (file.isDirectory()) {
+                        if (!skipDirs.has(file.name) && !file.name.startsWith('.')) {
+                            queue.push({ dir: fullPath, depth: current.depth + 1 });
+                        }
+                    } else if (file.isFile()) {
+                        scanned++;
+                        if (file.name.toLowerCase().includes(lowerQuery)) {
+                            results.push(fullPath);
+                            if (results.length >= maxResults) break;
+                        }
+                    }
                 }
+            } catch {
+                // 忽略权限等异常
             }
+
+            if (scanned > 5000) break;
         }
-        await walk(normRoot);
+
         return results;
     }
 

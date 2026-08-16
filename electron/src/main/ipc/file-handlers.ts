@@ -135,6 +135,55 @@ function resolveSafePath(userPath: string, root?: string): string {
     return resolved;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 全局文件搜索优化配置与工具函数
+// ═══════════════════════════════════════════════════════════════
+
+/** 搜索时忽略的目录（依赖、构建产物、缓存、虚拟环境等） */
+const SEARCH_SKIP_DIRS = new Set([
+    // 版本控制
+    '.git', '.svn', '.hg', '.bzr', 'CVS',
+    // 依赖与包管理器
+    'node_modules', 'bower_components', 'jspm_packages', 'vendor', 'Pods', '.pnpm-store',
+    // 构建产物与缓存
+    'dist', 'build', 'out', 'target', '.next', '.nuxt', '.turbo', '.cache', '.output',
+    '.svelte-kit', '.parcel-cache', '.docusaurus', 'storybook-static', 'coverage', '.nyc_output',
+    // 虚拟环境
+    '.venv', 'venv', 'env', '.env', 'virtualenv', '.conda', 'conda-meta',
+    // IDE 与 Agent 内部目录
+    '.idea', '.vscode', '.vs', '.ide-agent', '.llm', '.tools', '.memory', '.cursor',
+    // 语言与框架缓存
+    '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.gradle', '.cargo', 'tmp', 'temp',
+]);
+
+/** 搜索文件内容时应跳过的二进制/巨型文件后缀 */
+const BINARY_EXTENSIONS = new Set([
+    // 图片
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.tiff', '.tif', '.svg', '.psd', '.ai', '.raw', '.heic', '.avif',
+    // 音视频
+    '.mp3', '.mp4', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv',
+    // 压缩与归档
+    '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.jar', '.war', '.ear', '.iso', '.dmg',
+    // 二进制可执行与动态库
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.node', '.wasm', '.obj', '.o', '.a', '.lib',
+    // 编译字节码
+    '.pyc', '.pyo', '.pyd', '.class', '.dex',
+    // 数据库与数据文件
+    '.db', '.sqlite', '.sqlite3', '.db3', '.parquet', '.arrow', '.feather', '.pkl', '.pickle', '.dat',
+    // 字体与大型文档
+    '.woff', '.woff2', '.ttf', '.otf', '.eot', '.pdf', '.docx', '.xlsx', '.pptx',
+    // Source Map 与压缩打包（单行超大，内容搜索会导致主进程卡顿）
+    '.map', '.min.js', '.min.css',
+]);
+
+/** 搜索内容时应跳过的巨型 lock 文件 */
+const LOCK_FILES = new Set([
+    'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'cargo.lock', 'composer.lock', 'poetry.lock', 'gemfile.lock'
+]);
+
+// 维护全局当前的搜索请求序列，用于取消过期搜索任务
+let globalActiveSearchSeq = 0;
+
 // 简单 MIME 类型推断（按文件扩展名）
 function getMimeType(filePath: string): string {
     const ext = path.extname(filePath).toLowerCase();
@@ -370,69 +419,146 @@ export function registerFileIpc(ipcMain: IpcMain) {
         root?: string;
         maxResults?: number;
     }) => {
+        const searchSeq = ++globalActiveSearchSeq;
         try {
             const resolvedPath = resolveSafePath(params.root || '.', params.root);
-            const maxResults = Math.min(params.maxResults || 50, 200);
-            const searchPattern = params.pattern.toLowerCase();
+            const maxResults = Math.min(Math.max(params.maxResults || 50, 1), 200);
+            const searchPattern = (params.pattern || '').trim().toLowerCase();
             
-            const results: Array<{ path: string; line: number; content: string }> = [];
-            const seenPaths = new Set<string>(); // 按路径去重，避免内容搜索产生大量重复
-            
-            function searchInDir(dir: string) {
-                if (results.length >= maxResults) return;
-                
-                try {
-                    const entries = fs.readdirSync(dir, { withFileTypes: true });
-                    const skipDirs = new Set(['.git', 'node_modules', '.ide-agent', 'dist', '__pycache__']);
-                    
-                    for (const entry of entries) {
-                        if (results.length >= maxResults) return;
-                        
-                        const fullPath = path.join(dir, entry.name);
-                        
-                        if (entry.isDirectory()) {
-                            if (!skipDirs.has(entry.name) && !entry.name.startsWith('.')) {
-                                searchInDir(fullPath);
-                            }
-                        } else if (entry.isFile()) {
-                            if (seenPaths.has(fullPath)) continue;
-                            
-                            // 文件名匹配
-                            if (entry.name.toLowerCase().includes(searchPattern)) {
-                                seenPaths.add(fullPath);
-                                results.push({ path: fullPath, line: 0, content: `[文件名匹配] ${entry.name}` });
-                                continue; // 文件名已命中则跳过内容搜索
-                            }
-                            
-                            // 内容搜索（仅文本文件，限制大小）
-                            try {
-                                const stat = fs.statSync(fullPath);
-                                if (stat.size > 500 * 1024) return; // 跳过大于 500KB 的文件
-                                
-                                const content = fs.readFileSync(fullPath, 'utf-8');
-                                const lines = content.split('\n');
-                                for (let i = 0; i < lines.length && results.length < maxResults; i++) {
-                                    if (lines[i].toLowerCase().includes(searchPattern)) {
-                                        seenPaths.add(fullPath);
-                                        results.push({
-                                            path: fullPath,
-                                            line: i + 1,
-                                            content: lines[i].trim().substring(0, 200),
-                                        });
-                                        break; // 首个命中即停止，不再逐行追加
-                                    }
-                                }
-                            } catch {
-                                // 二进制文件或读取失败，跳过
-                            }
-                        }
-                    }
-                } catch {
-                    // 权限不足，跳过
-                }
+            if (!searchPattern) {
+                return { success: true, results: [] };
             }
 
-            searchInDir(resolvedPath);
+            const results: Array<{ path: string; line: number; content: string }> = [];
+            const seenPaths = new Set<string>();
+            const contentCandidates: string[] = [];
+
+            // 1. 广度优先异步扫描目录（非阻塞主线程）
+            const dirQueue: Array<{ dir: string; depth: number }> = [{ dir: resolvedPath, depth: 0 }];
+            const visitedDirs = new Set<string>();
+            const maxDepth = 15;
+            const maxScannedFiles = 5000; // 最多扫描 5000 个文件，防止超大项目耗时过长
+            let scannedFileCount = 0;
+            let loopCounter = 0;
+
+            const startTime = Date.now();
+            const MAX_SEARCH_TIME_MS = 2500; // 单次搜索最大允许耗时 2.5s
+
+            while (dirQueue.length > 0 && results.length < maxResults) {
+                // 如果已有新的搜索请求发起，立即中止当前过期的搜索
+                if (searchSeq !== globalActiveSearchSeq) {
+                    return { success: false, error: 'SEARCH_ABORTED' };
+                }
+
+                // 超时保护
+                if (Date.now() - startTime > MAX_SEARCH_TIME_MS) {
+                    break;
+                }
+
+                const current = dirQueue.shift()!;
+                if (visitedDirs.has(current.dir) || current.depth > maxDepth) continue;
+                visitedDirs.add(current.dir);
+
+                let entries: fs.Dirent[];
+                try {
+                    entries = await fs.promises.readdir(current.dir, { withFileTypes: true });
+                } catch {
+                    continue; // 忽略无权限等目录
+                }
+
+                for (const entry of entries) {
+                    const fullPath = path.join(current.dir, entry.name);
+
+                    if (entry.isDirectory()) {
+                        // 过滤忽略目录及隐藏目录
+                        if (!SEARCH_SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
+                            dirQueue.push({ dir: fullPath, depth: current.depth + 1 });
+                        }
+                    } else if (entry.isFile()) {
+                        scannedFileCount++;
+                        if (seenPaths.has(fullPath)) continue;
+
+                        const lowerName = entry.name.toLowerCase();
+                        // 优先按文件名匹配（快速路径，无需磁盘读内容）
+                        if (lowerName.includes(searchPattern)) {
+                            seenPaths.add(fullPath);
+                            results.push({
+                                path: fullPath,
+                                line: 0,
+                                content: `[文件名匹配] ${entry.name}`,
+                            });
+                            if (results.length >= maxResults) break;
+                        } else {
+                            // 收集可能需要进行内容搜索的文本文件候选列表
+                            const ext = path.extname(lowerName);
+                            if (!BINARY_EXTENSIONS.has(ext) && !LOCK_FILES.has(lowerName)) {
+                                contentCandidates.push(fullPath);
+                            }
+                        }
+
+                        if (scannedFileCount >= maxScannedFiles) break;
+                    }
+                }
+
+                // 协程让出：每遍历 10 个目录主动让出事件循环，确保 Electron 主线程处理 UI 与 IPC 事件
+                loopCounter++;
+                if (loopCounter % 10 === 0) {
+                    await new Promise<void>((resolve) => setImmediate(resolve));
+                }
+
+                if (scannedFileCount >= maxScannedFiles) break;
+            }
+
+            // 2. 如果文件名匹配未填满 maxResults，且搜索词长度 >= 2，对候选文件进行内容匹配
+            // （单个字符不做全盘内容扫描，避免匹配量过大）
+            if (results.length < maxResults && searchPattern.length >= 2 && contentCandidates.length > 0) {
+                let contentCheckedCount = 0;
+                const MAX_CONTENT_CANDIDATES = 300; // 最多检查 300 个候选文本文件
+                const MAX_FILE_SIZE = 256 * 1024; // 大于 256KB 的文件不进行内容全文扫描
+
+                for (const candidatePath of contentCandidates) {
+                    if (results.length >= maxResults) break;
+                    if (searchSeq !== globalActiveSearchSeq) {
+                        return { success: false, error: 'SEARCH_ABORTED' };
+                    }
+                    if (Date.now() - startTime > MAX_SEARCH_TIME_MS) break;
+
+                    contentCheckedCount++;
+                    try {
+                        const stat = await fs.promises.stat(candidatePath);
+                        if (stat.size > MAX_FILE_SIZE || stat.size === 0) continue;
+
+                        const content = await fs.promises.readFile(candidatePath, 'utf-8');
+                        
+                        // 快速二进制特征检测（前 512 字节含 NULL 字符则跳过）
+                        const sample = content.substring(0, 512);
+                        if (sample.includes('\0')) continue;
+
+                        const lines = content.split('\n');
+                        for (let i = 0; i < lines.length && results.length < maxResults; i++) {
+                            const line = lines[i];
+                            if (line.toLowerCase().includes(searchPattern)) {
+                                seenPaths.add(candidatePath);
+                                results.push({
+                                    path: candidatePath,
+                                    line: i + 1,
+                                    content: line.trim().substring(0, 200),
+                                });
+                                break; // 每个文件只记录首个命中行
+                            }
+                        }
+                    } catch {
+                        // 忽略读取错误
+                    }
+
+                    // 每检查 15 个文件让出一次事件循环
+                    if (contentCheckedCount % 15 === 0) {
+                        await new Promise<void>((resolve) => setImmediate(resolve));
+                    }
+
+                    if (contentCheckedCount >= MAX_CONTENT_CANDIDATES) break;
+                }
+            }
 
             return { success: true, results };
         } catch (err: any) {

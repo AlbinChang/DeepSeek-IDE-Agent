@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, FileText, Loader2, Box } from 'lucide-react';
+import { Search, FileText, Loader2, Box, Code } from 'lucide-react';
 import { useAgentContext } from '@/providers/AgentContext';
 import { electronBridge } from '@/services/electron-bridge';
 
@@ -8,24 +8,31 @@ interface SearchPanelProps {
   activeFile: string;
 }
 
+interface SearchResultItem {
+  path: string;
+  line: number;
+  content: string;
+}
+
 /**
  * 侧边栏全局搜索面板
- * 支持输入关键词模糊搜索工作区文件
+ * 支持输入关键词模糊搜索工作区文件与内容
  */
 export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFile }) => {
   const { workspaceRoot } = useAgentContext();
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<string[]>([]);
+  const [results, setResults] = useState<SearchResultItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSeqRef = useRef<number>(0);
 
   // 自动聚焦输入框
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
-  // 防抖搜索
+  // 防抖搜索与竞态保护
   useEffect(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
 
@@ -37,6 +44,8 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFi
     }
 
     setIsLoading(true);
+    const currentSeq = ++searchSeqRef.current;
+
     debounceTimer.current = setTimeout(async () => {
       try {
         const result = await electronBridge.searchFiles({
@@ -44,15 +53,25 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFi
           root: workspaceRoot,
           maxResults: 100,
         });
-        setResults(result.success && Array.isArray(result.results)
-          ? result.results.map((r: { path: string }) => r.path)
-          : []);
+
+        // 仅在当前请求未被后续搜索覆盖时更新状态
+        if (currentSeq === searchSeqRef.current) {
+          if (result.success && Array.isArray(result.results)) {
+            setResults(result.results);
+          } else {
+            setResults([]);
+          }
+        }
       } catch {
-        setResults([]);
+        if (currentSeq === searchSeqRef.current) {
+          setResults([]);
+        }
       } finally {
-        setIsLoading(false);
+        if (currentSeq === searchSeqRef.current) {
+          setIsLoading(false);
+        }
       }
-    }, 150);
+    }, 250);
 
     return () => {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
@@ -82,6 +101,15 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFi
     return segments.slice(0, -1).join('/');
   };
 
+  const handleClear = () => {
+    setQuery('');
+    setResults([]);
+    setIsLoading(false);
+    searchSeqRef.current++;
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    inputRef.current?.focus();
+  };
+
   return (
     <div className="flex flex-col h-full bg-[#080808]/40" data-testid="search-panel">
       {/* 搜索输入框 */}
@@ -97,13 +125,14 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFi
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="输入关键词搜索文件..."
-            className="w-full bg-white/5 border border-white/10 h-7 pl-7 pr-2 text-[10px] text-white placeholder:text-white/20 focus:outline-none focus:border-white/30 transition-colors font-medium tracking-tight"
+            placeholder="输入关键词搜索文件或内容..."
+            className="w-full bg-white/5 border border-white/10 h-7 pl-7 pr-7 text-[10px] text-white placeholder:text-white/20 focus:outline-none focus:border-white/30 transition-colors font-medium tracking-tight"
           />
           {query && (
             <button
-              onClick={() => setQuery('')}
+              onClick={handleClear}
               className="absolute right-2 text-white/30 hover:text-white/60 text-[14px] leading-none"
+              title="清除搜索"
             >
               ×
             </button>
@@ -140,26 +169,45 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({ onFileSelect, activeFi
 
         {results.length > 0 && (
           <div className="py-1">
-            <div className="px-3 py-1.5 text-[8px] font-black text-white/20 uppercase tracking-[0.2em]">
-              搜索结果 ({results.length})
+            <div className="px-3 py-1.5 flex items-center justify-between text-[8px] font-black text-white/20 uppercase tracking-[0.2em]">
+              <span>搜索结果 ({results.length})</span>
+              {isLoading && <Loader2 size={8} className="animate-spin text-white/40" />}
             </div>
-            {results.map((filePath: string) => {
-              const isActive = activeFile === filePath;
-              const fileName = getFileName(filePath);
-              const dirPath = getDirPath(filePath);
+            {results.map((item: SearchResultItem, index: number) => {
+              const isActive = activeFile === item.path;
+              const fileName = getFileName(item.path);
+              const dirPath = getDirPath(item.path);
+              const isContentMatch = item.line > 0;
+
               return (
                 <div
-                  key={filePath}
-                  onClick={() => onFileSelect(filePath)}
-                  className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer transition-colors group ${
+                  key={`${item.path}:${item.line}:${index}`}
+                  onClick={() => onFileSelect(item.path)}
+                  className={`flex items-start gap-2 px-3 py-1.5 cursor-pointer transition-colors group ${
                     isActive ? 'bg-white/10 text-white' : 'hover:bg-white/5 text-white/60 hover:text-white'
                   }`}
                 >
-                  <FileText size={10} className={`shrink-0 ${isActive ? 'text-white' : 'text-white/30 group-hover:text-white/60'}`} />
+                  {isContentMatch ? (
+                    <Code size={10} className={`shrink-0 mt-0.5 ${isActive ? 'text-white' : 'text-white/30 group-hover:text-white/60'}`} />
+                  ) : (
+                    <FileText size={10} className={`shrink-0 mt-0.5 ${isActive ? 'text-white' : 'text-white/30 group-hover:text-white/60'}`} />
+                  )}
                   <div className="flex flex-col min-w-0 flex-1">
-                    <span className={`text-[10px] truncate font-medium tracking-tight ${isActive ? 'font-black' : ''}`}>
-                      {fileName}
-                    </span>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className={`text-[10px] truncate font-medium tracking-tight ${isActive ? 'font-black' : ''}`}>
+                        {fileName}
+                      </span>
+                      {isContentMatch && (
+                        <span className="shrink-0 text-[8px] bg-white/10 px-1 py-0.2 rounded text-white/70 font-mono">
+                          L{item.line}
+                        </span>
+                      )}
+                    </div>
+                    {isContentMatch && item.content && (
+                      <span className="text-[8px] text-white/40 truncate font-mono mt-0.5 group-hover:text-white/60">
+                        {item.content}
+                      </span>
+                    )}
                     {dirPath && (
                       <span className="text-[8px] text-white/20 truncate font-mono">
                         {dirPath}
