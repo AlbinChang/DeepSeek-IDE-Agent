@@ -329,6 +329,7 @@ export const SourceControl: React.FC = () => {
         const result = await electronBridge.gitInit({ root: workspaceRoot });
         if (!result.success) throw new Error(result.error || 'Git init failed');
         await fetchStatus();
+        window.dispatchEvent(new CustomEvent('ui:file-tree:refresh'));
     } catch (e: any) {
         console.error('Failed to init repo:', e);
         setErrorMessage(e?.message || '初始化存储库失败');

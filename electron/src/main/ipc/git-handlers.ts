@@ -22,9 +22,9 @@ function resolveRepoPath(root?: string): string {
 export function registerGitIpc(ipcMain: IpcMain) {
     
     // ── Git Status ──
-    ipcMain.handle('git:status', async (_event, params: { root?: string }) => {
+    ipcMain.handle('git:status', async (_event, params: { root?: string } = {}) => {
         try {
-            const repoPath = resolveRepoPath(params.root);
+            const repoPath = resolveRepoPath(params?.root);
             const { default: simpleGitFn } = await getSimpleGit();
             const git = simpleGitFn(repoPath);
             
@@ -56,13 +56,13 @@ export function registerGitIpc(ipcMain: IpcMain) {
     });
 
     // ── Git Log ──
-    ipcMain.handle('git:log', async (_event, params: { root?: string; maxCount?: number }) => {
+    ipcMain.handle('git:log', async (_event, params: { root?: string; maxCount?: number } = {}) => {
         try {
-            const repoPath = resolveRepoPath(params.root);
+            const repoPath = resolveRepoPath(params?.root);
             const { default: simpleGitFn } = await getSimpleGit();
             const git = simpleGitFn(repoPath);
             
-            const log = await git.log({ maxCount: params.maxCount || 50 });
+            const log = await git.log({ maxCount: params?.maxCount || 50 });
             
             return {
                 success: true,
@@ -86,14 +86,14 @@ export function registerGitIpc(ipcMain: IpcMain) {
     });
 
     // ── Git Diff ──
-    ipcMain.handle('git:diff', async (_event, params: { root?: string; file?: string }) => {
+    ipcMain.handle('git:diff', async (_event, params: { root?: string; file?: string } = {}) => {
         try {
-            const repoPath = resolveRepoPath(params.root);
+            const repoPath = resolveRepoPath(params?.root);
             const { default: simpleGitFn } = await getSimpleGit();
             const git = simpleGitFn(repoPath);
             
             const diffOptions: string[] = [];
-            if (params.file) diffOptions.push('--', params.file);
+            if (params?.file) diffOptions.push('--', params.file);
             
             const diff = await git.diff(diffOptions);
             
@@ -109,7 +109,7 @@ export function registerGitIpc(ipcMain: IpcMain) {
     // ── Git File History ──
     ipcMain.handle('git:fileHistory', async (_event, params: { root?: string; filePath: string }) => {
         try {
-            const repoPath = resolveRepoPath(params.root);
+            const repoPath = resolveRepoPath(params?.root);
             const { default: simpleGitFn } = await getSimpleGit();
             const git = simpleGitFn(repoPath);
             
@@ -132,9 +132,9 @@ export function registerGitIpc(ipcMain: IpcMain) {
     });
 
     // ── Git Init ──
-    ipcMain.handle('git:init', async (_event, params: { root?: string }) => {
+    ipcMain.handle('git:init', async (_event, params: { root?: string } = {}) => {
         try {
-            const repoPath = resolveRepoPath(params.root);
+            const repoPath = resolveRepoPath(params?.root);
             const { default: simpleGitFn } = await getSimpleGit();
             const git = simpleGitFn(repoPath);
             
@@ -147,9 +147,9 @@ export function registerGitIpc(ipcMain: IpcMain) {
     });
 
     // ── Git Branches ──
-    ipcMain.handle('git:branches', async (_event, params: { root?: string }) => {
+    ipcMain.handle('git:branches', async (_event, params: { root?: string } = {}) => {
         try {
-            const repoPath = resolveRepoPath(params.root);
+            const repoPath = resolveRepoPath(params?.root);
             const { default: simpleGitFn } = await getSimpleGit();
             const git = simpleGitFn(repoPath);
             

@@ -32,7 +32,7 @@ interface StatusBarData {
  * 状态栏组件 (对齐技术规范 第 36 节)
  */
 export const StatusBar: React.FC = () => {
-    const { workspaceRoot } = useAgentContext();
+    const { workspaceRoot, provider, model } = useAgentContext();
     const [status, setStatus] = useState<StatusBarData | null>(null);
     const [activeLang, setActiveLang] = useState('');
     const [activeFile, setActiveFile] = useState('');
@@ -62,7 +62,9 @@ export const StatusBar: React.FC = () => {
     };
 
     useEffect(() => {
-        // 1. 系统状态更新
+        let isMounted = true;
+
+        // 1. 系统与 Git 状态更新
         const fetchStatus = async () => {
             try {
                 let username = 'Electron';
@@ -74,11 +76,44 @@ export const StatusBar: React.FC = () => {
                 } catch {
                     // 获取失败时回退到默认值
                 }
+
+                let gitInfo = { initialized: false, branch: '', isDirty: false };
+                if (workspaceRoot) {
+                    try {
+                        const gitRes = await electronBridge.gitStatus({ root: workspaceRoot });
+                        if (gitRes && gitRes.success) {
+                            gitInfo = {
+                                initialized: true,
+                                branch: (gitRes.current || '').trim() || 'HEAD',
+                                isDirty: Array.isArray(gitRes.files) && gitRes.files.length > 0,
+                            };
+                        } else {
+                            gitInfo = {
+                                initialized: false,
+                                branch: '',
+                                isDirty: false,
+                            };
+                        }
+                    } catch (gitErr) {
+                        console.warn('[StatusBar] gitStatus error:', gitErr);
+                        gitInfo = {
+                            initialized: false,
+                            branch: '',
+                            isDirty: false,
+                        };
+                    }
+                }
+
+                if (!isMounted) return;
+
                 setStatus(prev => ({
                     ...prev,
                     user: { id: username, name: username },
-                    model: { provider: prev?.model?.provider || 'local', id: prev?.model?.id || 'electron' },
-                    git: prev?.git || { branch: '', isDirty: false, initialized: false },
+                    model: {
+                        provider: provider || prev?.model?.provider || 'local',
+                        id: model || prev?.model?.id || 'electron',
+                    },
+                    git: gitInfo,
                     tokens: prev?.tokens || { total: 0 },
                 }));
             } catch (err) {
@@ -90,15 +125,22 @@ export const StatusBar: React.FC = () => {
         fetchStatus();
         const pollInterval = setInterval(fetchStatus, 2000);
 
-        // 2. 订阅系统指标广播 (Websocket 用于高频应急推送)
+        // 2. 订阅系统指标广播 (Websocket / IPC 用于高频应急推送)
         const handleWsMessage = (e: any) => {
             const msg = e.detail;
             if (msg.type === 'system:status_bar' && msg.payload) {
-                setStatus(msg.payload);
+                if (isMounted) setStatus(msg.payload);
+            } else if (msg.type === 'fs:changed' || msg.type === 'fs:change') {
+                fetchStatus();
             }
         };
 
+        const handleTreeRefresh = () => {
+            fetchStatus();
+        };
+
         window.addEventListener(GATEWAY_EVENT, handleWsMessage);
+        window.addEventListener('ui:file-tree:refresh', handleTreeRefresh);
 
         // 3. 订阅光标位置变更 (Section 36.1)
         const handleCursor = (e: any) => setCursor(e.detail);
@@ -122,13 +164,15 @@ export const StatusBar: React.FC = () => {
         window.addEventListener('ui:file:active', handleActiveFile);
 
         return () => {
+            isMounted = false;
             clearInterval(pollInterval);
             window.removeEventListener(GATEWAY_EVENT, handleWsMessage);
+            window.removeEventListener('ui:file-tree:refresh', handleTreeRefresh);
             window.removeEventListener('ui:cursor:update', handleCursor);
             window.removeEventListener('ui:editor:lang_change', handleLangChange);
             window.removeEventListener('ui:file:active', handleActiveFile);
         };
-    }, [workspaceRoot]); // 仅在工作区变化时重建轮询，避免语言变化触发重复定时器
+    }, [workspaceRoot, provider, model]); // 仅在工作区变化时重建轮询，避免语言变化触发重复定时器
 
     const hasActiveFile = !!activeFile;
     const isBuiltIn = hasActiveFile && activeLang.includes('(BUILT-IN)');
