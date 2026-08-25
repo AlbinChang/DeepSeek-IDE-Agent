@@ -47,6 +47,7 @@ const viteRuntimeHelperPattern = /vite[/\\](preload-helper|modulepreload-polyfil
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: './',
   plugins: [
     react(),
     (monacoEditorPlugin as any).default({

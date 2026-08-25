@@ -8,7 +8,7 @@
     "dev": "node scripts/dev.mjs",
     "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --target=node20 --outfile=dist/preload.cjs --format=cjs --external:electron",
     "build:main": "esbuild src/main/index.ts --bundle --platform=node --target=node20 --outfile=dist/main/index.js --format=esm --alias:@=../server/src --external:electron --external:node-pty --external:simple-git --external:iconv-lite --external:jschardet --external:mathjs --external:js-yaml --external:openai --external:dotenv --external:@modelcontextprotocol/* --external:@playwright/* --external:@fastify/*",
-    "build:renderer": "pnpm --filter client run build",
+    "build:renderer": "pnpm --filter client run build && node scripts/copy-renderer.mjs",
     "build": "pnpm run build:preload && pnpm run build:main && pnpm run build:renderer",
     "start": "electron .",
     "pack": "electron-builder --dir",

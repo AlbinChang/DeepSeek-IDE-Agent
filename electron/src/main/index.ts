@@ -13,21 +13,33 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/** Electron 应用根目录 (electron/)。
- * 编译后 __dirname = electron/dist/main/，需两级 ../ 回到 electron/。
- * 开发时若用 tsx 直跑源码则 __dirname = electron/src/main/，同样两级 ../ 回到 electron/。
- */
-export const ELECTRON_ROOT = path.resolve(__dirname, '../..');
-/** 项目根目录 (web-ide-agent/) */
-export const PROJECT_ROOT = path.resolve(ELECTRON_ROOT, '..');
+/** 判断是否打包生产模式 */
+const isPackaged = app.isPackaged;
+
+/** Electron 应用根目录 (开发时为 electron/，打包后为 app.asar 根目录) */
+export const ELECTRON_ROOT = isPackaged ? app.getAppPath() : path.resolve(__dirname, '../..');
+
+/** 项目/用户数据根目录 (开发环境: 源码根目录；打包生产环境: app.getPath('userData')) */
+export const PROJECT_ROOT = isPackaged ? app.getPath('userData') : path.resolve(ELECTRON_ROOT, '..');
+
 /** Server 源码目录 */
-export const SERVER_SRC = path.join(PROJECT_ROOT, 'server', 'src');
-/** 配置文件目录 */
-export const CONFIG_ROOT = path.join(PROJECT_ROOT, 'server', 'src', 'config');
-/** 客户端构建输出 */
-export const CLIENT_DIST = path.join(PROJECT_ROOT, 'client', 'dist');
+export const SERVER_SRC = isPackaged ? path.join(process.resourcesPath, 'config') : path.join(PROJECT_ROOT, 'server', 'src');
+
+/** 配置文件目录 (打包后从 extraResources 的 resources/config 读取，开发时从 server/src/config 读取) */
+export const CONFIG_ROOT = isPackaged
+    ? (fs.existsSync(path.join(process.resourcesPath, 'config'))
+        ? path.join(process.resourcesPath, 'config')
+        : path.join(ELECTRON_ROOT, 'server', 'src', 'config'))
+    : path.join(PROJECT_ROOT, 'server', 'src', 'config');
+
+/** 客户端构建输出 (打包后在 app.asar 内的 dist/renderer，开发时在 client/dist) */
+export const CLIENT_DIST = isPackaged
+    ? path.join(ELECTRON_ROOT, 'dist', 'renderer')
+    : path.join(path.resolve(ELECTRON_ROOT, '..'), 'client', 'dist');
+
 /** 日志目录 */
 export const LOG_DIR = path.join(PROJECT_ROOT, 'logs');
+
 /** Preload 脚本路径（编译后在 electron/dist/preload.cjs）。Electron preload 在 type=module 包内需要 .cjs。 */
 const PRELOAD_PATH = path.join(ELECTRON_ROOT, 'dist', 'preload.cjs');
 
@@ -45,17 +57,23 @@ process.env.CONFIG_ROOT = CONFIG_ROOT;
 let dotenv: any;
 try {
     dotenv = await import('dotenv');
-    const envPath = path.join(PROJECT_ROOT, '.env');
-    if (fs.existsSync(envPath)) {
-        dotenv.config({ path: envPath });
-        console.log('[Electron] .env loaded from', envPath);
+    const envCandidatePaths = isPackaged
+        ? [path.join(process.resourcesPath, '.env'), path.join(PROJECT_ROOT, '.env')]
+        : [path.join(PROJECT_ROOT, '.env')];
+
+    for (const envPath of envCandidatePaths) {
+        if (fs.existsSync(envPath)) {
+            dotenv.config({ path: envPath });
+            console.log('[Electron] .env loaded from', envPath);
+            break;
+        }
     }
 } catch {
     console.log('[Electron] dotenv not available, skipping .env load');
 }
 
 // ── 判断是否开发模式 ──
-const isDev = !app.isPackaged && (process.argv.includes('--dev') || process.env.NODE_ENV === 'development' || !app.isPackaged);
+const isDev = !app.isPackaged && (process.argv.includes('--dev') || process.env.NODE_ENV === 'development');
 
 // ── 窗口引用 ──
 let mainWindow: BrowserWindow | null = null;

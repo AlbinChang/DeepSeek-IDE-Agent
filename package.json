@@ -5,10 +5,10 @@
     "test": "pnpm --filter deepseek-ide-agent-server test",
     "dev": "pnpm run electron:dev",
     "electron:dev": "node electron/scripts/dev.mjs",
-    "electron:build": "pnpm run electron:build:preload && pnpm run electron:build:main && pnpm --filter client run build",
+    "electron:build": "pnpm --filter deepseek-ide-agent-electron run build",
     "electron:build:preload": "pnpm --filter deepseek-ide-agent-electron run build:preload",
     "electron:build:main": "pnpm --filter deepseek-ide-agent-electron run build:main",
-    "electron:dist": "pnpm --filter deepseek-ide-agent-electron run dist",
-    "electron:pack": "pnpm --filter deepseek-ide-agent-electron run pack"
+    "electron:dist": "pnpm run electron:build && pnpm --filter deepseek-ide-agent-electron run dist",
+    "electron:pack": "pnpm run electron:build && pnpm --filter deepseek-ide-agent-electron run pack"
   }
 }
