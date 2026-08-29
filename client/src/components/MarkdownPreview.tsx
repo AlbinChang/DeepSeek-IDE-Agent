@@ -136,8 +136,27 @@ function findMatchRanges(
   return { ranges, error: null };
 }
 
+// 单次注册给渲染层的最大高亮数量：
+// 正则搜索（如 "."）可能产出数十万 Range，直接展开 `new Highlight(...ranges)`
+// 会触发调用栈溢出/参数上限异常导致高亮注册整体失败（表现为高亮凭空消失）。
+const FIND_HIGHLIGHT_PAINT_LIMIT = 5000;
+
 /**
- * 注册 / 更新 CSS.highlights 集合
+ * 判断 Range 是否仍挂接在文档中。
+ * React 重挂载 / 懒加载组件（图片、Mermaid、代码高亮）替换文本节点后，
+ * 旧 Range 会「失活」：CSS Custom Highlight 不再绘制，getBoundingClientRect 归零。
+ */
+function isRangeConnected(range: Range | undefined): boolean {
+  if (!range) return false;
+  try {
+    return !!range.startContainer.isConnected && !!range.endContainer.isConnected;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 注册 / 更新 CSS.highlights 集合（限制绘制数量，并保证当前项永远可见）
  */
 function updateHighlights(ranges: Range[], activeIndex: number) {
   if (typeof CSS === 'undefined' || !('highlights' in CSS) || typeof (globalThis as any).Highlight === 'undefined') {
@@ -146,14 +165,25 @@ function updateHighlights(ranges: Range[], activeIndex: number) {
 
   try {
     const HighlightConstructor = (globalThis as any).Highlight;
-    if (ranges.length > 0) {
-      const allHighlight = new HighlightConstructor(...ranges);
+    let paint: Range[];
+    if (ranges.length > FIND_HIGHLIGHT_PAINT_LIMIT) {
+      paint = ranges.slice(0, FIND_HIGHLIGHT_PAINT_LIMIT);
+      // 当前激活项即使超出绘制上限也需可见，保证用户始终能看到定位结果
+      if (activeIndex >= 0 && activeIndex < ranges.length) {
+        paint.push(ranges[activeIndex]);
+      }
+    } else {
+      paint = ranges;
+    }
+
+    if (paint.length > 0) {
+      const allHighlight = new HighlightConstructor(...paint);
       (CSS as any).highlights.set('md-search-match', allHighlight);
     } else {
       (CSS as any).highlights.delete('md-search-match');
     }
 
-    if (activeIndex >= 0 && activeIndex < ranges.length) {
+    if (activeIndex >= 0 && activeIndex < ranges.length && isRangeConnected(ranges[activeIndex])) {
       const currentHighlight = new HighlightConstructor(ranges[activeIndex]);
       (CSS as any).highlights.set('md-search-current', currentHighlight);
     } else {
@@ -165,37 +195,63 @@ function updateHighlights(ranges: Range[], activeIndex: number) {
 }
 
 /**
- * 精准平滑滚动至匹配项中心
+ * 判断匹配项当前是否已经在滚动容器的可视范围内
  */
-function scrollToMatch(range: Range | undefined, scrollContainer: HTMLElement | null) {
+function isRangeInViewport(range: Range | undefined, scrollContainer: HTMLElement | null): boolean {
+  if (!range || !scrollContainer) return false;
+  try {
+    const rangeRect = range.getBoundingClientRect();
+    const containerRect = scrollContainer.getBoundingClientRect();
+    if (rangeRect.height === 0 && rangeRect.width === 0) {
+      const parent = range.startContainer.parentElement;
+      if (!parent) return false;
+      const pRect = parent.getBoundingClientRect();
+      return pRect.bottom >= containerRect.top + 40 && pRect.top <= containerRect.bottom - 40;
+    }
+    return rangeRect.bottom >= containerRect.top + 40 && rangeRect.top <= containerRect.bottom - 40;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 精准滚动至匹配项并居中对齐（支持瞬时对齐或平滑滚动）
+ */
+function scrollToMatch(
+  range: Range | undefined,
+  scrollContainer: HTMLElement | null,
+  smooth: boolean = true
+) {
   if (!range || !scrollContainer) return;
+  // Range 失活（节点已被 React 替换脱离文档）时 rect 全为 0，
+  // 直接滚动会跳到错误位置（乱跳），必须先做连通性校验。
+  if (!isRangeConnected(range)) return;
 
   try {
     const rangeRect = range.getBoundingClientRect();
     const containerRect = scrollContainer.getBoundingClientRect();
 
-    if (rangeRect.height > 0) {
-      const targetScrollTop =
-        scrollContainer.scrollTop +
-        (rangeRect.top - containerRect.top) -
-        containerRect.height / 2;
+    if (rangeRect.height > 0 || rangeRect.width > 0) {
+      const absoluteTop = scrollContainer.scrollTop + (rangeRect.top - containerRect.top);
+      const targetScrollTop = Math.max(0, absoluteTop - containerRect.height / 2 + rangeRect.height / 2);
       scrollContainer.scrollTo({
-        top: Math.max(0, targetScrollTop),
-        behavior: 'smooth',
+        top: targetScrollTop,
+        behavior: smooth ? 'smooth' : 'auto',
       });
     } else {
-      range.startContainer.parentElement?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-        inline: 'nearest',
-      });
+      const el = range.startContainer.parentElement;
+      if (el) {
+        const elRect = el.getBoundingClientRect();
+        const absoluteTop = scrollContainer.scrollTop + (elRect.top - containerRect.top);
+        const targetScrollTop = Math.max(0, absoluteTop - containerRect.height / 2 + elRect.height / 2);
+        scrollContainer.scrollTo({
+          top: targetScrollTop,
+          behavior: smooth ? 'smooth' : 'auto',
+        });
+      }
     }
-  } catch {
-    range.startContainer.parentElement?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'center',
-      inline: 'nearest',
-    });
+  } catch (err) {
+    console.warn('[MarkdownPreview] scrollToMatch error:', err);
   }
 }
 
@@ -224,6 +280,14 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
   const contentContainerRef = useRef<HTMLDivElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const rangesRef = useRef<Range[]>([]);
+  const currentIndexRef = useRef<number>(-1);
+
+  // 供 MutationObserver / 全局键盘监听等异步回调安全读取的最新状态快照
+  const queryRef = useRef<string>('');
+  const caseRef = useRef<boolean>(false);
+  const wholeWordRef = useRef<boolean>(false);
+  const regexRef = useRef<boolean>(false);
+  const isFindOpenRef = useRef<boolean>(false);
 
   const [isFindOpen, setIsFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
@@ -233,6 +297,15 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
   const [totalMatches, setTotalMatches] = useState(0);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [findError, setFindError] = useState<string | null>(null);
+
+  // 每次渲染后同步状态到 ref，保证异步回调（观察器/事件监听器）永远读取到最新值
+  useEffect(() => {
+    queryRef.current = findQuery;
+    caseRef.current = caseSensitive;
+    wholeWordRef.current = wholeWord;
+    regexRef.current = isRegex;
+    isFindOpenRef.current = isFindOpen;
+  });
 
   // 容器实时滚动监听：用户主动滚动时立即更新缓存
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
@@ -264,77 +337,136 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
     }
   };
 
-  // 执行高亮匹配与定位
-  const executeSearch = useCallback((query: string, options: { caseSensitive: boolean; wholeWord: boolean; isRegex: boolean }) => {
+  // 计算「当前视口最接近」的匹配项索引。
+  // 对海量匹配（如正则 "."）做有上限的扫描，避免逐项 getBoundingClientRect 造成打字卡顿。
+  const bestViewportIndex = useCallback((ranges: Range[], scrollContainer: HTMLElement | null): number => {
+    if (!scrollContainer || ranges.length === 0) return 0;
+    const containerTop = scrollContainer.getBoundingClientRect().top;
+    const scanLimit = Math.min(ranges.length, 400);
+    for (let i = 0; i < scanLimit; i++) {
+      try {
+        const rRect = ranges[i].getBoundingClientRect();
+        if (rRect.top >= containerTop - 10) return i;
+      } catch {
+        // ignore
+      }
+    }
+    return 0;
+  }, []);
+
+  // 刷新搜索结果：
+  // - preserveIndex=true（DOM 变化后的静默刷新）沿用当前索引，绝不滚动，用户阅读位置零扰动；
+  // - preserveIndex=false（搜索条件变化）重新定位，仅在目标离开视口时做瞬时对齐（auto，无动画）。
+  const refreshSearch = useCallback((preserveIndex: boolean, shouldScroll: boolean) => {
     const container = contentContainerRef.current;
+    const query = queryRef.current.trim();
     if (!container || !query) {
       clearHighlights();
       rangesRef.current = [];
+      currentIndexRef.current = -1;
       setTotalMatches(0);
       setCurrentIndex(-1);
       setFindError(null);
       return;
     }
 
-    const { ranges, error } = findMatchRanges(container, query, options);
+    const { ranges, error } = findMatchRanges(container, query, {
+      caseSensitive: caseRef.current,
+      wholeWord: wholeWordRef.current,
+      isRegex: regexRef.current,
+    });
     rangesRef.current = ranges;
     setFindError(error);
     setTotalMatches(ranges.length);
 
     if (error || ranges.length === 0) {
+      currentIndexRef.current = -1;
       setCurrentIndex(-1);
       updateHighlights([], -1);
       return;
     }
 
-    // 计算最接近当前视口的匹配项，避免跳跃
-    const scrollContainer = scrollContainerRef.current;
-    let initialIdx = 0;
-    if (scrollContainer) {
-      const containerTop = scrollContainer.getBoundingClientRect().top;
-      for (let i = 0; i < ranges.length; i++) {
-        const rect = ranges[i].getBoundingClientRect();
-        if (rect.top >= containerTop - 10) {
-          initialIdx = i;
-          break;
-        }
+    let idx = currentIndexRef.current;
+    if (!preserveIndex || idx < 0 || idx >= ranges.length) {
+      idx = bestViewportIndex(ranges, scrollContainerRef.current);
+    }
+    currentIndexRef.current = idx;
+    setCurrentIndex(idx);
+    updateHighlights(ranges, idx);
+
+    if (shouldScroll && !isRangeInViewport(ranges[idx], scrollContainerRef.current)) {
+      scrollToMatch(ranges[idx], scrollContainerRef.current, false);
+    }
+  }, [bestViewportIndex]);
+
+  // 校验缓存 Range 是否仍挂接在文档中：预览内容由 React 异步渲染
+  // （图片懒加载 / Mermaid / 代码高亮 Suspense / ReactMarkdown 重挂载），
+  // 文本节点被替换后旧 Range 失活（高亮消失、rect 归零），必须同步重算。
+  const ensureFreshRanges = useCallback((): Range[] => {
+    const ranges = rangesRef.current;
+    if (ranges.length > 0) {
+      const head = ranges[0];
+      const tail = ranges[ranges.length - 1];
+      if (head.startContainer.isConnected && tail.endContainer.isConnected) {
+        return ranges;
       }
     }
 
-    setCurrentIndex(initialIdx);
-    updateHighlights(ranges, initialIdx);
-    scrollToMatch(ranges[initialIdx], scrollContainer);
+    const container = contentContainerRef.current;
+    const query = queryRef.current.trim();
+    if (!container || !query) return [];
+
+    const result = findMatchRanges(container, query, {
+      caseSensitive: caseRef.current,
+      wholeWord: wholeWordRef.current,
+      isRegex: regexRef.current,
+    });
+    rangesRef.current = result.ranges;
+    setFindError(result.error);
+    setTotalMatches(result.ranges.length);
+    if (result.error || result.ranges.length === 0) {
+      currentIndexRef.current = -1;
+      setCurrentIndex(-1);
+      updateHighlights([], -1);
+      return [];
+    }
+    return result.ranges;
   }, []);
 
-  // 导航至下一个匹配项
+  // 导航至下一个匹配项 (Enter / ArrowDown / F3 / 下一步按钮)
   const goToNextMatch = useCallback(() => {
-    const ranges = rangesRef.current;
+    const ranges = ensureFreshRanges();
     if (ranges.length === 0) return;
-    setCurrentIndex((prev) => {
-      const next = (prev + 1) % ranges.length;
-      updateHighlights(ranges, next);
-      scrollToMatch(ranges[next], scrollContainerRef.current);
-      return next;
-    });
-  }, []);
+    const cur = currentIndexRef.current;
+    const next = cur < 0 ? 0 : (cur + 1) % ranges.length;
+    currentIndexRef.current = next;
+    setCurrentIndex(next);
+    updateHighlights(ranges, next);
+    if (isRangeConnected(ranges[next])) {
+      scrollToMatch(ranges[next], scrollContainerRef.current, true);
+    }
+  }, [ensureFreshRanges]);
 
-  // 导航至上一个匹配项
+  // 导航至上一个匹配项 (Shift+Enter / ArrowUp / Shift+F3 / 上一步按钮)
   const goToPrevMatch = useCallback(() => {
-    const ranges = rangesRef.current;
+    const ranges = ensureFreshRanges();
     if (ranges.length === 0) return;
-    setCurrentIndex((prev) => {
-      const next = (prev - 1 + ranges.length) % ranges.length;
-      updateHighlights(ranges, next);
-      scrollToMatch(ranges[next], scrollContainerRef.current);
-      return next;
-    });
-  }, []);
+    const cur = currentIndexRef.current;
+    const prev = cur <= 0 ? ranges.length - 1 : cur - 1;
+    currentIndexRef.current = prev;
+    setCurrentIndex(prev);
+    updateHighlights(ranges, prev);
+    if (isRangeConnected(ranges[prev])) {
+      scrollToMatch(ranges[prev], scrollContainerRef.current, true);
+    }
+  }, [ensureFreshRanges]);
 
   // 关闭查找栏并清理所有高亮
   const closeFind = useCallback(() => {
     setIsFindOpen(false);
     clearHighlights();
     rangesRef.current = [];
+    currentIndexRef.current = -1;
     setTotalMatches(0);
     setCurrentIndex(-1);
     setFindError(null);
@@ -343,23 +475,60 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
   // 打开查找栏（支持带入选中文本）
   const openFind = useCallback((initialQuery?: string) => {
     setIsFindOpen(true);
-    if (initialQuery !== undefined) {
+    if (initialQuery !== undefined && initialQuery.length > 0) {
       setFindQuery(initialQuery);
     }
-    setTimeout(() => {
+    requestAnimationFrame(() => {
       findInputRef.current?.focus();
       findInputRef.current?.select();
-    }, 0);
+    });
   }, []);
 
-  // 当搜索条件改变或文档重新渲染时触发搜索
+  // 当搜索条件改变或文档重新渲染时触发搜索 (40ms 防抖，保障高频打字流畅)
   useEffect(() => {
-    if (isFindOpen) {
-      executeSearch(findQuery, { caseSensitive, wholeWord, isRegex });
-    } else {
+    if (!isFindOpen) {
       clearHighlights();
+      rangesRef.current = [];
+      currentIndexRef.current = -1;
+      return;
     }
-  }, [isFindOpen, findQuery, caseSensitive, wholeWord, isRegex, executeSearch, previewContent]);
+
+    const timer = window.setTimeout(() => {
+      refreshSearch(false, true);
+    }, 40);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isFindOpen, findQuery, caseSensitive, wholeWord, isRegex, refreshSearch, previewContent]);
+
+  // DOM 变更守卫（修复「高亮一会儿就消失」）：
+  // 预览内容由 React 异步渲染——图片懒加载、Mermaid 图表、代码高亮 Suspense 解析
+  // 以及 ReactMarkdown 重挂载都会替换文本节点，导致 CSS Custom Highlight 的 Range
+  // 失活、绘制消失。用 MutationObserver 监听内容树变化，静默重算并沿用当前索引，
+  // 用户正在阅读的位置与高亮始终存活。
+  useEffect(() => {
+    const container = contentContainerRef.current;
+    if (!container || typeof MutationObserver === 'undefined') return;
+
+    let timer: number | null = null;
+    const observer = new MutationObserver(() => {
+      if (!isFindOpenRef.current) return;
+      if (!queryRef.current.trim()) return;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (!isFindOpenRef.current || !queryRef.current.trim()) return;
+        refreshSearch(true, false); // 沿用当前索引、绝不滚动
+      }, 120);
+    });
+    observer.observe(container, { childList: true, subtree: true });
+
+    return () => {
+      observer.disconnect();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [refreshSearch]);
 
   // 组件卸载时彻底清除 DOM 高亮标签
   useEffect(() => {
@@ -368,22 +537,26 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
     };
   }, []);
 
-  // 快捷键支持：Ctrl+F, F3, Shift+F3, Escape
+  // 快捷键支持：Ctrl+F 唤起；Enter / Shift+Enter / ↑ / ↓ / F3 / Shift+F3 导航；Escape 关闭。
+  // 关键设计：导航键同时挂在 window（捕获阶段）上。查找栏打开期间，焦点经常落在
+  // 预览文档区（body）而非输入框（用户点击文档查看内容后焦点丢失），
+  // 此时输入框自身 onKeyDown 收不到按键，必须由全局监听兜底，保证导航永不失灵。
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isCtrlF = (e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F');
       const isF3 = e.key === 'F3';
       const isEscape = e.key === 'Escape';
 
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isFindWidget = !!activeEl?.closest('.markdown-find-widget');
+      const isOtherInput = !!(
+        activeEl &&
+        !isFindWidget &&
+        (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement || activeEl.isContentEditable)
+      );
+
       if (isCtrlF) {
-        const activeEl = document.activeElement as HTMLElement | null;
-        const isFindWidget = !!activeEl?.closest('.markdown-find-widget');
         const isInsidePreview = !!(scrollContainerRef.current && (scrollContainerRef.current.contains(activeEl) || activeEl === document.body));
-        const isOtherInput = !!(
-          activeEl &&
-          !isFindWidget &&
-          (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement || activeEl.isContentEditable)
-        );
 
         if (!isOtherInput || isInsidePreview || isFindWidget) {
           e.preventDefault();
@@ -391,17 +564,42 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
           const selectedText = window.getSelection()?.toString()?.trim() || '';
           openFind(selectedText && selectedText.length < 200 ? selectedText : undefined);
         }
-      } else if (isF3) {
-        if (isFindOpen && rangesRef.current.length > 0) {
+        return;
+      }
+
+      // 查找栏打开期间的全局导航兜底：
+      // - 焦点在查找输入框内 → 交给 handleFindInputKeyDown 处理（避免双触发）；
+      // - 焦点在其他输入框（如 Agent 聊天框）→ 完全不干预；
+      // - 焦点在文档区 / body / 其他位置 → 全局接管导航，修复「上下键失灵」。
+      if (isFindOpen && !isOtherInput) {
+        if (e.key === 'Enter') {
+          if (isFindWidget) return;
           e.preventDefault();
-          if (e.shiftKey) {
-            goToPrevMatch();
-          } else {
-            goToNextMatch();
-          }
+          if (e.shiftKey) goToPrevMatch(); else goToNextMatch();
+          return;
         }
-      } else if (isEscape) {
-        if (isFindOpen) {
+        if (e.key === 'ArrowDown') {
+          if (isFindWidget) return;
+          e.preventDefault();
+          goToNextMatch();
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          if (isFindWidget) return;
+          e.preventDefault();
+          goToPrevMatch();
+          return;
+        }
+        if (isF3) {
+          e.preventDefault();
+          if (e.shiftKey) goToPrevMatch(); else goToNextMatch();
+          return;
+        }
+      }
+
+      if (isEscape) {
+        // 仅当焦点不在其他输入框时才关闭查找栏，避免干扰其他面板的 Escape 语义
+        if (isFindOpen && !isOtherInput) {
           e.preventDefault();
           closeFind();
         }
@@ -431,6 +629,12 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
       } else {
         goToNextMatch();
       }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      goToNextMatch();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      goToPrevMatch();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       closeFind();
@@ -615,6 +819,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
           {/* 选项：区分大小写 Aa */}
           <button
             type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => setCaseSensitive((prev) => !prev)}
             title="区分大小写 (Alt+C)"
             className={`flex h-6 w-6 items-center justify-center rounded text-[10px] font-mono font-bold transition-all ${
@@ -629,6 +834,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
           {/* 选项：全字匹配 \b */}
           <button
             type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => setWholeWord((prev) => !prev)}
             title="全字匹配 (Alt+W)"
             className={`flex h-6 w-6 items-center justify-center rounded text-[10px] font-mono font-bold transition-all ${
@@ -643,6 +849,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
           {/* 选项：正则表达式 .* */}
           <button
             type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => setIsRegex((prev) => !prev)}
             title="正则表达式 (Alt+R)"
             className={`flex h-6 w-6 items-center justify-center rounded text-[10px] font-mono font-bold transition-all ${
@@ -659,9 +866,10 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
           {/* 上一个匹配项 */}
           <button
             type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={goToPrevMatch}
             disabled={totalMatches === 0}
-            title="上一个匹配项 (Shift+Enter / Shift+F3)"
+            title="上一个匹配项 (Shift+Enter / Shift+F3 / ↑)"
             className="flex h-6 w-6 items-center justify-center rounded text-white/60 hover:bg-white/10 hover:text-white disabled:opacity-25 disabled:pointer-events-none transition-all"
           >
             <ChevronUp className="h-3.5 w-3.5" />
@@ -670,9 +878,10 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
           {/* 下一个匹配项 */}
           <button
             type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={goToNextMatch}
             disabled={totalMatches === 0}
-            title="下一个匹配项 (Enter / F3)"
+            title="下一个匹配项 (Enter / F3 / ↓)"
             className="flex h-6 w-6 items-center justify-center rounded text-white/60 hover:bg-white/10 hover:text-white disabled:opacity-25 disabled:pointer-events-none transition-all"
           >
             <ChevronDown className="h-3.5 w-3.5" />
@@ -681,6 +890,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
           {/* 关闭查找栏 */}
           <button
             type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={closeFind}
             title="关闭 (Escape)"
             className="flex h-6 w-6 items-center justify-center rounded text-white/40 hover:bg-white/10 hover:text-white transition-all ml-0.5"
