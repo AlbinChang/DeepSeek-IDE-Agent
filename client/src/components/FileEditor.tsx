@@ -7,7 +7,7 @@ import * as monaco from 'monaco-editor';
 loader.config({ monaco });
 (window as any).monaco = monaco;
 
-import { Lock, FileCode, Eye, Code, ChevronRight } from 'lucide-react';
+import { Lock, FileCode, Eye, Code, ChevronRight, Search } from 'lucide-react';
 import { useInlineCompletions } from '@/hooks/useInlineCompletions';
 import { GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
@@ -716,6 +716,12 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
           handleSaveFile();
         }
 
+        // Markdown 预览模式下快捷键 Ctrl+F 转发至预览查找组件
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F') && viewMode === 'preview') {
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('ui:markdown:find'));
+        }
+
         if (
           e.key === 'Backspace' &&
           !e.ctrlKey &&
@@ -1346,6 +1352,16 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                 >
                   {viewMode === 'preview' ? <Code size={9} /> : <Eye size={9} />}
                   {viewMode === 'preview' ? 'EDIT' : 'PREVIEW'}
+                </button>
+              )}
+              {isMarkdown && viewMode === 'preview' && (
+                <button 
+                  onClick={() => window.dispatchEvent(new CustomEvent('ui:markdown:find'))}
+                  title="在文档中查找文本 (Ctrl+F)"
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider text-white/50 hover:text-white hover:bg-white/10 border border-transparent hover:border-white/10 transition-all"
+                >
+                  <Search size={9} />
+                  FIND
                 </button>
               )}
               {isCsv && (
