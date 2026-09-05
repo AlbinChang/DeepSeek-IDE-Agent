@@ -1,5 +1,6 @@
 ﻿import React, { useEffect, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
+import { ContextMenu, ContextMenuItem } from '@/components/ContextMenu';
 
 interface MermaidProps {
     chart: string;
@@ -198,23 +199,21 @@ export const Mermaid: React.FC<MermaidProps> = ({ chart }) => {
             
             {/* 上下文右键菜单 */}
             {contextMenu && (
-                <div 
-                    className="fixed z-[100] bg-[#121212] border border-white/10 shadow-2xl py-1 text-white text-[10px] min-w-[200px] font-medium"
-                    style={{ top: Math.min(contextMenu.y, window.innerHeight - 60), left: Math.min(contextMenu.x, window.innerWidth - 220) }}
+                <ContextMenu
+                    x={contextMenu.x}
+                    y={contextMenu.y}
+                    onClose={() => setContextMenu(null)}
+                    testId="mermaid-context-menu"
                 >
-                    <div 
-                        className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center justify-between gap-2 transition-colors"
-                        onClick={(e) => {
-                            e.stopPropagation();
+                    <ContextMenuItem
+                        icon={<ExternalLink size={12} />}
+                        label="在新标签页中查看 (Open in New Tab)"
+                        onClick={() => {
                             openInNewTab();
+                            setContextMenu(null);
                         }}
-                    >
-                        <div className="flex items-center gap-2">
-                            <ExternalLink size={12} className="opacity-50" />
-                            <span>在新标签页中查看 (Open in New Tab)</span>
-                        </div>
-                    </div>
-                </div>
+                    />
+                </ContextMenu>
             )}
             
             {/* 顶角悬浮提示 */}

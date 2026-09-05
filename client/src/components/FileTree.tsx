@@ -9,6 +9,7 @@ import { useAgentContext } from '@/providers/AgentContext';
 import { GATEWAY_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 import { getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspaceEntry } from '@/services/RecentWorkspaces';
+import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from '@/components/ContextMenu';
 
 interface FileNode {
   name: string;
@@ -112,6 +113,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   const handleContextMenu = (e: React.MouseEvent, node: FileNode) => {
     e.preventDefault();
     e.stopPropagation();
+    setEmptyMenu(null);
     setContextMenu({ x: e.clientX, y: e.clientY, node });
   };
 
@@ -808,153 +810,125 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     <div className="flex flex-col h-full bg-[#000000]" data-testid="file-tree-container">
       {/* Context Menu */}
       {contextMenu && (
-        <div 
-          className="fixed z-50 bg-[#121212] border border-white/10 shadow-2xl py-1 text-white text-[10px] min-w-[170px] font-medium"
-          style={{ top: Math.min(contextMenu.y, window.innerHeight - 80), left: Math.min(contextMenu.x, window.innerWidth - 160) }}
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          testId="file-tree-context-menu"
         >
-          <div 
-            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
+          <ContextMenuItem
+            icon={<Copy size={12} />}
+            label="复制相对路径 (Relative)"
+            onClick={() => {
               const relativePath = contextMenu.node.path.slice(workspaceRoot?.length || 0).replace(/^[\\\/]/, '');
               copyToClipboard(relativePath);
               setContextMenu(null);
             }}
-          >
-            <Copy size={12} className="opacity-50" />
-            <span>复制相对路径 (Relative)</span>
-          </div>
-          <div 
-            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
+          />
+          <ContextMenuItem
+            icon={<Copy size={12} />}
+            label="复制绝对路径 (Absolute)"
+            onClick={() => {
               copyToClipboard(contextMenu.node.path);
               setContextMenu(null);
             }}
-          >
-            <Copy size={12} className="opacity-50" />
-            <span>复制绝对路径 (Absolute)</span>
-          </div>
+          />
+          {!contextMenu.node.jarBase && <ContextMenuSeparator />}
           {!contextMenu.node.jarBase && (
-          <div className="border-t border-white/5 my-1" />
+            <ContextMenuItem
+              icon={<FilePlus size={12} />}
+              label="新建文件"
+              onClick={() => {
+                startNewItem('file', getParentDirPath(contextMenu.node));
+                setContextMenu(null);
+              }}
+            />
           )}
           {!contextMenu.node.jarBase && (
-          <div 
-            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
-              startNewItem('file', getParentDirPath(contextMenu.node));
-              setContextMenu(null);
-            }}
-          >
-            <FilePlus size={12} className="opacity-50" />
-            <span>新建文件</span>
-          </div>
+            <ContextMenuItem
+              icon={<FolderPlus size={12} />}
+              label="新建文件夹"
+              onClick={() => {
+                startNewItem('folder', getParentDirPath(contextMenu.node));
+                setContextMenu(null);
+              }}
+            />
+          )}
+          {!contextMenu.node.jarBase && <ContextMenuSeparator />}
+          {!contextMenu.node.jarBase && (
+            <ContextMenuItem
+              icon={<Folder size={12} />}
+              label="在文件资源管理器中显示"
+              onClick={() => {
+                const targetPath = contextMenu.node.path;
+                console.log(`[FileTree] revealInExplorer: path="${targetPath}"`);
+                if (electronBridge.isElectron) {
+                  electronBridge.revealInExplorer(targetPath).then(result => {
+                    console.log(`[FileTree] revealInExplorer result:`, result);
+                    if (!result.success) {
+                      console.error(`[FileTree] revealInExplorer failed: ${result.error}`);
+                    }
+                  }).catch(err => {
+                    console.error(`[FileTree] revealInExplorer error:`, err);
+                  });
+                }
+                setContextMenu(null);
+              }}
+            />
           )}
           {!contextMenu.node.jarBase && (
-          <div 
-            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
-              startNewItem('folder', getParentDirPath(contextMenu.node));
-              setContextMenu(null);
-            }}
-          >
-            <FolderPlus size={12} className="opacity-50" />
-            <span>新建文件夹</span>
-          </div>
+            <ContextMenuItem
+              icon={<Pencil size={12} />}
+              label={`重命名${contextMenu.node.isDirectory ? '目录' : '文件'}`}
+              onClick={() => {
+                setRenameTarget(contextMenu.node);
+                setRenameInput(contextMenu.node.name);
+                setRenameError(null);
+                setContextMenu(null);
+              }}
+            />
           )}
+          {!contextMenu.node.jarBase && <ContextMenuSeparator />}
           {!contextMenu.node.jarBase && (
-          <div className="border-t border-white/5 my-1" />
+            <ContextMenuItem
+              icon={<Trash2 size={12} />}
+              label={`删除${contextMenu.node.isDirectory ? '目录' : '文件'}`}
+              danger
+              onClick={() => {
+                setDeleteConfirm({ node: contextMenu.node });
+                setDeleteError(null);
+                setContextMenu(null);
+              }}
+            />
           )}
-          {!contextMenu.node.jarBase && (
-          <div 
-            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
-              const targetPath = contextMenu.node.path;
-              console.log(`[FileTree] revealInExplorer: path="${targetPath}"`);
-              if (electronBridge.isElectron) {
-                electronBridge.revealInExplorer(targetPath).then(result => {
-                  console.log(`[FileTree] revealInExplorer result:`, result);
-                  if (!result.success) {
-                    console.error(`[FileTree] revealInExplorer failed: ${result.error}`);
-                  }
-                }).catch(err => {
-                  console.error(`[FileTree] revealInExplorer error:`, err);
-                });
-              }
-              setContextMenu(null);
-            }}
-          >
-            <Folder size={12} className="opacity-50" />
-            <span>在文件资源管理器中显示</span>
-          </div>
-          )}
-          {!contextMenu.node.jarBase && (
-          <div 
-            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
-              setRenameTarget(contextMenu.node);
-              setRenameInput(contextMenu.node.name);
-              setRenameError(null);
-              setContextMenu(null);
-            }}
-          >
-            <Pencil size={12} className="opacity-50" />
-            <span>重命名{contextMenu.node.isDirectory ? '目录' : '文件'}</span>
-          </div>
-          )}
-          {!contextMenu.node.jarBase && (
-          <div className="border-t border-white/5 my-1" />
-          )}
-          {!contextMenu.node.jarBase && (
-          <div 
-            className="px-3 py-2 hover:bg-red-500/20 cursor-pointer flex items-center gap-2 transition-colors text-red-400"
-            onClick={(e) => {
-              e.stopPropagation();
-              setDeleteConfirm({ node: contextMenu.node });
-              setDeleteError(null);
-              setContextMenu(null);
-            }}
-          >
-            <Trash2 size={12} />
-            <span>删除{contextMenu.node.isDirectory ? '目录' : '文件'}</span>
-          </div>
-          )}
-        </div>
+        </ContextMenu>
       )}
 
       {/* 空白区域右键菜单（新建文件/文件夹） */}
       {emptyMenu && (
-        <div 
-          className="fixed z-50 bg-[#121212] border border-white/10 shadow-2xl py-1 text-white text-[10px] min-w-[170px] font-medium"
-          style={{ top: Math.min(emptyMenu.y, window.innerHeight - 80), left: Math.min(emptyMenu.x, window.innerWidth - 160) }}
+        <ContextMenu
+          x={emptyMenu.x}
+          y={emptyMenu.y}
+          onClose={() => setEmptyMenu(null)}
+          testId="file-tree-empty-context-menu"
         >
-          <div 
-            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
+          <ContextMenuItem
+            icon={<FilePlus size={12} />}
+            label="新建文件"
+            onClick={() => {
               startNewItem('file', '.');
               setEmptyMenu(null);
             }}
-          >
-            <FilePlus size={12} className="opacity-50" />
-            <span>新建文件</span>
-          </div>
-          <div 
-            className="px-3 py-2 hover:bg-white/10 cursor-pointer flex items-center gap-2 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
+          />
+          <ContextMenuItem
+            icon={<FolderPlus size={12} />}
+            label="新建文件夹"
+            onClick={() => {
               startNewItem('folder', '.');
               setEmptyMenu(null);
             }}
-          >
-            <FolderPlus size={12} className="opacity-50" />
-            <span>新建文件夹</span>
-          </div>
-        </div>
+          />
+        </ContextMenu>
       )}
 
       {/* 删除确认对话框 */}
@@ -1269,6 +1243,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
+              setContextMenu(null);
               setEmptyMenu({ x: e.clientX, y: e.clientY });
             }}
           >
