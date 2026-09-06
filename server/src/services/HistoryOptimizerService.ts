@@ -58,12 +58,11 @@ export class HistoryOptimizerService {
             //先进简单过滤：删除所有工具调用消息，只保留用户消息和助手的最终回答消息
             let filtered = processed.filter(m => m.role === "user" || (m.role === "assistant" && !m.tool_calls));
             
-            //二次检查过滤后的消息是否仍然过长，如果是则进行压缩
-            const filteredTokens = HistoryCompressor.estimateTokens(filtered);
-            if( filteredTokens > 96000 || filtered.length > 4 ) {
+            
+            if(  filtered.length > 10 ) {
                 
-                //返回最近的4条件用户消息和助手消息，确保不丢失重要的上下文，同时压缩历史以适应模型输入限制
-                const recentMessages = filtered.slice(-4);
+                //返回最近的10条用户消息和助手消息，确保不丢失重要的上下文，同时压缩历史以适应模型输入限制
+                const recentMessages = filtered.slice(-10);
                 
                 // 压缩后的历史也需要清理 reasoning_content
                 return {

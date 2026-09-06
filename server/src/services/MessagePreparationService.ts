@@ -13,7 +13,7 @@ export interface MessagePreparationOptions {
 
 /**
  * 统一的消息预处理器：
- * - 维持固定前缀（system + pinned user intent）
+ * - 维持固定前缀（system + 历史  + pinned user intent）
  * - 按字节阈值裁剪历史，避免上下文无限膨胀
  * - 校验工具调用链完整性，防止 API 400
  */
@@ -23,16 +23,32 @@ export class MessagePreparationService {
             systemPrompt,
             pinnedUserMessage,
             incomingMessages,
-            pinnedUserPrefix = "**当前用户意图**: \n",
+            pinnedUserPrefix = "",
             minMessagesBeforeTrim = 10,
             maxBytes = globalConfig.agent.maxHistoryBytes,
             lowWatermarkBytes = globalConfig.agent.lowWatermarkBytes,
         } = options;
 
         const result: any[] = [{ role: "system", content: systemPrompt }];
-        result.push({ role: "user", content: `${pinnedUserPrefix}${pinnedUserMessage}` });
+        const pinnedUserMsg = { role: "user", content: `${pinnedUserPrefix}${pinnedUserMessage}` };
 
         let msgsToProcess = [...incomingMessages];
+
+        // 找到 pinnedUserMsg 在 incomingMessages 中的索引
+        const pinnedUserIndex = msgsToProcess.findIndex(
+            (m) => m.role === "user" && m.content === pinnedUserMsg.content
+        );
+
+        // pinnedUserIndex之前的消息不做裁剪，直接加入结果
+        if (pinnedUserIndex > 0) {
+            result.push(...msgsToProcess.slice(1, pinnedUserIndex+1)); //1是因为第0条是system消息，已经加入result了
+            msgsToProcess = msgsToProcess.slice(pinnedUserIndex+1);
+        }
+        else
+        {
+            // 如果 pinnedUserMsg 不在 incomingMessages 中，则将其加入结果
+            result.push(pinnedUserMsg);
+        }
 
         // 预计算每条消息的 JSON 字节数（只序列化一次每条消息），用于 O(n) 增量裁剪
         const msgJsonByteLens = msgsToProcess.map(

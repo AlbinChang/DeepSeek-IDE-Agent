@@ -639,15 +639,16 @@ export class AgentTurnEngine {
                     emit({ type: "text", content: visibleReasoning, turn: turns });
                 }
 
-                // 工具循环结束（最终回答），持久化时保留推理内容
+                // 工具循环结束（最终回答），持久化时不保留推理内容
                 const assistantMsgToSave = { ...assistantMsg };
                 if (!options.skipPersist) {
+                    assistantMsgToSave.reasoning_content = null; // 避免重复保存 reasoning_content，节省存储空间
                     const historyToSave = [...optimizedMessages, lastUserMsgRecord, assistantMsgToSave];
                     agentService.updateSessionHistory(userId, historyToSave, root);
                 }
 
-                finalAssistantContent = assistantMsgToSave.content || "";
-                finalAssistantReasoning = assistantMsgToSave.reasoning_content || "";
+                finalAssistantContent = assistantMsg.content || "";
+                finalAssistantReasoning = assistantMsg.reasoning_content || "";
 
                 break; // 退出内层轮次循环，交还控制权给调用方
             }

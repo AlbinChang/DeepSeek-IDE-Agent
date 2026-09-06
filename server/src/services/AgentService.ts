@@ -1217,27 +1217,7 @@ export class AgentService extends EventEmitter {
             '2. **历史参考**：如果【当前意图】模糊或涉及连续操作，请参考 assistant 消息来补全上下文，但不要被旧任务带偏。',
             '3. **任务一致性**：若任务状态或任务 ID 存在不确定性（尤其历史被裁剪后），先调用 `list_todos` 获取最新清单，再执行 `append_todo` / `update_todo` / `delete_todo`。`update_todo` 通过 `todos` 数组传参（每项含 id + 更新字段），`delete_todo` 通过 `ids` 传参；如与【当前意图】冲突，以【当前意图】为准并更新或删除旧 TODO。',
             '4. **终态前置**：在输出最终答复前，必须确保所有 TODO 任务均已进入 `completed` 或 `failed` 状态，否则视为流程未完成，不允许结束。'
-        ].join('\n');
-
-        // 注入长期指令记忆机制 (条数与偏移量由 .env 配置)
-        let memoryBlock = "";
-        try {
-            const { MemoryService } = await import('./MemoryService.js');
-            const recentInstructs = await MemoryService.getRecentInstructions(
-                root,
-                globalConfig.memory.recentInstructionsLimit,
-                globalConfig.memory.recentInstructionsSkip
-            );
-            if (recentInstructs && recentInstructs.length > 0) {
-                memoryBlock = [
-                    '### 历史用户指令记录 (Recent Instructions Memory)',
-                    '以下是用户在此工作区最近几次的指令（按时间倒序），这能帮助你理解当前操作的上下文连贯性：',
-                    ...recentInstructs.map((record, index) => `${index + 1}. [${record.date}] ${record.instruction}`)
-                ].join('\n');
-            }
-        } catch (e) {
-            console.warn('[AgentService] Failed to load memory service instructs:', e);
-        }
+        ].join('\n');        
 
         // MCP 工具系统提示词（动态：随 workspace 的 .mcp/ 配置变化）
         let mcpSystemPrompt = '';
@@ -1337,9 +1317,6 @@ export class AgentService extends EventEmitter {
 
             // 4.8 用户 MCP 工具（来自 workspace .mcp/ 配置，动态注入）
             mcpSystemPrompt,
-
-            // 5. 历史指令记忆（每次发新消息都会刷新）
-            memoryBlock,
 
             // 6. 防重复犯错记忆（每次发新消息都会刷新）
             neverMistakePrompt,
