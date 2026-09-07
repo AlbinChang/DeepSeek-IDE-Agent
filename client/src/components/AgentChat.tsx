@@ -540,13 +540,20 @@ export const AgentChat: React.FC = () => {
         };
     }, []);
 
-    // 流式结束：重置快照与用户滚离标记，为下一轮对话准备
+    // 流式结束：重置快照与用户滚离标记，为下一轮对话准备；
+    // 并在用户当前未主动操作时补一次跟随，确保最终答复可见。
+    // （修复：模型已生成最终答复，但视图停留在工具调用区域的「断流假象」）
     useEffect(() => {
-        if (!isLoading) {
-            lastMessagesSnapshotRef.current = messages;
-            userScrolledUpRef.current = false;
+        if (isLoading) return;
+        lastMessagesSnapshotRef.current = messages;
+        userScrolledUpRef.current = false;
+        const idleMs = lastGestureTimeRef.current < 0
+            ? Infinity
+            : Date.now() - lastGestureTimeRef.current;
+        if (messages.length > 0 && idleMs > 800) {
+            followToBottom(0);
         }
-    }, [isLoading]);
+    }, [isLoading, messages.length, followToBottom]);
 
     useEffect(() => {
         return () => {
@@ -824,10 +831,19 @@ export const AgentChat: React.FC = () => {
                         userScrolledUpRef.current = !atBottom;
                     };
                     el.addEventListener('scroll', onScroll, { passive: true });
-                    // 用户手势来源：鼠标滚轮 / 触屏滑动 / 原生滚动条拖动（pointerdown）
+                    // 用户手势来源：鼠标滚轮 / 触屏滑动 / 原生滚动条拖动
                     el.addEventListener('wheel', markUserGesture, { passive: true });
                     el.addEventListener('touchmove', markUserGesture, { passive: true });
-                    el.addEventListener('pointerdown', markUserGesture);
+                    // 仅当按下发生在滚动条区域时才视为滚动意图：正文区域的点击
+                    // （工具卡片 / 复制按钮 / 链接等）不得打开手势窗口，否则与布局
+                    // 抖动（TodoList 高度变化 / isFinal markdown 转换）产生的非底部
+                    // scroll 事件结合，会把用户误标为「已滚离」，导致流结束后的
+                    // 最终答复永远不被自动跟随显示。
+                    el.addEventListener('pointerdown', (ev: PointerEvent) => {
+                        const rect = el.getBoundingClientRect();
+                        const onScrollbar = ev.clientX >= rect.right - 26 || ev.clientY >= rect.bottom - 26;
+                        if (onScrollbar) markUserGesture();
+                    });
                     return () => {
                         el.removeEventListener('scroll', onScroll);
                         el.removeEventListener('wheel', markUserGesture);

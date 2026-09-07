@@ -477,6 +477,16 @@ export function useAgentSSE() {
                     let lastIndex = next.length - 1;
                     let last = next[lastIndex];
 
+                    // done 事件幂等：若最后一条 assistant 消息已处于终态，且本次
+                    // 增量仅包含重复的 done 事件，则不再新建空白终态消息
+                    // （避免重复 done 生成空消息气泡并污染历史记录）
+                    if (isDone && last && last.role === "assistant" && last.isFinal
+                        && textDeltas.length === 0 && reasoningDeltas.length === 0
+                        && annotations.length === 0 && errorContent === null
+                        && initTraceId === null) {
+                        return next;
+                    }
+
                     if (!last || last.role !== "assistant" || last.isFinal) {
                         last = {
                             id: currentAssistantMsgId,

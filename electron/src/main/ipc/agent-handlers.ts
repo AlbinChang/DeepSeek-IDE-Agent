@@ -136,6 +136,10 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
             }
         };
 
+        // handleChat 在正常完成路径已自行发送 done 事件；此处兜底仅在
+        // handleChat 未发送任何终态事件（中断/异常）时补发，避免重复 done。
+        let terminalEmitted = false;
+
         void (async () => {
             try {
                 const agentService = await getAgentService();
@@ -163,6 +167,9 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                     locale,
                     abortController.signal,
                     (chunk: any) => {
+                        if (chunk.type === 'done' || chunk.type === 'error') {
+                            terminalEmitted = true;
+                        }
                         // 将 SSE 事件格式映射为 IPC 事件
                         sendEvent({
                             type: chunk.type || 'text',
@@ -186,8 +193,10 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                     root,
                 );
 
-                // 完成事件
-                sendEvent({ type: 'done', timestamp: Date.now() });
+                // 完成事件兜底（handleChat 在中断/异常路径可能未发送终态事件）
+                if (!terminalEmitted) {
+                    sendEvent({ type: 'done', timestamp: Date.now() });
+                }
                 
             } catch (err: any) {
                 if (err?.name === 'AbortError') {
