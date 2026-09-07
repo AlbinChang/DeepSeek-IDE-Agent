@@ -427,6 +427,17 @@ export function useAgentSSE() {
             | { kind: 'done' }
             | { kind: 'diagnostics'; entries: import('@/providers/AgentContext').ProblemEntry[] };
 
+        /**
+         * 消息 parts 操作流：严格保留事件到达顺序。
+         * 历史上这里按「text/reasoning 先于 annotation」分组应用，导致同一批 buffer 中
+         * 后到的工具 annotation 被排到先到的正文之前（或反之），长评估场景下评估报告
+         * 与工具卡片渲染顺序颠倒，最终答复被工具卡片“截断”在消息末尾。
+         */
+        type PartOp =
+            | { op: 'text'; content: string; turn?: number }
+            | { op: 'reasoning'; content: string; turn?: number }
+            | { op: 'annotation'; content: string; method: string; params: any };
+
         const pendingBufferRef: { current: PendingChunk[] } = { current: [] };
         let rafId: number | null = null;
         // 标记是否需要在本次 flush 前取消已有 rAF（用于 terminal 事件立即刷新）
@@ -438,10 +449,8 @@ export function useAgentSSE() {
             if (buffer.length === 0) return;
             pendingBufferRef.current = [];
 
-            // ── 分离不同类型 ──
-            const textDeltas: { content: string; turn?: number }[] = [];
-            const reasoningDeltas: { content: string; turn?: number }[] = [];
-            const annotations: { content: string; method: string; params: any }[] = [];
+            // ── 分离非消息状态与消息 parts 操作流 ──
+            const partOps: PartOp[] = [];
             const stages: { message: string }[] = [];
             let latestProgress: StreamProgress | null = null;
             let latestTodos: any[] | null = null;
@@ -453,9 +462,9 @@ export function useAgentSSE() {
 
             for (const chunk of buffer) {
                 switch (chunk.kind) {
-                    case 'text': textDeltas.push(chunk); break;
-                    case 'reasoning': reasoningDeltas.push(chunk); break;
-                    case 'annotation': annotations.push(chunk); break;
+                    case 'text': partOps.push({ op: 'text', content: chunk.content, turn: chunk.turn }); break;
+                    case 'reasoning': partOps.push({ op: 'reasoning', content: chunk.content, turn: chunk.turn }); break;
+                    case 'annotation': partOps.push({ op: 'annotation', content: chunk.content, method: chunk.method, params: chunk.params }); break;
                     case 'stage': stages.push(chunk); break;
                     case 'progress': latestProgress = chunk.progress; break;
                     case 'todo': latestTodos = chunk.todos; break;
@@ -467,9 +476,9 @@ export function useAgentSSE() {
                 }
             }
 
-            // ── 提交 messages（合并 text/reasoning/annotation/init/error/done） ──
-            const hasMessageChanges = textDeltas.length > 0 || reasoningDeltas.length > 0
-                || annotations.length > 0 || initTraceId !== null || errorContent !== null || isDone || doneTextContent !== null;
+            // ── 提交 messages（严格按事件到达顺序合并 text/reasoning/annotation/init/error/done） ──
+            const hasMessageChanges = partOps.length > 0
+                || initTraceId !== null || errorContent !== null || isDone || doneTextContent !== null;
 
             if (hasMessageChanges) {
                 setMessages(prev => {
@@ -481,8 +490,7 @@ export function useAgentSSE() {
                     // 增量仅包含重复的 done 事件，则不再新建空白终态消息
                     // （避免重复 done 生成空消息气泡并污染历史记录）
                     if (isDone && last && last.role === "assistant" && last.isFinal
-                        && textDeltas.length === 0 && reasoningDeltas.length === 0
-                        && annotations.length === 0 && errorContent === null
+                        && partOps.length === 0 && errorContent === null
                         && initTraceId === null) {
                         return next;
                     }
@@ -505,70 +513,56 @@ export function useAgentSSE() {
                     // init
                     if (initTraceId) last.traceId = initTraceId;
 
-                    // 合并连续的同类 delta 为大块，减少 parts 内的段数
-                    const mergedTextDeltas: { content: string; turn?: number }[] = [];
-                    for (const d of textDeltas) {
-                        const prev = mergedTextDeltas[mergedTextDeltas.length - 1];
-                        if (prev && prev.turn === d.turn) { prev.content += d.content; }
-                        else { mergedTextDeltas.push({ ...d }); }
-                    }
-                    const mergedReasoningDeltas: { content: string; turn?: number }[] = [];
-                    for (const d of reasoningDeltas) {
-                        const prev = mergedReasoningDeltas[mergedReasoningDeltas.length - 1];
-                        if (prev && prev.turn === d.turn) { prev.content += d.content; }
-                        else { mergedReasoningDeltas.push({ ...d }); }
-                    }
-
-                    // reasoning deltas
-                    for (const delta of mergedReasoningDeltas) {
-                        const partIndex = last.parts.length - 1;
-                        const currentPart = last.parts[partIndex];
-                        if (!currentPart || currentPart.type !== 'reasoning' || (delta.turn !== undefined && (currentPart as any).turn !== delta.turn)) {
-                            const limited = appendLimitedLiveText('', delta.content, '推理文本', LIVE_REASONING_PART_LIMIT);
-                            const nextPart: MessagePart = { id: createClientId(), type: 'reasoning', content: limited.content, params: { liveText: limited.meta }, timestamp: Date.now() };
-                            (nextPart as any).turn = delta.turn;
-                            last.parts.push(nextPart);
+                    // 单遍按事件顺序应用 parts：
+                    // 仅当「当前最后一个 part」与 delta 同类型且同 turn 时才合并，
+                    // 否则新建 part —— 这样 tool annotation 与正文的相对顺序
+                    // 永远与后端 emit 顺序一致，不会出现分组重排导致的颠倒。
+                    for (const op of partOps) {
+                        if (op.op === 'reasoning') {
+                            const partIndex = last.parts.length - 1;
+                            const currentPart = last.parts[partIndex];
+                            if (!currentPart || currentPart.type !== 'reasoning' || (op.turn !== undefined && (currentPart as any).turn !== op.turn)) {
+                                const limited = appendLimitedLiveText('', op.content, '推理文本', LIVE_REASONING_PART_LIMIT);
+                                const nextPart: MessagePart = { id: createClientId(), type: 'reasoning', content: limited.content, params: { liveText: limited.meta }, timestamp: Date.now() };
+                                (nextPart as any).turn = op.turn;
+                                last.parts.push(nextPart);
+                            } else {
+                                const limited = appendLimitedLiveText(currentPart.content || '', op.content, '推理文本', LIVE_REASONING_PART_LIMIT, currentPart.params?.liveText);
+                                last.parts[partIndex] = { ...currentPart, content: limited.content, params: { ...(currentPart.params || {}), liveText: limited.meta } };
+                            }
+                            last.reasoning_content = undefined;
+                        } else if (op.op === 'text') {
+                            const partIndex = last.parts.length - 1;
+                            const currentPart = last.parts[partIndex];
+                            if (!currentPart || currentPart.type !== 'text' || (op.turn !== undefined && (currentPart as any).turn !== op.turn)) {
+                                const limited = appendLimitedLiveText('', op.content, '回复正文', LIVE_TEXT_PART_LIMIT);
+                                const nextPart: MessagePart = { id: createClientId(), type: 'text', content: limited.content, params: { liveText: limited.meta }, timestamp: Date.now() };
+                                (nextPart as any).turn = op.turn;
+                                last.parts.push(nextPart);
+                            } else {
+                                const limited = appendLimitedLiveText(currentPart.content || '', op.content, '回复正文', LIVE_TEXT_PART_LIMIT, currentPart.params?.liveText);
+                                last.parts[partIndex] = { ...currentPart, content: limited.content, params: { ...(currentPart.params || {}), liveText: limited.meta } };
+                            }
+                            const contentLimited = appendLimitedLiveText(last.content || '', op.content, '回复正文', LIVE_TEXT_PART_LIMIT, (last as any).contentMeta);
+                            last.content = contentLimited.content;
+                            (last as any).contentMeta = contentLimited.meta;
                         } else {
-                            const limited = appendLimitedLiveText(currentPart.content || '', delta.content, '推理文本', LIVE_REASONING_PART_LIMIT, currentPart.params?.liveText);
-                            last.parts[partIndex] = { ...currentPart, content: limited.content, params: { ...(currentPart.params || {}), liveText: limited.meta } };
+                            // annotation：按到达顺序插入 parts，避免被后续正文“插队”
+                            // 预计算工具参数 JSON 字符串，避免 JSX render 中每帧重复 JSON.stringify
+                            const precomputedArgsJson = op.method === 'tool/call' && op.params?.args
+                                ? JSON.stringify(op.params.args, null, 2)
+                                : undefined;
+                            last.parts.push({
+                                id: createClientId(),
+                                type: 'annotation',
+                                content: op.content,
+                                method: op.method,
+                                params: precomputedArgsJson !== undefined
+                                    ? { ...op.params, _argsJson: precomputedArgsJson }
+                                    : op.params,
+                                timestamp: Date.now(),
+                            });
                         }
-                        last.reasoning_content = undefined;
-                    }
-
-                    // text deltas
-                    for (const delta of mergedTextDeltas) {
-                        const partIndex = last.parts.length - 1;
-                        const currentPart = last.parts[partIndex];
-                        if (!currentPart || currentPart.type !== 'text' || (delta.turn !== undefined && (currentPart as any).turn !== delta.turn)) {
-                            const limited = appendLimitedLiveText('', delta.content, '回复正文', LIVE_TEXT_PART_LIMIT);
-                            const nextPart: MessagePart = { id: createClientId(), type: 'text', content: limited.content, params: { liveText: limited.meta }, timestamp: Date.now() };
-                            (nextPart as any).turn = delta.turn;
-                            last.parts.push(nextPart);
-                        } else {
-                            const limited = appendLimitedLiveText(currentPart.content || '', delta.content, '回复正文', LIVE_TEXT_PART_LIMIT, currentPart.params?.liveText);
-                            last.parts[partIndex] = { ...currentPart, content: limited.content, params: { ...(currentPart.params || {}), liveText: limited.meta } };
-                        }
-                        const contentLimited = appendLimitedLiveText(last.content || '', delta.content, '回复正文', LIVE_TEXT_PART_LIMIT, (last as any).contentMeta);
-                        last.content = contentLimited.content;
-                        (last as any).contentMeta = contentLimited.meta;
-                    }
-
-                    // annotations
-                    for (const ann of annotations) {
-                        // 预计算工具参数 JSON 字符串，避免 JSX render 中每帧重复 JSON.stringify
-                        const precomputedArgsJson = ann.method === 'tool/call' && ann.params?.args
-                            ? JSON.stringify(ann.params.args, null, 2)
-                            : undefined;
-                        last.parts.push({
-                            id: createClientId(),
-                            type: 'annotation',
-                            content: ann.content,
-                            method: ann.method,
-                            params: precomputedArgsJson !== undefined
-                                ? { ...ann.params, _argsJson: precomputedArgsJson }
-                                : ann.params,
-                            timestamp: Date.now(),
-                        });
                     }
 
                     // error
