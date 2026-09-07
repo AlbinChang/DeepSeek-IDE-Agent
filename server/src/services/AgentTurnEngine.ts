@@ -291,6 +291,8 @@ export class AgentTurnEngine {
         let totalSteps = options.totalSteps ?? 0;
         let finalAssistantContent = "";
         let finalAssistantReasoning = "";
+        let lastNonEmptyAssistantContent = "";
+        let lastAssistantReasoning = "";
 
         while (turns < MAX_TURNS) {
             turns++;
@@ -454,6 +456,12 @@ export class AgentTurnEngine {
 
                     apiSuccess = true;
                     if (localUsage) usage = localUsage;
+                    if (fullContent && fullContent.trim()) {
+                        lastNonEmptyAssistantContent = fullContent.trim();
+                    }
+                    if (fullReasoning && fullReasoning.trim()) {
+                        lastAssistantReasoning = fullReasoning.trim();
+                    }
                 } catch (error: any) {
                     if (abortSignal?.aborted) throw error;
 
@@ -599,6 +607,25 @@ export class AgentTurnEngine {
                                 ? todosFromTool
                                 : await TodoService.getTodos(root, userId);
                             emit({ type: "annotation", method: "todo/update", params: { todos } });
+
+                            // 当所有 TODO 任务均达到终态时，向模型上下文注入强指令，确保下一轮必定输出完整的最终答复，
+                            // 避免模型因"工具已执行完毕"而直接退出或仅输出内部推理，导致前端出现空白气泡或不再接收后续答复
+                            const TERMINAL_STATUSES = new Set(['completed', 'failed']);
+                            const allTerminal = todos.length > 0 && todos.every((t: any) => TERMINAL_STATUSES.has(String(t?.status || '').toLowerCase()));
+                            if (allTerminal) {
+                                activeHistory.push({
+                                    role: "system",
+                                    content: [
+                                        "【终态响应强制指令】",
+                                        "当前所有 TODO 任务均已达到终态（全部完成或失败）。",
+                                        "你必须立即向用户输出完整、详尽、结构化的最终答复（Final Reply）：",
+                                        "1. 详细总结本次任务的完成情况及达成的目标；",
+                                        "2. 清晰列出所有新建或修改的文件路径及主要变更点；",
+                                        "3. 如有未完成或失败的任务，说明原因并给出后续建议。",
+                                        "严禁输出空回复，严禁仅输出内部推理或简短确认词（如'好的'、'已完成'），必须给出面向用户的完整成果汇报！"
+                                    ].join("\n")
+                                });
+                            }
                         }
                     } catch (toolErr: any) {
                         console.error(
@@ -637,6 +664,38 @@ export class AgentTurnEngine {
                         ? `${fullReasoning.slice(0, CLIENT_VISIBLE_CONTENT_LIMIT)}${streamTruncationNotice("推理文本", fullReasoning.length)}`
                         : fullReasoning;
                     emit({ type: "text", content: visibleReasoning, turn: turns });
+                }
+
+                // 防御：若当前轮 assistant content 仍为空（例如模型在前轮已随工具调用输出了正文，本轮仅返回 stop 标志），
+                // 优先回退到本轮对话中最近一次非空的 assistant 回复，避免被空回复覆盖导致前端丢失答复
+                if (!assistantMsg.content || !assistantMsg.content.trim()) {
+                    if (lastNonEmptyAssistantContent) {
+                        assistantMsg.content = lastNonEmptyAssistantContent;
+                        // 若当前轮尚未向客户端输出该正文，进行补发确保前端能收到
+                        if (!fullContent) {
+                            emit({ type: "text", content: lastNonEmptyAssistantContent, turn: turns });
+                        }
+                    } else if (lastAssistantReasoning) {
+                        assistantMsg.content = lastAssistantReasoning;
+                        const visibleReasoning = lastAssistantReasoning.length > CLIENT_VISIBLE_CONTENT_LIMIT
+                            ? `${lastAssistantReasoning.slice(0, CLIENT_VISIBLE_CONTENT_LIMIT)}${streamTruncationNotice("推理文本", lastAssistantReasoning.length)}`
+                            : lastAssistantReasoning;
+                        emit({ type: "text", content: visibleReasoning, turn: turns });
+                    } else {
+                        // 终极兜底：若此前完全没有正文和推理，检查 TODO 状态生成明确结论，杜绝空白消息
+                        const currentTodos = await TodoService.getTodos(root, userId).catch(() => []);
+                        if (currentTodos.length > 0) {
+                            const completedCount = currentTodos.filter(t => String(t.status).toLowerCase() === 'completed').length;
+                            const fallbackReply = [
+                                `已完成全部任务规划（${completedCount}/${currentTodos.length} 项达到终态）：`,
+                                ...currentTodos.map((t, idx) => `${idx + 1}. [${t.status === 'completed' ? '已完成' : '失败'}] ${t.title || '未命名任务'}${t.description ? ` - ${t.description}` : ''}`),
+                                '',
+                                '所有任务已执行完毕。'
+                            ].join('\n');
+                            assistantMsg.content = fallbackReply;
+                            emit({ type: "text", content: fallbackReply, turn: turns });
+                        }
+                    }
                 }
 
                 // 工具循环结束（最终回答），持久化时不保留推理内容

@@ -423,6 +423,7 @@ export function useAgentSSE() {
             | { kind: 'todo'; todos: any[] }
             | { kind: 'init'; traceId: string }
             | { kind: 'error'; content: string }
+            | { kind: 'doneText'; content: string }
             | { kind: 'done' }
             | { kind: 'diagnostics'; entries: import('@/providers/AgentContext').ProblemEntry[] };
 
@@ -446,6 +447,7 @@ export function useAgentSSE() {
             let latestTodos: any[] | null = null;
             let initTraceId: string | null = null;
             let errorContent: string | null = null;
+            let doneTextContent: string | null = null;
             let isDone = false;
             const diagnosticsEntries: import('@/providers/AgentContext').ProblemEntry[] = [];
 
@@ -459,6 +461,7 @@ export function useAgentSSE() {
                     case 'todo': latestTodos = chunk.todos; break;
                     case 'init': initTraceId = chunk.traceId; break;
                     case 'error': errorContent = chunk.content; break;
+                    case 'doneText': doneTextContent = chunk.content; break;
                     case 'done': isDone = true; break;
                     case 'diagnostics': diagnosticsEntries.push(...chunk.entries); break;
                 }
@@ -466,7 +469,7 @@ export function useAgentSSE() {
 
             // ── 提交 messages（合并 text/reasoning/annotation/init/error/done） ──
             const hasMessageChanges = textDeltas.length > 0 || reasoningDeltas.length > 0
-                || annotations.length > 0 || initTraceId !== null || errorContent !== null || isDone;
+                || annotations.length > 0 || initTraceId !== null || errorContent !== null || isDone || doneTextContent !== null;
 
             if (hasMessageChanges) {
                 setMessages(prev => {
@@ -562,6 +565,21 @@ export function useAgentSSE() {
                     if (errorContent) {
                         last.parts.push({ id: createClientId(), type: 'error', content: errorContent, timestamp: Date.now() });
                         last.isFinal = true;
+                    }
+
+                    // 防御：若消息中尚未包含任何文本答复（例如全部步骤仅调用了工具），
+                    // 采用 done 携带的结论正文作为兜底文本，避免前端展示空白气泡或让用户无法理解最终结果
+                    if (doneTextContent && (!last.content || !last.content.trim()) && !last.parts.some(p => p.type === 'text')) {
+                        const limited = appendLimitedLiveText('', doneTextContent, '回复正文', LIVE_TEXT_PART_LIMIT);
+                        last.parts.push({
+                            id: createClientId(),
+                            type: 'text',
+                            content: limited.content,
+                            params: { liveText: limited.meta },
+                            timestamp: Date.now(),
+                        });
+                        last.content = limited.content;
+                        (last as any).contentMeta = limited.meta;
                     }
 
                     // done
@@ -698,6 +716,10 @@ export function useAgentSSE() {
             } else if (chunk.type === 'error') {
                 pendingBufferRef.current.push({ kind: 'error', content: chunk.content || chunk.message || 'An internal error occurred' });
             } else if (chunk.type === 'done') {
+                const doneText = typeof chunk.content === 'string' ? chunk.content.trim() : '';
+                if (doneText && doneText !== 'Processing complete') {
+                    pendingBufferRef.current.push({ kind: 'doneText', content: doneText });
+                }
                 pendingBufferRef.current.push({ kind: 'done' });
             }
 

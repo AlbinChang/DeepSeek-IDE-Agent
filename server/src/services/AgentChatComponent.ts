@@ -224,9 +224,24 @@ export class AgentChatComponent {
             let totalSteps = 0;
             let pendingEvaluatorRepairDirective: { finalReply: string } | null = null;
             let evaluatorRepairConfirmationRetries = 0;
+            let outerLoopCount = 0;
+            let mainAgentFinalReply = "";
+            const MAX_OUTER_LOOPS = 10;
 
             while(true)
             {
+                outerLoopCount++;
+                if (outerLoopCount > MAX_OUTER_LOOPS) {
+                    console.warn(`${getTS()} [AgentChat] Reached max outer loop limit (${MAX_OUTER_LOOPS}), terminating chat loop for user: ${userId}`);
+                    clearPromptCache();
+                    emit({
+                        type: "done",
+                        content: mainAgentFinalReply || "已达到最大执行轮次上限，对话结束。",
+                        usage: null,
+                    });
+                    return;
+                }
+
                 let usage: any = null;
 
                 // 执行 Agent 轮次引擎（AI 流式调用 → 工具执行 → 循环，直到无工具调用为止）
@@ -253,7 +268,7 @@ export class AgentChatComponent {
                 activeHistory = turnResult.activeHistory;
                 usage = turnResult.usage;
                 totalSteps = turnResult.totalSteps;
-                const mainAgentFinalReply = turnResult.finalAssistantContent || "";
+                mainAgentFinalReply = turnResult.finalAssistantContent || "";
 
                 // 若主Agent明确要求用户补充信息或做决策，应立即退出循环等待新指令。
                 // 该规则优先级高于“非终态任务继续执行”，避免代理在等待用户输入时空转。
@@ -306,17 +321,26 @@ export class AgentChatComponent {
                     continue;
                 }
 
-                if (todos.length === 0) {
-                    console.log(`${getTS()} [AgentChat] No TODOs remaining, ending chat loop for user: ${userId}`);
-                    clearPromptCache();
-                    emit({ type: "done", content: "目标已达成，结束对话。" });
-                    return;
+                // 防御：若所有任务已达到终态但主Agent最终答复仍为空，自动生成总结并补发，杜绝前端消息断流
+                if (!mainAgentFinalReply.trim() && todos.length > 0) {
+                    const completedCount = todos.filter((t: any) => String(t?.status).toLowerCase() === 'completed').length;
+                    const fallbackReply = [
+                        `已完成全部任务规划（${completedCount}/${todos.length} 项达到终态）：`,
+                        ...todos.map((t: any, idx: number) => `${idx + 1}. [${t.status === 'completed' ? '已完成' : '失败'}] ${t.title || '未命名任务'}${t.description ? ` - ${t.description}` : ''}`),
+                        '',
+                        '所有任务已执行完毕。'
+                    ].join('\n');
+                    mainAgentFinalReply = fallbackReply;
+                    emit({ type: "text", content: fallbackReply });
                 }
 
-                if (todos.length === 1 && todos[0].status === "completed") {
-                    console.log(`${getTS()} [AgentChat] Single TODO completed, ending chat loop for user: ${userId}`);
+                if (todos.length <= 1) {
+                    const statusText = todos.length === 1 && todos[0].status === "failed"
+                        ? "任务已结束（未达成目标）。"
+                        : "目标已达成，结束对话。";
+                    console.log(`${getTS()} [AgentChat] All TODOs terminal (${todos.length} items), ending chat loop for user: ${userId}`);
                     clearPromptCache();
-                    emit({ type: "done", content: "目标已达成，结束对话。" });
+                    emit({ type: "done", content: mainAgentFinalReply || statusText, usage });
                     return;
                 }
 
@@ -402,10 +426,14 @@ export class AgentChatComponent {
                         evaluationResult.decision === "need_user_input" ? "需要用户进一步操作或提供信息" :
                         "需要主Agent继续迭代";
 
+                    if (evaluationResult.decision === "goal_achieved") {
+                        emit({ type: "stage", content: "评估Agent核验通过：已达成目标。" });
+                    }
+
                     clearPromptCache();
                     emit({
                         type: "done",
-                        content: `评估已完成：${decisionLabel}。`,
+                        content: mainAgentFinalReply || `评估已完成：${decisionLabel}。`,
                         usage: usage,
                     });
                     return;
