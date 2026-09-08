@@ -1,4 +1,3 @@
-import { extractReasoningText, hasReasoningField } from "../utils/ReasoningUtils.js";
 import { config as globalConfig } from "@/config/index.js";
 
 export interface MessagePreparationOptions {
@@ -93,11 +92,6 @@ export class MessagePreparationService {
         // 旧的 preRole 检查会在「system 指令插入工具结果之间」时误删后续 tool 消息，
         // 而 assistant 的 tool_calls 因响应表仍视为齐全而被保留 → 触发 DeepSeek 400。
         const survivingCallIds = new Set<string>();
-        // 【DeepSeek thinking mode 400 防御】记录最近一次非空推理内容：
-        // 带 tool_calls 的 assistant 消息必须回传非空 reasoning_content，
-        // 否则 API 返回 400（"The `reasoning_content` in the thinking mode must be passed back to the API"）。
-        // 当源消息的推理丢失/为空时，回退到本序列最近一次非空推理兜底。
-        let lastReasoning = "";
 
         for (let i = 0; i < msgsToProcess.length; i++) {
             const m = msgsToProcess[i];
@@ -118,9 +112,11 @@ export class MessagePreparationService {
             if (m.tool_calls) clean.tool_calls = m.tool_calls;
             if (m.tool_call_id) clean.tool_call_id = m.tool_call_id;
 
-            if (m.role === "assistant") {
-                const rc = hasReasoningField(m) ? extractReasoningText(m) : "";
-                if (rc) lastReasoning = rc;
+            // 【原封不动】DeepSeek thinking mode 协议：assistant 消息的 reasoning_content
+            // 必须逐字透传给后续请求（带 tool_calls 的轮次缺失/为空会触发 API 400）。
+            // 源消息有该字段就原样复制（含空字符串），没有就不新增 —— 不增、不删、不改。
+            if (m.role === "assistant" && Object.prototype.hasOwnProperty.call(m, "reasoning_content")) {
+                clean.reasoning_content = m.reasoning_content;
             }
 
             if (m.role === "tool") {
@@ -131,9 +127,6 @@ export class MessagePreparationService {
             }
 
             if (m.role === "assistant" && Array.isArray(clean.tool_calls) && clean.tool_calls.length > 0) {
-                const reasoning = hasReasoningField(m) ? extractReasoningText(m) : "";
-                clean.reasoning_content = reasoning || lastReasoning;
-
                 // O(1) 检查每个 tool_call 是否有响应（替代原 O(N) 向前扫描）
                 const allResponded = clean.tool_calls.every(
                     (tc: any) => toolCallHasResponse.has(tc.id)

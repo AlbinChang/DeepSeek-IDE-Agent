@@ -67,6 +67,8 @@ const sanitizePersistedAnnotationParams = (method?: string, params?: any): any =
 
 const sanitizePersistedChatRow = (row: any) => {
   row.content = capRenderedText(row.content, '消息内容');
+  // 仅供前端 IndexedDB 本地存储节流（避免超大推理文本占用存储）。
+  // 客户端从不把历史消息回传给后端，后端 API 回传走的是服务端 AgentTurnEngine 的原始消息，此处不影响 API。
   row.reasoning_content = undefined;
   if (Array.isArray(row.parts)) {
     row.parts = row.parts.map((part: any) => ({

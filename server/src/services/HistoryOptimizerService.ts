@@ -10,7 +10,9 @@ import { extractReasoningText } from "../utils/ReasoningUtils.js";
 /**
  * 历史会话优化服务（原 SubAgentService）
  *
- * 实际职责：历史消息裁剪、reasoning_content 清洗、超长上下文压缩。
+ * 实际职责：历史消息裁剪、超长上下文压缩。
+ * 【原封不动原则】reasoning_content 不做任何加工（不增、不删、不改）：
+ * DeepSeek thinking mode 要求带 tool_calls 的轮次必须完整回传推理内容。
  * 当前架构为主 Agent + 评估 Agent 双核引擎循环，此服务为二者的共享历史管理层，
  * 并非独立的智能子代理。
  */
@@ -64,7 +66,7 @@ export class HistoryOptimizerService {
                 //返回最近的10条用户消息和助手消息，确保不丢失重要的上下文，同时压缩历史以适应模型输入限制
                 const recentMessages = filtered.slice(-10);
                 
-                // 压缩后的历史也需要清理 reasoning_content
+                // 注意：reasoning_content 原样保留（不增、不删、不改），由 MessagePreparationService 逐字透传
                 return {
                     messages: recentMessages
                 };
@@ -78,24 +80,17 @@ export class HistoryOptimizerService {
     }
 
     /**
-     * 清理历史记录中的 reasoning_content。
-     * 遵循 DeepSeek 指南：未进行工具调用的轮次，旧 reasoning_content 在新一轮对话中
-     * 不参与上下文拼接（传入也会被 API 忽略），因此清空以节省 token。
-     * 但进行了工具调用的轮次，reasoning_content 必须完整保留并在后续请求中回传，
-     * 否则 API 返回 400（"The `reasoning_content` in the thinking mode must be passed back to the API"）。
+     * 历史消息合规化处理。
+     * 【原封不动原则】reasoning_content 不做任何加工（不清空、不篡改、不新增）：
+     * DeepSeek thinking mode 要求带 tool_calls 的轮次必须完整回传推理内容，
+     * 未带 tool_calls 的轮次回传也会被 API 忽略，因此统一保持原样。
+     * 本方法仅负责内容字段的合规化（补齐空 content），不触碰 reasoning_content。
      */
     public cleanHistory(messages: any[]): any[] {
         return messages.map((msg, index) => {
             const newMsg = { ...msg };
             if (newMsg.role === "assistant") {
-                const hasToolCalls = Array.isArray(newMsg.tool_calls) && newMsg.tool_calls.length > 0;
-                if (!hasToolCalls) {
-                    // 未进行工具调用的轮次：清空推理，节省 token（API 会忽略该字段）
-                    newMsg.reasoning_content = "";
-                }
-                // 进行了工具调用的轮次：保留 reasoning_content 原样回传（协议强制要求）
-
-                // 确保内容字段合规
+                // 仅确保内容字段合规，reasoning_content 保持原样（不增、不删、不改）
                 if (newMsg.content === undefined || newMsg.content === null) {
                     newMsg.content = "";
                 }

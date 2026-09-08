@@ -107,44 +107,68 @@ describe("MessagePreparationService.buildMessages — 工具调用链完整性",
         expect(result.filter((m) => m.role === "tool")).toHaveLength(2);
     });
 
-    it("工具轮缺失 reasoning_content 时回退到最近一次非空推理（修复 DeepSeek 400: reasoning_content must be passed back）", () => {
+    it("工具轮的 reasoning_content 原封不动透传（不增、不删、不改）", () => {
+        const exactReasoning = "第一轮推理内容\n包含换行与 `反引号` ★ 原始字符";
         const messages = [
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content: PINNED_USER },
-            // 第 1 轮工具调用：带非空推理
-            { ...assistantToolCall([{ id: "call-r1", name: "list_files" }]), reasoning_content: "第一轮推理内容" },
+            { ...assistantToolCall([{ id: "call-r1", name: "list_files" }]), reasoning_content: exactReasoning },
             toolResult("call-r1"),
-            // 第 2 轮工具调用：模型续接时未输出推理（reasoning_content 为空）
-            { ...assistantToolCall([{ id: "call-r2", name: "delete_path" }]), reasoning_content: "" },
-            toolResult("call-r2"),
         ];
 
         const result = build(messages);
 
-        const assistants = result.filter((m) => m.role === "assistant");
-        expect(assistants).toHaveLength(2);
-        // 每一条带 tool_calls 的 assistant 都必须携带非空 reasoning_content，
-        // 否则 DeepSeek thinking mode 会在下一轮请求返回 400。
-        for (const a of assistants) {
-            expect(typeof a.reasoning_content).toBe("string");
-            expect(a.reasoning_content!.length).toBeGreaterThan(0);
-        }
-        // 第 2 轮缺失推理时回退到第 1 轮的非空推理
-        expect(assistants[1].reasoning_content).toBe("第一轮推理内容");
+        const assistant = result.find((m) => m.role === "assistant");
+        // 逐字一致，不允许任何加工
+        expect(assistant?.reasoning_content).toBe(exactReasoning);
+        expect(assistant?.tool_calls).toHaveLength(1);
     });
 
-    it("无任何历史推理时，工具轮 reasoning_content 字段仍保留空占位（字段存在，不触发字段缺失类 400）", () => {
+    it("工具轮 reasoning_content 为空字符串时保持空字符串（不伪造、不兜底）", () => {
         const messages = [
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content: PINNED_USER },
-            assistantToolCall([{ id: "call-solo", name: "list_files" }]),
+            assistantToolCall([{ id: "call-r1", name: "list_files" }]), // 源消息 reasoning_content 为 ""
+            toolResult("call-r1"),
+        ];
+
+        const result = build(messages);
+
+        const assistant = result.find((m) => m.role === "assistant");
+        expect(assistant?.reasoning_content).toBe("");
+        expect(assistant?.tool_calls).toHaveLength(1);
+    });
+
+    it("源消息没有 reasoning_content 字段时不新增该字段（原样透传）", () => {
+        const noReasoningToolCall = {
+            role: "assistant",
+            content: "",
+            tool_calls: [{ id: "call-solo", type: "function", function: { name: "list_files", arguments: "{}" } }],
+        };
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            noReasoningToolCall,
             toolResult("call-solo"),
         ];
 
         const result = build(messages);
 
         const assistant = result.find((m) => m.role === "assistant");
-        expect(Object.prototype.hasOwnProperty.call(assistant, "reasoning_content")).toBe(true);
+        expect(Object.prototype.hasOwnProperty.call(assistant, "reasoning_content")).toBe(false);
         expect(assistant?.tool_calls).toHaveLength(1);
+    });
+
+    it("无工具调用的 assistant 消息同样原样透传 reasoning_content", () => {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            { role: "assistant", content: "最终回答", reasoning_content: "最终回答前的推理" },
+        ];
+
+        const result = build(messages);
+
+        const assistant = result.find((m) => m.role === "assistant");
+        expect(assistant?.reasoning_content).toBe("最终回答前的推理");
     });
 });

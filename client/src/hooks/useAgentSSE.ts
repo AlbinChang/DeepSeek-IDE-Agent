@@ -254,6 +254,8 @@ const sanitizeMessagePart = (part: MessagePart): MessagePart => ({
 const sanitizeMessageForClient = (message: any): any => ({
     ...message,
     content: capRenderedText(message.content, '消息内容'),
+    // 仅供前端内存/渲染节流：reasoning 文本已体现在 parts 中，顶层字段不再保留。
+    // 客户端从不把消息回传给后端，API 回传链路（服务端 AgentTurnEngine）不受此处影响。
     reasoning_content: undefined,
     parts: Array.isArray(message.parts) ? message.parts.map(sanitizeMessagePart) : [],
 });

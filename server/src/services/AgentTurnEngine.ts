@@ -425,7 +425,13 @@ export class AgentTurnEngine {
                             const delta = chunk.choices[0]?.delta as any;
                             if (!delta) continue;
 
-                            const reasoningDelta = extractReasoningText(delta);
+                            // 【原封不动】reasoning_content 优先直接拼接 delta 的原始字符串，
+                            // 不做任何加工（不增、不删、不改），保证后续请求能逐字回传 API。
+                            // 仅当该字段非字符串（如其他供应商的 reasoning/thinking 字段）时才走兼容解析。
+                            const reasoningDelta =
+                                typeof delta.reasoning_content === "string"
+                                    ? delta.reasoning_content
+                                    : extractReasoningText(delta);
                             if (reasoningDelta) {
                                 fullReasoning += reasoningDelta;
                                 emitVisibleStreamDelta("reasoning", reasoningDelta, currentTurnId);
@@ -505,7 +511,12 @@ export class AgentTurnEngine {
             // 构建 assistant 消息
             // ---------------------------------------------------------------
             const assistantMsg: any = { role: "assistant", content: fullContent };
-            if (fullReasoning) assistantMsg.reasoning_content = fullReasoning;
+            // 【原封不动】DeepSeek thinking mode 要求带 tool_calls 的 assistant 消息在后续请求中
+            // 完整回传 reasoning_content，否则 API 返回 400。
+            // 此处把本轮流式采集到的推理内容逐字写入，不做任何加工：
+            //  - 模型有输出 → 原样携带；
+            //  - 模型未输出（续接轮）→ 保留空字符串，与 API 返回的消息形态一致，不伪造、不删减。
+            assistantMsg.reasoning_content = fullReasoning;
 
             // ---------------------------------------------------------------
             // 有工具调用：执行工具，继续循环
@@ -518,10 +529,6 @@ export class AgentTurnEngine {
                 }));
 
                 assistantMsg.tool_calls = tool_calls_map;
-                
-                if (!Object.prototype.hasOwnProperty.call(assistantMsg, "reasoning_content")) {
-                    assistantMsg.reasoning_content = "";
-                }
                 activeHistory.push(assistantMsg);
 
                 for (const tc of tool_calls_map) {
