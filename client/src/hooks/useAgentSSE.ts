@@ -268,6 +268,8 @@ export function useAgentSSE() {
     const [data, setData] = useState<any[]>([]); 
     const [streamProgress, setStreamProgress] = useState<StreamProgress | null>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
+    // 本轮流式对话是否已通过 error 事件渲染过错误（防止 bridge 异常路径重复追加错误消息）
+    const receivedErrorRef = useRef(false);
 
     // 编辑器上下文：监听当前激活文件与选中范围，用于附加到用户指令
     const editorContextRef = useRef<{
@@ -364,6 +366,7 @@ export function useAgentSSE() {
         setInput("");
         setData([]); 
         setStreamProgress(null);
+        receivedErrorRef.current = false;
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
@@ -718,6 +721,7 @@ export function useAgentSSE() {
             } else if (chunk.type === 'init') {
                 pendingBufferRef.current.push({ kind: 'init', traceId: chunk.traceId });
             } else if (chunk.type === 'error') {
+                receivedErrorRef.current = true;
                 pendingBufferRef.current.push({ kind: 'error', content: chunk.content || chunk.message || 'An internal error occurred' });
             } else if (chunk.type === 'done') {
                 const doneText = typeof chunk.content === 'string' ? chunk.content.trim() : '';
@@ -793,6 +797,9 @@ export function useAgentSSE() {
                 console.log("SSE Request Aborted");
             } else {
                 console.error("SSE Connection Error:", e);
+                // 若错误已通过流内 error 事件渲染过，则不再重复创建错误消息，
+                // 避免同一错误在界面中出现两次。
+                if (receivedErrorRef.current) return;
                 const errorMsg: Message = { 
                     id: createClientId(), 
                     role: 'assistant', 

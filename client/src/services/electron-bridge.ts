@@ -117,8 +117,11 @@ export const electronBridge = {
                 if (event.type === 'done' || event.type === 'error') {
                     cleanup();
                     if (event.type === 'error') {
+                        // 错误内容已通过 onEvent 转发给上层渲染（流内 error 事件）。
+                        // 此处不再 reject —— 否则上层 catch 会再创建一条重复的错误消息，
+                        // 导致同一错误在界面中被渲染两次。
                         console.error(`[ElectronBridge] Agent error: ${event.content || 'unknown'}`);
-                        reject(new Error(event.content || 'Agent error'));
+                        resolve();
                     } else {
                         resolve();
                     }

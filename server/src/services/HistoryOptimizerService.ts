@@ -79,15 +79,22 @@ export class HistoryOptimizerService {
 
     /**
      * 清理历史记录中的 reasoning_content。
-     * 遵循 DeepSeek 指南：在新一轮对话开始时，不要将旧的 reasoning_content 发送给模型。
+     * 遵循 DeepSeek 指南：未进行工具调用的轮次，旧 reasoning_content 在新一轮对话中
+     * 不参与上下文拼接（传入也会被 API 忽略），因此清空以节省 token。
+     * 但进行了工具调用的轮次，reasoning_content 必须完整保留并在后续请求中回传，
+     * 否则 API 返回 400（"The `reasoning_content` in the thinking mode must be passed back to the API"）。
      */
     public cleanHistory(messages: any[]): any[] {
         return messages.map((msg, index) => {
             const newMsg = { ...msg };
             if (newMsg.role === "assistant") {
-                // 确保 reasoning_content 字段存在但清空，以符合 DeepSeek 的规范要求                
-                newMsg.reasoning_content = ""; 
-                
+                const hasToolCalls = Array.isArray(newMsg.tool_calls) && newMsg.tool_calls.length > 0;
+                if (!hasToolCalls) {
+                    // 未进行工具调用的轮次：清空推理，节省 token（API 会忽略该字段）
+                    newMsg.reasoning_content = "";
+                }
+                // 进行了工具调用的轮次：保留 reasoning_content 原样回传（协议强制要求）
+
                 // 确保内容字段合规
                 if (newMsg.content === undefined || newMsg.content === null) {
                     newMsg.content = "";

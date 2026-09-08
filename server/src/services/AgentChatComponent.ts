@@ -454,7 +454,8 @@ export class AgentChatComponent {
                 console.log(`${getTS()} [AgentChat] Operation aborted for user: ${userId}`);
                 return;
             }
-            emit({ type: "error", message: err.message || "未知错误" });
+            // 注意：error 事件使用 content 字段（与 SSE 契约一致，前端与 IPC 桥均按 content 渲染）
+            emit({ type: "error", content: err.message || "未知错误" });
             console.log(`${getTS()} [AgentChat] Error for user ${userId}:`, err);
         }
     }

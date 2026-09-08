@@ -106,4 +106,45 @@ describe("MessagePreparationService.buildMessages — 工具调用链完整性",
         expect(assistant?.tool_calls).toHaveLength(2);
         expect(result.filter((m) => m.role === "tool")).toHaveLength(2);
     });
+
+    it("工具轮缺失 reasoning_content 时回退到最近一次非空推理（修复 DeepSeek 400: reasoning_content must be passed back）", () => {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            // 第 1 轮工具调用：带非空推理
+            { ...assistantToolCall([{ id: "call-r1", name: "list_files" }]), reasoning_content: "第一轮推理内容" },
+            toolResult("call-r1"),
+            // 第 2 轮工具调用：模型续接时未输出推理（reasoning_content 为空）
+            { ...assistantToolCall([{ id: "call-r2", name: "delete_path" }]), reasoning_content: "" },
+            toolResult("call-r2"),
+        ];
+
+        const result = build(messages);
+
+        const assistants = result.filter((m) => m.role === "assistant");
+        expect(assistants).toHaveLength(2);
+        // 每一条带 tool_calls 的 assistant 都必须携带非空 reasoning_content，
+        // 否则 DeepSeek thinking mode 会在下一轮请求返回 400。
+        for (const a of assistants) {
+            expect(typeof a.reasoning_content).toBe("string");
+            expect(a.reasoning_content!.length).toBeGreaterThan(0);
+        }
+        // 第 2 轮缺失推理时回退到第 1 轮的非空推理
+        expect(assistants[1].reasoning_content).toBe("第一轮推理内容");
+    });
+
+    it("无任何历史推理时，工具轮 reasoning_content 字段仍保留空占位（字段存在，不触发字段缺失类 400）", () => {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            assistantToolCall([{ id: "call-solo", name: "list_files" }]),
+            toolResult("call-solo"),
+        ];
+
+        const result = build(messages);
+
+        const assistant = result.find((m) => m.role === "assistant");
+        expect(Object.prototype.hasOwnProperty.call(assistant, "reasoning_content")).toBe(true);
+        expect(assistant?.tool_calls).toHaveLength(1);
+    });
 });

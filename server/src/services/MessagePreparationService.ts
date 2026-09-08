@@ -93,6 +93,11 @@ export class MessagePreparationService {
         // 旧的 preRole 检查会在「system 指令插入工具结果之间」时误删后续 tool 消息，
         // 而 assistant 的 tool_calls 因响应表仍视为齐全而被保留 → 触发 DeepSeek 400。
         const survivingCallIds = new Set<string>();
+        // 【DeepSeek thinking mode 400 防御】记录最近一次非空推理内容：
+        // 带 tool_calls 的 assistant 消息必须回传非空 reasoning_content，
+        // 否则 API 返回 400（"The `reasoning_content` in the thinking mode must be passed back to the API"）。
+        // 当源消息的推理丢失/为空时，回退到本序列最近一次非空推理兜底。
+        let lastReasoning = "";
 
         for (let i = 0; i < msgsToProcess.length; i++) {
             const m = msgsToProcess[i];
@@ -113,6 +118,11 @@ export class MessagePreparationService {
             if (m.tool_calls) clean.tool_calls = m.tool_calls;
             if (m.tool_call_id) clean.tool_call_id = m.tool_call_id;
 
+            if (m.role === "assistant") {
+                const rc = hasReasoningField(m) ? extractReasoningText(m) : "";
+                if (rc) lastReasoning = rc;
+            }
+
             if (m.role === "tool") {
                 // 孤儿 tool 消息（对应 assistant 被裁剪，或 assistant 的 tool_calls 已被删除）→ 丢弃
                 if (!survivingCallIds.has(m.tool_call_id)) {
@@ -121,7 +131,8 @@ export class MessagePreparationService {
             }
 
             if (m.role === "assistant" && Array.isArray(clean.tool_calls) && clean.tool_calls.length > 0) {
-                clean.reasoning_content = hasReasoningField(m) ? extractReasoningText(m) : "";
+                const reasoning = hasReasoningField(m) ? extractReasoningText(m) : "";
+                clean.reasoning_content = reasoning || lastReasoning;
 
                 // O(1) 检查每个 tool_call 是否有响应（替代原 O(N) 向前扫描）
                 const allResponded = clean.tool_calls.every(
