@@ -77,22 +77,7 @@ export class MessagePreparationService {
             msgsToProcess = msgsToProcess.slice(startIdx);
         }
 
-        let preRole = "user";
-
-        // 【性能优化】单次扫描预构建两个查找表，消除 O(N²) 内层循环：
-        //   1) assistantIndexById: tool_call_id → assistant 消息索引
-        //   2) toolCallHasResponse: tool_call_id → 是否在后续有对应的 tool 消息回复
-        const assistantIndexById = new Map<string, number>();
-        for (let i = 0; i < msgsToProcess.length; i++) {
-            const m = msgsToProcess[i];
-            if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
-                for (const tc of m.tool_calls) {
-                    if (tc.id) assistantIndexById.set(tc.id, i);
-                }
-            }
-        }
-
-        // 单次反向扫描构建 tool_call 响应状态表（替代原 O(N²) 每消息向前扫描）
+        // 单次反向扫描构建 tool_call 响应状态表：tool_call_id → 是否存在后续 tool 消息回复
         const toolCallHasResponse = new Map<string, boolean>();
         for (let i = msgsToProcess.length - 1; i >= 0; i--) {
             const m = msgsToProcess[i];
@@ -101,12 +86,19 @@ export class MessagePreparationService {
             }
         }
 
+        // 【修复 400 工具链断裂】幸存 tool_call_id 集合：仅登记「tool_calls 未被删除」的 assistant 消息。
+        // tool 消息只允许引用幸存集合中的 id，从根上保证输出序列合法：
+        //   - assistant(tool_calls) 之后必有对应 tool 消息（API 400 防御）
+        //   - 不残留孤儿 tool 消息（其 assistant 被裁剪或 tool_calls 被删除时一并丢弃）
+        // 旧的 preRole 检查会在「system 指令插入工具结果之间」时误删后续 tool 消息，
+        // 而 assistant 的 tool_calls 因响应表仍视为齐全而被保留 → 触发 DeepSeek 400。
+        const survivingCallIds = new Set<string>();
+
         for (let i = 0; i < msgsToProcess.length; i++) {
             const m = msgsToProcess[i];
             if (m.role === "system") {
                 if (m.content !== systemPrompt) {
                     result.push({ role: "system", content: m.content });
-                    preRole = "system";
                 }
                 continue;
             }
@@ -121,13 +113,9 @@ export class MessagePreparationService {
             if (m.tool_calls) clean.tool_calls = m.tool_calls;
             if (m.tool_call_id) clean.tool_call_id = m.tool_call_id;
 
-            if (m.role === "tool" && preRole !== "assistant" && preRole !== "tool") {
-                continue;
-            }
-
             if (m.role === "tool") {
-                const hasMatchingCall = assistantIndexById.has(m.tool_call_id);
-                if (!hasMatchingCall) {
+                // 孤儿 tool 消息（对应 assistant 被裁剪，或 assistant 的 tool_calls 已被删除）→ 丢弃
+                if (!survivingCallIds.has(m.tool_call_id)) {
                     continue;
                 }
             }
@@ -135,19 +123,24 @@ export class MessagePreparationService {
             if (m.role === "assistant" && Array.isArray(clean.tool_calls) && clean.tool_calls.length > 0) {
                 clean.reasoning_content = hasReasoningField(m) ? extractReasoningText(m) : "";
 
-                // 【性能优化】O(1) 检查每个 tool_call 是否有响应（替代原 O(N) 向前扫描）
+                // O(1) 检查每个 tool_call 是否有响应（替代原 O(N) 向前扫描）
                 const allResponded = clean.tool_calls.every(
                     (tc: any) => toolCallHasResponse.has(tc.id)
                 );
                 if (!allResponded) {
+                    // 响应不完整：删除 tool_calls 避免 API 400，且不登记幸存集合
+                    // （其后残余的 tool 消息将因不在幸存集合中而被丢弃）
                     delete clean.tool_calls;
                     if (!clean.content) {
                         continue;
                     }
+                } else {
+                    for (const tc of clean.tool_calls) {
+                        if (tc.id) survivingCallIds.add(tc.id);
+                    }
                 }
             }
 
-            preRole = m.role;
             result.push(clean);
         }
 

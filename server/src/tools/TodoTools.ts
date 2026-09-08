@@ -77,18 +77,13 @@ export class TodoTools {
             updated.push(result);
         }
         const currentTodos = await TodoService.getTodos(this.workspaceRoot, userId);
-        const TERMINAL_TODO_STATUSES = new Set(['completed', 'failed']);
-        const allTerminal = currentTodos.length > 0 && currentTodos.every((t: any) => TERMINAL_TODO_STATUSES.has(String(t?.status || '').toLowerCase()));
         const total = currentTodos.length;
         return {
             status: 'success',
             updated: updated.length === 1 ? updated[0] : updated,
             total,
             todos: currentTodos,
-            allTerminal,
-            message: allTerminal
-                ? '所有 TODO 任务均已达到终态。请立即向用户输出完整、清晰的最终答复，总结本次任务成果与关键结论。不要仅输出空回复。'
-                : '任务状态已更新。'
+            message: '任务状态已更新。'
         };
     }
 

@@ -607,25 +607,6 @@ export class AgentTurnEngine {
                                 ? todosFromTool
                                 : await TodoService.getTodos(root, userId);
                             emit({ type: "annotation", method: "todo/update", params: { todos } });
-
-                            // 当所有 TODO 任务均达到终态时，向模型上下文注入强指令，确保下一轮必定输出完整的最终答复，
-                            // 避免模型因"工具已执行完毕"而直接退出或仅输出内部推理，导致前端出现空白气泡或不再接收后续答复
-                            const TERMINAL_STATUSES = new Set(['completed', 'failed']);
-                            const allTerminal = todos.length > 0 && todos.every((t: any) => TERMINAL_STATUSES.has(String(t?.status || '').toLowerCase()));
-                            if (allTerminal) {
-                                activeHistory.push({
-                                    role: "system",
-                                    content: [
-                                        "【终态响应强制指令】",
-                                        "当前所有 TODO 任务均已达到终态（全部完成或失败）。",
-                                        "你必须立即向用户输出完整、详尽、结构化的最终答复（Final Reply）：",
-                                        "1. 详细总结本次任务的完成情况及达成的目标；",
-                                        "2. 清晰列出所有新建或修改的文件路径及主要变更点；",
-                                        "3. 如有未完成或失败的任务，说明原因并给出后续建议。",
-                                        "严禁输出空回复，严禁仅输出内部推理或简短确认词（如'好的'、'已完成'），必须给出面向用户的完整成果汇报！"
-                                    ].join("\n")
-                                });
-                            }
                         }
                     } catch (toolErr: any) {
                         console.error(

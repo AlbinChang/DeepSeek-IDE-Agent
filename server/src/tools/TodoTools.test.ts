@@ -219,7 +219,7 @@ describe('TodoTools atomic tool contract', () => {
         }
     });
 
-    it('returns allTerminal flag and final reply guidance when all tasks reach terminal state', async () => {
+    it('updateTodo returns updated task list and simple status message', async () => {
         const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'todo-tools-'));
         const userId = 'test-terminal';
         try {
@@ -230,20 +230,20 @@ describe('TodoTools atomic tool contract', () => {
 
             const tool = new TodoTools(workspaceRoot);
 
-            // Update only t1 -> still not all terminal
+            // Update only t1 -> t2 still not terminal
             const partialResult: any = await tool.updateTodo({
                 todos: [{ id: 't1', status: 'completed' }]
             }, { userId });
-            expect(partialResult.allTerminal).toBe(false);
             expect(partialResult.todos).toHaveLength(2);
+            expect(partialResult.message).toBe('任务状态已更新。');
 
-            // Update t2 -> now all terminal
+            // Update t2 -> all terminal, but no directive-like guidance is returned
             const finalResult: any = await tool.updateTodo({
                 todos: [{ id: 't2', status: 'completed' }]
             }, { userId });
-            expect(finalResult.allTerminal).toBe(true);
-            expect(finalResult.message).toContain('所有 TODO 任务均已达到终态');
-            expect(finalResult.message).toContain('最终答复');
+            expect(finalResult.todos.every((t: any) => t.status === 'completed')).toBe(true);
+            expect(finalResult.message).toBe('任务状态已更新。');
+            expect(finalResult.allTerminal).toBeUndefined();
         } finally {
             await fs.rm(workspaceRoot, { recursive: true, force: true });
         }
