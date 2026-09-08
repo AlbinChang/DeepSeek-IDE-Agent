@@ -518,14 +518,7 @@ export class AgentTurnEngine {
                 }));
 
                 assistantMsg.tool_calls = tool_calls_map;
-                // DeepSeek thinking mode 协议：工具循环中的 assistant 消息必须携带 reasoning_content 字段，
-                // 且后续请求必须回传该轮真实产生的推理内容，否则 API 返回 400：
-                //   "The `reasoning_content` in the thinking mode must be passed back to the API."
-                // 若本轮模型未输出推理（续接工具轮时模型可能跳过思考），
-                // 回退到本 run 最近一次非空推理，避免把空字符串发回 API 触发 400。
-                if (!assistantMsg.reasoning_content) {
-                    assistantMsg.reasoning_content = lastAssistantReasoning;
-                }
+                
                 if (!Object.prototype.hasOwnProperty.call(assistantMsg, "reasoning_content")) {
                     assistantMsg.reasoning_content = "";
                 }
