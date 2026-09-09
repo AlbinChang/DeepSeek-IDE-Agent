@@ -824,7 +824,8 @@ export class WebPageSaver {
                 }
                 // 全部图片都被清理时移除空资源目录
                 if (imageStats.downloaded === 0) {
-                    try { await fs.rmdir(assetDirAbs); } catch {}
+                    // fs.rmdir 已弃用（DEP0146），改用 fs.rm 幂等删除整个资产目录
+                    try { await fs.rm(assetDirAbs, { recursive: true, force: true }); } catch {}
                 }
             }
 

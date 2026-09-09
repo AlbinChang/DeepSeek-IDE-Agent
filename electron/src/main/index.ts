@@ -133,7 +133,22 @@ function createMainWindow(): BrowserWindow {
         const devUrl = `http://localhost:${devPort}`;
         console.log(`[Electron] Dev mode: loading ${devUrl}`);
         win.loadURL(devUrl);
-        win.webContents.openDevTools({ mode: 'detach' });
+
+        // 默认不自动打开 DevTools：自动打开会触发 Chromium DevTools 内部的
+        // "Unknown VE context / Autofill.enable" 等无意义的控制台错误噪音。
+        // 需要调试时以 ELECTRON_DEVTOOLS=1 启动，或按 F12 手动切换。
+        const openDevToolsRequested =
+            process.env.ELECTRON_DEVTOOLS === '1' || process.argv.includes('--devtools');
+        if (openDevToolsRequested) {
+            win.webContents.openDevTools({ mode: 'detach' });
+        }
+
+        // F12 手动切换 DevTools，便于按需调试
+        win.webContents.on('before-input-event', (_event, input) => {
+            if (input.type === 'keyDown' && input.key === 'F12') {
+                win.webContents.toggleDevTools();
+            }
+        });
     } else {
         // 生产模式：加载 Vite 构建的静态文件
         const indexPath = path.join(CLIENT_DIST, 'index.html');

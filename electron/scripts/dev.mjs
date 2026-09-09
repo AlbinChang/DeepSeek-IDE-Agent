@@ -241,6 +241,30 @@ function cleanup(exitCode = 0) {
     process.exit(exitCode);
 }
 
+// ── 定位 vite 可执行 JS 入口（避免 spawn pnpm + shell，消除 DEP0190 弃用警告） ──
+function resolveViteEntry() {
+    const candidates = [
+        path.join(CLIENT_DIR, 'node_modules', 'vite', 'bin', 'vite.js'),
+        path.join(PROJECT_ROOT, 'node_modules', 'vite', 'bin', 'vite.js'),
+    ];
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
+    return null;
+}
+
+// ── 构建 Vite 子进程环境变量 ──
+// vite-plugin-monaco-editor 内部使用已弃用的 fs.rmdirSync(path, { recursive: true })（DEP0147），
+// 属于第三方插件噪音，此处仅为 Vite 子进程屏蔽该弃用警告，保持启动日志干净。
+function buildViteEnv() {
+    const env = { ...process.env, VITE_DEV_PORT: VITE_PORT };
+    const major = parseInt(String(process.versions?.node || '').split('.')[0], 10) || 0;
+    if (major >= 22) {
+        env.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --disable-warning=DEP0147`.trim();
+    }
+    return env;
+}
+
 // ── 步骤 3: 启动 Vite Dev Server ──
 function startViteDevServer() {
     return new Promise((resolve) => {
@@ -250,12 +274,27 @@ function startViteDevServer() {
         log('VITE', colors.yellow, `Starting Vite dev server on port ${VITE_PORT}...`);
 
         const spawnVite = () => {
-            const vite = spawn('pnpm', ['exec', 'vite', '--host', '0.0.0.0', '--port', VITE_PORT, '--strictPort'], {
-                cwd: CLIENT_DIR,
-                stdio: 'pipe',
-                shell: true,
-                env: { ...process.env, VITE_DEV_PORT: VITE_PORT },
-            });
+            const viteArgs = ['--host', '0.0.0.0', '--port', VITE_PORT, '--strictPort'];
+            // 优先直接用 node 运行 vite JS 入口：无 shell 包装，消除 DEP0190 警告并减少一层进程开销
+            const viteEntry = resolveViteEntry();
+            const vite = viteEntry
+                ? spawn(process.execPath, [viteEntry, ...viteArgs], {
+                    cwd: CLIENT_DIR,
+                    stdio: 'pipe',
+                    env: buildViteEnv(),
+                })
+                : (process.platform === 'win32'
+                    // 兜底：Windows 通过 cmd.exe 显式承载命令，避免 spawn shell:true + args 的 DEP0190 警告
+                    ? spawn('cmd.exe', ['/d', '/s', '/c', ['pnpm exec vite', ...viteArgs].join(' ')], {
+                        cwd: CLIENT_DIR,
+                        stdio: 'pipe',
+                        env: buildViteEnv(),
+                    })
+                    : spawn('pnpm', ['exec', 'vite', ...viteArgs], {
+                        cwd: CLIENT_DIR,
+                        stdio: 'pipe',
+                        env: buildViteEnv(),
+                    }));
 
             let started = false;
             let accumulated = '';
