@@ -43,6 +43,13 @@ const normalizeProviderId = (raw: string, fallback: string): string => {
     return normalized || fallback;
 };
 
+/**
+ * 归一化思考强度档位：仅接受 default | high | max，非法值回落 high。
+ * default 表示不发送 reasoning_effort 字段，采用模型默认思考强度。
+ */
+const normalizeReasoningEffort = (raw: unknown): 'default' | 'high' | 'max' =>
+    raw === 'max' ? 'max' : raw === 'default' ? 'default' : 'high';
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     const { settings, updateSettings, provider, locale, setLocale, setProvider, setModel, workspaceRoot } = useAgentContext();
     const [localProviders, setLocalProviders] = useState<EditableProviderConfig[]>([]);
@@ -54,7 +61,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         if (settings) {
             const normalized: EditableProviderConfig[] = settings.providers.length > 0
                 ? settings.providers.map((p, index) => {
-                    const defaultReasoningEffort: 'high' | 'max' = p.defaultReasoningEffort === 'max' ? 'max' : 'high';
+                    const defaultReasoningEffort = normalizeReasoningEffort(p.defaultReasoningEffort);
                     return {
                         ...createDefaultProvider(index + 1),
                         ...p,
@@ -205,7 +212,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                     apiKey: (providerConfig.apiKey || '').trim(),
                     baseURL: (providerConfig.baseURL || '').trim(),
                     enableThinking: providerConfig.enableThinking !== false,
-                    defaultReasoningEffort: providerConfig.defaultReasoningEffort === 'max' ? 'max' : 'high',
+                    defaultReasoningEffort: normalizeReasoningEffort(providerConfig.defaultReasoningEffort),
                 }
             });
 
@@ -247,7 +254,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             }
             used.add(uniqueId);
 
-            const defaultReasoningEffort: 'high' | 'max' = p.defaultReasoningEffort === 'max' ? 'max' : 'high';
+            const defaultReasoningEffort = normalizeReasoningEffort(p.defaultReasoningEffort);
 
             return {
                 ...p,
@@ -540,13 +547,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                                             <label className="text-[9px] font-black text-white opacity-20 uppercase tracking-[0.15em]">默认思考强度</label>
                                             <div className="relative group/select">
                                                 <select
-                                                    value={p.defaultReasoningEffort === 'max' ? 'max' : 'high'}
-                                                    onChange={(e) => handleUpdateProvider(p.draftKey, { defaultReasoningEffort: e.target.value === 'max' ? 'max' : 'high' })}
+                                                    value={p.defaultReasoningEffort ?? 'high'}
+                                                    onChange={(e) => handleUpdateProvider(p.draftKey, { defaultReasoningEffort: normalizeReasoningEffort(e.target.value) })}
                                                     disabled={p.enableThinking === false}
                                                     className="w-full bg-[#020202] border border-white/10 rounded-sm p-3 text-[11px] text-white/90 outline-none focus:border-[#0088ff]/40 transition-all font-black appearance-none cursor-pointer pr-10 disabled:opacity-40 disabled:cursor-not-allowed"
                                                 >
-                                                    <option value="high">HIGH (默认)</option>
-                                                    <option value="max">MAX (更强推理)</option>
+                                                    <option value="default">DEFAULT (模型默认，不发送强度字段)</option>
+                                                    <option value="high">HIGH (推荐)</option>
+                                                    <option value="max">MAX (最强推理)</option>
                                                 </select>
                                                 <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none opacity-20 group-hover/select:opacity-60 transition-opacity">
                                                     <ChevronDown size={14} strokeWidth={3} />

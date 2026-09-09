@@ -51,7 +51,7 @@ export class AgentChatComponent {
         locale?: string, 
         abortSignal?: AbortSignal,
         onChunk?: (chunk: any) => void,
-        reasoningEffort?: 'high' | 'max',
+        reasoningEffort?: 'default' | 'high' | 'max',
         providerConfig?: ModelProviderConfig,
         workspaceRoot?: string,
         requestId?: string,
@@ -103,11 +103,11 @@ export class AgentChatComponent {
         agentService.logRegisteredTools();
 
         // 2026.04: 思考强度 (reasoning_effort)
-        // 官方兼容映射：low/medium → high；xhigh → max；默认 high。复杂 Agent 场景建议 max。
-        const effectiveReasoningEffort: 'high' | 'max' = reasoningEffort === 'max'
-            ? 'max'
-            : (resolvedProvider.defaultReasoningEffort === 'max' ? 'max' : 'high');
-        console.log(`${getTS()} [AgentChat] Reasoning effort: ${effectiveReasoningEffort} for user: ${userId}`);
+        // 内部统一档位：default（不发送字段，采用模型默认）| high | max。
+        // Qwen 系模型在 buildThinkingOptions 内进一步映射为 xhigh/medium/low。
+        const effectiveReasoningEffort = AIProviderFactory.resolveReasoningEffort(resolvedProvider, reasoningEffort);
+        const mappedReasoningEffort = AIProviderFactory.mapReasoningEffort(resolvedProvider, effectiveReasoningEffort);
+        console.log(`${getTS()} [AgentChat] Reasoning effort: ${effectiveReasoningEffort} -> ${mappedReasoningEffort ?? 'default (omitted)'} for user: ${userId}, model: ${finalModelId}`);
 
         const emit = (chunk: any) => {
             if (onChunk) {

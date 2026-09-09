@@ -2,6 +2,14 @@ import OpenAI from 'openai';
 import type { ModelProviderConfig } from '@/services/SettingsService.js';
 
 /**
+ * 内部统一的思考强度档位：
+ * - 'default': 不发送 reasoning_effort / thinking 字段，完全采用模型默认思考强度
+ * - 'high': 平衡档（DeepSeek 原样透传；Qwen 映射为 medium）
+ * - 'max': 最强档（DeepSeek 原样透传；Qwen 映射为 xhigh）
+ */
+export type ReasoningEffortLevel = 'default' | 'high' | 'max';
+
+/**
  * 对应重构需求：原生 DeepSeek 客户端工厂
  * 移除对 Vercel AI SDK 的依赖，直接使用 OpenAI SDK 调用 DeepSeek
  */
@@ -37,7 +45,7 @@ export class AIProviderFactory {
             apiKey: (input?.apiKey || fallback.apiKey || '').trim(),
             baseURL,
             enableThinking: input?.enableThinking !== false,
-            defaultReasoningEffort: input?.defaultReasoningEffort === 'max' ? 'max' : 'high',
+            defaultReasoningEffort: this.normalizeReasoningEffort(input?.defaultReasoningEffort),
         };
     }
 
@@ -105,24 +113,94 @@ export class AIProviderFactory {
         return raw.length <= 512 ? raw : raw.slice(0, 512);
     }
 
+    /**
+     * 归一化思考强度档位：仅接受 default | high | max，非法值回落 high。
+     */
+    static normalizeReasoningEffort(raw: unknown): ReasoningEffortLevel {
+        if (raw === 'default' || raw === 'high' || raw === 'max') return raw;
+        return 'high';
+    }
+
+    /**
+     * 解析最终生效的思考强度档位：
+     * 调用方显式传入的 reasoningEffort 优先，其次 provider 配置默认，最后系统默认 high。
+     * 返回 'default' 表示不发送 reasoning_effort 字段，采用模型默认思考强度。
+     */
+    static resolveReasoningEffort(
+        providerInput?: Partial<ModelProviderConfig>,
+        reasoningEffort?: ReasoningEffortLevel | null,
+    ): ReasoningEffortLevel {
+        if (reasoningEffort === 'default' || reasoningEffort === 'high' || reasoningEffort === 'max') {
+            return reasoningEffort;
+        }
+        const provider = this.normalizeProvider(providerInput);
+        return this.normalizeReasoningEffort(provider.defaultReasoningEffort);
+    }
+
+    /**
+     * 判断是否为 Qwen 系列模型。
+     * Qwen 网关的思考强度取值与 DeepSeek 不同，需要单独适配。
+     */
+    static isQwenProvider(providerInput?: Partial<ModelProviderConfig>): boolean {
+        const provider = this.normalizeProvider(providerInput);
+        const id = (provider.id || '').toLowerCase();
+        const name = (provider.name || '').toLowerCase();
+        const modelId = (provider.modelId || '').toLowerCase();
+        return id.includes('qwen') || name.includes('qwen') || modelId.includes('qwen');
+    }
+
+    /**
+     * 将内部统一档位映射为具体供应商支持的 reasoning_effort 取值：
+     * - 'default' → null（不发送该字段，采用模型默认）
+     * - DeepSeek: high | max 原样透传
+     * - Qwen: max → xhigh（最强档）；high → medium（Qwen 无 high 档位，仅支持 xhigh/medium/low）
+     */
+    static mapReasoningEffort(
+        providerInput?: Partial<ModelProviderConfig>,
+        reasoningEffort?: ReasoningEffortLevel | null,
+    ): string | null {
+        const provider = this.normalizeProvider(providerInput);
+        const level = this.resolveReasoningEffort(provider, reasoningEffort);
+
+        if (level === 'default') return null;
+        if (this.isQwenProvider(provider)) {
+            return level === 'max' ? 'xhigh' : 'medium';
+        }
+        return level;
+    }
+
     static buildThinkingOptions(
         providerInput?: Partial<ModelProviderConfig>,
-        reasoningEffort?: 'high' | 'max',
+        reasoningEffort?: ReasoningEffortLevel | null,
         agentName?: string,
         workspace?: string,
     ): Record<string, any> {
         const provider = this.normalizeProvider(providerInput);
+        const isQwen = this.isQwenProvider(provider);
         if (provider.enableThinking === false) {
             const opts: Record<string, any> = {};
-            if (agentName && workspace) {
+            if (agentName && workspace && !isQwen) {
                 opts.extra_body = { user_id: this.buildUserId(agentName, workspace) };
             }
             return opts;
         }
 
-        const effort = reasoningEffort === 'max'
-            ? 'max'
-            : (provider.defaultReasoningEffort === 'max' ? 'max' : 'high');
+        const effort = this.mapReasoningEffort(provider, reasoningEffort);
+
+        // 'default' 档位：不发送 reasoning_effort 与 thinking 字段，完全采用模型默认思考强度。
+        // user_id 与思考无关，仅用于 DeepSeek KV Cache 复用，保留以提升缓存命中率。
+        if (effort === null) {
+            if (!isQwen && agentName && workspace) {
+                return { extra_body: { user_id: this.buildUserId(agentName, workspace) } };
+            }
+            return {};
+        }
+
+        // Qwen 网关仅支持 reasoning_effort: xhigh(default) | medium | low，
+        // 不接受 DeepSeek 专属的 extra_body.thinking 字段（默认即思考模式），保持请求体精简。
+        if (isQwen) {
+            return { reasoning_effort: effort };
+        }
 
         const extra_body: Record<string, any> = { thinking: { type: 'enabled' } };
         if (agentName && workspace) {

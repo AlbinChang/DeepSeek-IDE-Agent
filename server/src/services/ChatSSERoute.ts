@@ -60,13 +60,16 @@ export async function setupChatSSE(fastify: FastifyInstance, agentService: Agent
             });
         }
 
-        // 2026.04: 思考强度归一化 —— 仅接受 high | max，其他一律回落到 high
-        // 对齐 DeepSeek 官方兼容性：low/medium → high；xhigh → max
-        const normalizeEffort = (v: any): 'high' | 'max' => {
-            if (typeof v !== 'string') return 'high';
-            const s = v.toLowerCase();
+        // 2026.04: 思考强度归一化 —— 内部统一 default | high | max
+        // default: 不发送 reasoning_effort，采用模型默认；undefined: 未提供，回落到 provider 配置默认
+        // 兼容 DeepSeek 官方 low/medium → high；xhigh → max
+        const normalizeEffort = (v: any): 'default' | 'high' | 'max' | undefined => {
+            if (typeof v !== 'string' || !v.trim()) return undefined;
+            const s = v.trim().toLowerCase();
+            if (s === 'default') return 'default';
             if (s === 'max' || s === 'xhigh') return 'max';
-            return 'high';
+            if (s === 'high' || s === 'medium' || s === 'low') return 'high';
+            return undefined;
         };
         const effectiveReasoningEffort = normalizeEffort(reasoningEffort);
 

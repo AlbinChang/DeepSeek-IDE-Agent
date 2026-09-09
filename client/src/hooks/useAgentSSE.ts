@@ -746,14 +746,17 @@ export function useAgentSSE() {
 
         try {
             const activeProvider = settings?.providers?.find(p => p.id === provider) || settings?.providers?.[0];
-            const defaultEffort = activeProvider?.defaultReasoningEffort === 'max' ? 'max' : 'high';
+            const defaultEffort: 'default' | 'high' | 'max' =
+                activeProvider?.defaultReasoningEffort === 'max' ? 'max'
+                    : activeProvider?.defaultReasoningEffort === 'default' ? 'default'
+                        : 'high';
             const shouldEnableThinking = activeProvider?.enableThinking !== false;
 
             const reasoningEffortValue = shouldEnableThinking
-                ? ((): 'high' | 'max' => {
+                ? ((): 'default' | 'high' | 'max' => {
                     try {
                         const v = window.localStorage.getItem('reasoning_effort');
-                        if (v === 'max' || v === 'high') return v;
+                        if (v === 'default' || v === 'high' || v === 'max') return v;
                         return defaultEffort;
                     } catch {
                         return defaultEffort;

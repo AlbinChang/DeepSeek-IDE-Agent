@@ -198,7 +198,7 @@ export interface AgentTurnEngineOptions {
     activeHistory: any[];
     /** 所有工具的 OpenAI function schema 数组 */
     toolsMetadata: any[];
-    /** 推理模式额外参数（e.g. { reasoning_effort: 'max' }，由 AIProviderFactory.buildThinkingOptions 生成） */
+    /** 推理模式额外参数（由 AIProviderFactory.buildThinkingOptions 生成；default 档位时不含 reasoning_effort） */
     thinkingOptions: any;
     /** AgentService 实例（用于工具执行与会话历史持久化） */
     agentService: AgentService;

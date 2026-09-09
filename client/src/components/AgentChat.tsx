@@ -233,12 +233,13 @@ export const AgentChat: React.FC = () => {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
     // 2026.04: 思考强度控制 (DeepSeek V4 / Gemini 3 均支持 reasoning_effort: high | max)
-    // 默认 high，复杂 Agent 场景建议切换到 max。持久化到 localStorage，避免刷新丢失。
-    const [reasoningEffort, setReasoningEffortState] = useState<'high' | 'max'>(() => {
+    // default: 不发送思考强度字段，采用模型默认；high: 平衡档；max: 最强推理（消耗更多 token）。
+    // 持久化到 localStorage，避免刷新丢失。
+    const [reasoningEffort, setReasoningEffortState] = useState<'default' | 'high' | 'max'>(() => {
         const saved = typeof window !== 'undefined' ? window.localStorage.getItem('reasoning_effort') : null;
-        return saved === 'max' ? 'max' : 'high';
+        return saved === 'default' || saved === 'max' ? saved : 'high';
     });
-    const setReasoningEffort = (v: 'high' | 'max') => {
+    const setReasoningEffort = (v: 'default' | 'high' | 'max') => {
         setReasoningEffortState(v);
         try { window.localStorage.setItem('reasoning_effort', v); } catch { /* ignore */ }
     };
@@ -996,10 +997,18 @@ export const AgentChat: React.FC = () => {
                     <div className='flex flex-wrap items-center gap-2 mt-px px-1 text-[11px]'>
                         <div
                             className='inline-flex items-center gap-0.5 bg-white/5 border border-white/10 rounded-lg p-0.5'
-                            title='思考强度：High（默认，快速）/ Max（深度思考，适合复杂 Agent 任务；会消耗更多 token）'
+                            title='思考强度：Default（不发送强度字段，采用模型默认）/ High（平衡）/ Max（最强推理，适合复杂 Agent 任务；会消耗更多 token）'
                         >
                             <Brain className='w-3 h-3 text-emerald-400/70 ml-1 mr-0.5' />
                             <span className='text-white/30 mr-1'>思考</span>
+                            <button
+                                type='button'
+                                disabled={!thinkingEnabled}
+                                onClick={() => setReasoningEffort('default')}
+                                className={`px-2 py-0.5 rounded-md transition-all disabled:opacity-30 disabled:cursor-not-allowed ${reasoningEffort === 'default' ? 'bg-sky-600/80 text-white shadow-inner' : 'text-white/40 hover:text-white/70'}`}
+                            >
+                                Default
+                            </button>
                             <button
                                 type='button'
                                 disabled={!thinkingEnabled}

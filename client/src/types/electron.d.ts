@@ -11,7 +11,7 @@ interface AgentChatParams {
     traceId: string;
     locale?: string;
     root?: string;
-    reasoningEffort?: 'high' | 'max';
+    reasoningEffort?: 'default' | 'high' | 'max';
     provider?: string;
     model?: string;
 }

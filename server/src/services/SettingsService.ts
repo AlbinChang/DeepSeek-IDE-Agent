@@ -13,7 +13,10 @@ export interface ModelProviderConfig {
     apiKey: string;
     baseURL?: string;
     enableThinking?: boolean;
-    defaultReasoningEffort?: 'high' | 'max';
+    /**
+     * 思考强度：default（不发送字段，采用模型默认）| high | max
+     */
+    defaultReasoningEffort?: 'default' | 'high' | 'max';
 }
 
 export interface UserSettings {
@@ -57,6 +60,14 @@ export class SettingsService {
         return normalized || fallback;
     }
 
+    /**
+     * 归一化思考强度档位：仅接受 default | high | max，非法值回落 high。
+     */
+    private static normalizeReasoningEffort(raw: unknown): 'default' | 'high' | 'max' {
+        if (raw === 'default' || raw === 'max') return raw;
+        return 'high';
+    }
+
     private static normalizeSettings(input?: Partial<UserSettings>): UserSettings {
         const defaults = this.getDefaultSettings();
         const sourceProviders = Array.isArray(input?.providers) && input!.providers.length > 0
@@ -87,7 +98,7 @@ export class SettingsService {
                 apiKey: (rawProvider?.apiKey || '').trim(),
                 baseURL,
                 enableThinking: rawProvider?.enableThinking !== false,
-                defaultReasoningEffort: rawProvider?.defaultReasoningEffort === 'max' ? 'max' : 'high',
+                defaultReasoningEffort: this.normalizeReasoningEffort(rawProvider?.defaultReasoningEffort),
             });
         });
 
