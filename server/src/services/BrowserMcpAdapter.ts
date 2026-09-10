@@ -649,9 +649,12 @@ export class BrowserMcpAdapter {
         lines.push('- 交互前先获取最新快照确认元素引用（ref）仍然有效。');
         lines.push('');
         lines.push('**📥 网页内容保存（长文 / 技术文章下载）**：');
-        lines.push('- 使用 `playwright__browser_evaluate` 提取页面正文内容（如 `document.body.innerText` 或 `document.querySelector("article")?.innerHTML`），返回内容无大小限制。');
-        lines.push('- 提取后使用 `file_write` 工具将内容写入工作区文件（.md / .html）。');
-        lines.push('- 使用 `playwright__browser_navigate` 导航到目标 URL 后再提取。');
+        lines.push('- 标准流程：`playwright__browser_navigate` 导航到目标 URL → `playwright__browser_evaluate` 提取正文（优先 `document.querySelector("article")?.innerText`，无 article 时用 `document.body.innerText`，返回内容无大小限制）→ `file_write` 写入 .md（encoding: "utf-8"），长文可分段提取写入。');
+        lines.push('- **图片本地化铁律**：网页图片必须下载到工作区 `docs/images/` 子目录存放，md 中以本地相对路径（本地 URI）引用（如 `![图](../images/文章名-img-01.png)`），严禁把图片的网络 URL（http/https）直接嵌入 md。');
+        lines.push('- 收集图片 URL：`playwright__browser_evaluate` 执行 `() => Array.from(document.images).map(function(i){ return { src: i.src, alt: i.alt }; })` 获取正文图片清单。');
+        lines.push('- 下载图片：`run_powershell_command` 执行 `Invoke-WebRequest -Uri "<图片URL>" -OutFile "docs/images/<文件名>" -Headers @{ Referer = "<页面URL>"; "User-Agent" = "Mozilla/5.0 ... Chrome/126.0" }`（防盗链站点必须带 Referer 与浏览器 UA）；文件名用文章名做前缀防冲突，保持原格式（jpg/png/webp/gif）。');
+        lines.push('- **更新已有 md**：若 md 中图片仍是网络 URL，必须下载到 `docs/images/` 并把引用替换为本地相对路径，禁止保留网络 URL。');
+        lines.push('- **保存位置规范**：参考材料默认 `docs/references/<主题>`；用户指定路径时按用户指定；最终交付物禁止写入 `.temp/`。');
         lines.push('');
         lines.push('**🚫 截图禁令 (SCREENSHOT PROHIBITION FOR CONTENT DOWNLOAD)**：');
         lines.push('- **绝对禁止**用 `playwright__browser_take_screenshot` 截图方式"保存/下载/收藏"网页文章——用户极度反感截图交付，截图无法检索、不可复制文字、体积巨大、完全不可用。');

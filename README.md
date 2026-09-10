@@ -252,7 +252,7 @@ web-ide-agent/
 │
 ├── server/                       # Agent 核心领域引擎（被主进程打包引用）
 │   └── src/
-│       ├── services/             # AgentService、AgentTurnEngine、SyntaxCheckService、WebPageSaver 等
+│       ├── services/             # AgentService、AgentTurnEngine、SyntaxCheckService 等
 │       ├── config/               # Agent 提示词 & 模型配置
 │       ├── tools/                # 内置工具集（FileTools、SystemTools、TodoTools 等）
 │       └── utils/                # 辅助工具（ApiRetryUtils、PathUtils、ReasoningUtils 等）

@@ -170,7 +170,7 @@ C:\Users\<用户名>\AppData\Roaming\DeepSeek IDE Agent\   (%APPDATA%)
 
 1. **单元测试矩阵**：
    - 全量测试通过：**13 个测试套件，165 项测试全部通过（100% Passed）**。
-   - 覆盖进程安全守护（`ProcessSafetyGuard`）、网页智能提取（`WebPageSaver`）、多工作区数据隔离（`WorkspaceIsolationContracts`）、数学计算引擎（`CalculatorTool`）等全部核心模块。
+   - 覆盖进程安全守护（`ProcessSafetyGuard`）、多工作区数据隔离（`WorkspaceIsolationContracts`）、数学计算引擎（`CalculatorTool`）等全部核心模块。
 2. **打包完整性校验**：
    - 前端相对路径资源校验完成，Monaco Editor 代码提示、代码着色 worker 正常解析。
    - `node-pty` 原生 Windows x64 二进制在 asarUnpack 目录中正确签名与释放。
