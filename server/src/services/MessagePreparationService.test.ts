@@ -5,14 +5,26 @@ import { MessagePreparationService } from "./MessagePreparationService.js";
 const SYSTEM_PROMPT = "MAIN_SYSTEM_PROMPT";
 const PINNED_USER = "本轮用户原始指令";
 
-function build(messages: any[], opts: { maxBytes?: number; lowWatermarkBytes?: number; minMessagesBeforeTrim?: number } = {}) {
+function build(
+    messages: any[],
+    opts: {
+        maxBytes?: number;
+        lowWatermarkBytes?: number;
+        minMessagesBeforeTrim?: number;
+        pinnedUserMessage?: string;
+        provider?: any;
+    } = {}
+) {
     return MessagePreparationService.buildMessages({
         systemPrompt: SYSTEM_PROMPT,
-        pinnedUserMessage: PINNED_USER,
+        pinnedUserMessage: opts.pinnedUserMessage ?? PINNED_USER,
         incomingMessages: messages,
+        provider: opts.provider,
         ...opts,
     });
 }
+
+const QWEN_PROVIDER = { id: "qwen", name: "Qwen", modelId: "qwen38" };
 
 const assistantToolCall = (toolCalls: any[], content = "") => ({
     role: "assistant",
@@ -170,5 +182,73 @@ describe("MessagePreparationService.buildMessages — 工具调用链完整性",
 
         const assistant = result.find((m) => m.role === "assistant");
         expect(assistant?.reasoning_content).toBe("最终回答前的推理");
+    });
+});
+
+describe("MessagePreparationService.buildMessages — Qwen 中途 system 兼容", () => {
+    it("Qwen 模型：中途 system 指令降级为 user 消息并加前缀，首条 system 保持 system", () => {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            { role: "assistant", content: "先调用工具" },
+            { role: "system", content: "【系统注入指令】中途继续推进任务。" },
+        ];
+
+        const result = build(messages, { provider: QWEN_PROVIDER });
+
+        // 首条 system 保持不变
+        expect(result[0]).toEqual({ role: "system", content: SYSTEM_PROMPT });
+        // 中途 system → user + 前缀
+        const converted = result.find((m) => String(m.content).includes("系统注入指令"));
+        expect(converted?.role).toBe("user");
+        expect(String(converted?.content)).toBe(`系统提示(非用户指令): 【系统注入指令】中途继续推进任务。`);
+        // 输出中不允许存在除首条外的 system 消息
+        expect(result.filter((m) => m.role === "system")).toHaveLength(1);
+    });
+
+    it("非 Qwen 模型：中途 system 指令保持 system 原样", () => {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            { role: "assistant", content: "先调用工具" },
+            { role: "system", content: "【系统注入指令】中途继续推进任务。" },
+        ];
+
+        const result = build(messages, { provider: { id: "deepseek", modelId: "deepseek-reasoner" } });
+
+        const kept = result.find((m) => String(m.content).includes("系统注入指令"));
+        expect(kept?.role).toBe("system");
+        expect(String(kept?.content)).toBe("【系统注入指令】中途继续推进任务。");
+    });
+
+    it("非置顶 user 消息（迭代修复指令）在重建后保留，且不再注入原始用户意图覆盖", () => {
+        const iterationDirective = "【迭代修复模式】请按评估报告在原文件上逐项修复。";
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: iterationDirective },
+            { role: "assistant", content: "好的，我先读取目标文件" },
+        ];
+
+        // pinnedUserMessage 切换为迭代修复指令（对应 AgentChatComponent 的 currentPinnedUserMessage）
+        const result = build(messages, { pinnedUserMessage: iterationDirective });
+
+        const userMsgs = result.filter((m) => m.role === "user");
+        expect(userMsgs).toHaveLength(1);
+        expect(String(userMsgs[0].content)).toBe(iterationDirective);
+    });
+
+    it("非置顶 user 消息（Qwen 模式下降级而来的中途指令）重建时被保留", () => {
+        const directive = "系统提示(非用户指令): 检测到仍有 TODO 任务未到终态，请继续推进。";
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            { role: "assistant", content: "完成当前步骤" },
+            { role: "user", content: directive },
+        ];
+
+        const result = build(messages, { provider: QWEN_PROVIDER });
+
+        const directiveMsgs = result.filter((m) => m.role === "user" && String(m.content) === directive);
+        expect(directiveMsgs).toHaveLength(1);
     });
 });

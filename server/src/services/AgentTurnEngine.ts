@@ -22,6 +22,8 @@
 
 import * as path from "path";
 import { AgentService } from "@/services/AgentService.js";
+import { AIProviderFactory } from "@/services/AIProviderFactory.js";
+import type { ModelProviderConfig } from "@/services/SettingsService.js";
 import { TodoService } from "@/services/TodoService.js";
 import { TelemetryService } from "@/services/TelemetryService.js";
 import { config as globalConfig } from "@/config/index.js";
@@ -228,8 +230,12 @@ export interface AgentTurnEngineOptions {
      * 默认 0，引擎会将其累加后在结果中返回。
      */
     totalSteps?: number;
-    /** 单次 runTurns 允许的最大轮次，超出则强制退出（默认 1000） */
-    maxTurns?: number;
+    /**
+     * 当前使用的模型供应商配置。
+     * Qwen 系模型不允许中途插入 system 消息，请求前会由安全网将所有非首条
+     * system 消息降级为 user 消息（加前缀），保证循环迭代过程中消息序列合规。
+     */
+    provider?: Partial<ModelProviderConfig>;
     /**
      * 是否跳过会话历史持久化。
      * 设为 true 时，runTurns 不会调用 agentService.updateSessionHistory。
@@ -262,7 +268,7 @@ export class AgentTurnEngine {
     /**
      * 执行 Agent 内层轮次循环：
      *   AI 流式调用 → 收集 response → 执行工具调用 → 循环
-     * 直到模型不再返回 tool_calls（最终回答）或达到 maxTurns 为止。
+     * 直到模型不再返回 tool_calls（最终回答）为止。
      *
      * @returns 更新后的 activeHistory、最终 usage 以及累计步骤数
      */
@@ -284,7 +290,6 @@ export class AgentTurnEngine {
             startTimeStamp,
         } = options;
 
-        const MAX_TURNS = options.maxTurns ?? globalConfig.agent.maxTurns;
         let activeHistory = [...options.activeHistory];
         let usage: any = null;
         let turns = 0;
@@ -294,7 +299,7 @@ export class AgentTurnEngine {
         let lastNonEmptyAssistantContent = "";
         let lastAssistantReasoning = "";
 
-        while (turns < MAX_TURNS) {
+        while (true) {
             turns++;
 
             if (abortSignal?.aborted) {
@@ -409,7 +414,7 @@ export class AgentTurnEngine {
 
                     const response = await client.chat.completions.create({
                         model: finalModelId,
-                        messages: activeHistory,
+                        messages: AIProviderFactory.buildProviderSafeMessages(activeHistory, options.provider),
                         tools: toolsMetadata as any,
                         stream: true,
                         stream_options: { include_usage: true },

@@ -116,7 +116,6 @@ export const config = {
 
     // Agent 运行参数
     agent: {
-        maxTurns: parsePositiveInt(process.env.AGENT_MAX_TURNS, 1000, 1),
         // 网络层错误重试次数（DNS/连接/流中断等）
         apiRetryLimit: parsePositiveInt(process.env.AGENT_API_RETRY_LIMIT, 3, 0),
         // 服务过载类错误重试次数（HTTP 408/429/500/502/503/504，如 DeepSeek 503 Service is too busy）

@@ -5,7 +5,6 @@ import { HistoryOptimizerService } from "@/services/HistoryOptimizerService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
 import { FileIO } from "@/utils/FileIO.js";
-import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 
 /** 最近一次评估报告落盘路径（工作区相对路径，系统内部上下文补充文件） */
@@ -131,6 +130,7 @@ export class EvaluationAgentService {
                 pinnedUserMessage: evaluationTask,
                 pinnedUserPrefix: "",
                 incomingMessages: msgs,
+                provider: providerConfig,
             });
         };
 
@@ -167,9 +167,9 @@ export class EvaluationAgentService {
                 emit,
                 startTimeStamp: Date.now(),
                 totalSteps: 0,
-                maxTurns: globalConfig.agent.maxTurns,
                 /** 评估Agent对话旅程独立存放，不污染主Agent持久化历史 */
                 skipPersist: true,
+                provider: providerConfig,
             });
 
             turnResultUsage = turnResult.usage;

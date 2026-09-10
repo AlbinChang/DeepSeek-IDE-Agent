@@ -8,7 +8,6 @@ import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
 import { EvaluationAgentService } from "@/services/EvaluationAgentService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
 import { FileIO } from "@/utils/FileIO.js";
-import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 
 const getTS = () => getBeijingLogTimePrefix();
@@ -202,14 +201,19 @@ export class AgentChatComponent {
             
             const finalLocale = locale || "zh-CN";
             const firstUserIntent = lastUserMsgRecord.content;
-            
+
+            // 当前置顶（pinned）用户消息：普通轮次为原始用户意图；
+            // 进入迭代修复轮后切换为评估报告的修复指令，避免 prepareMessages
+            // 重建时把修复指令丢失并重新注入原始意图（导致评估反馈闭环断裂）。
+            let currentPinnedUserMessage = firstUserIntent;
             
             const prepareMessages = async (msgs: any[]) => {
                 const systemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId);
                 return MessagePreparationService.buildMessages({
                     systemPrompt,
-                    pinnedUserMessage: firstUserIntent,
+                    pinnedUserMessage: currentPinnedUserMessage,
                     incomingMessages: msgs,
+                    provider: resolvedProvider,
                 });
             };
 
@@ -219,29 +223,13 @@ export class AgentChatComponent {
             const client = AIProviderFactory.getClient(resolvedProvider);
             const thinkingOptions = AIProviderFactory.buildThinkingOptions(resolvedProvider, effectiveReasoningEffort, 'main-agent', root);
            
-            const MAX_TURNS = globalConfig.agent.maxTurns;
-
             let totalSteps = 0;
             let pendingEvaluatorRepairDirective: { finalReply: string } | null = null;
             let evaluatorRepairConfirmationRetries = 0;
-            let outerLoopCount = 0;
             let mainAgentFinalReply = "";
-            const MAX_OUTER_LOOPS = 10;
 
             while(true)
             {
-                outerLoopCount++;
-                if (outerLoopCount > MAX_OUTER_LOOPS) {
-                    console.warn(`${getTS()} [AgentChat] Reached max outer loop limit (${MAX_OUTER_LOOPS}), terminating chat loop for user: ${userId}`);
-                    clearPromptCache();
-                    emit({
-                        type: "done",
-                        content: mainAgentFinalReply || "已达到最大执行轮次上限，对话结束。",
-                        usage: null,
-                    });
-                    return;
-                }
-
                 let usage: any = null;
 
                 // 执行 Agent 轮次引擎（AI 流式调用 → 工具执行 → 循环，直到无工具调用为止）
@@ -262,7 +250,7 @@ export class AgentChatComponent {
                     emit,
                     startTimeStamp,
                     totalSteps,
-                    maxTurns: MAX_TURNS,
+                    provider: resolvedProvider,
                 });
 
                 activeHistory = turnResult.activeHistory;
@@ -277,16 +265,15 @@ export class AgentChatComponent {
                         evaluatorRepairConfirmationRetries += 1;
                         console.log(`${getTS()} [AgentChat] Main agent asked for confirmation on actionable evaluator repair; forcing direct repair iteration for user: ${userId}`);
                         activeHistory = await prepareMessages(activeHistory);
-                        activeHistory.push({
-                            role: "system",
-                            content: [
+                        activeHistory.push(
+                            AIProviderFactory.buildMidConversationDirective(resolvedProvider, [
                                 "你刚才试图询问用户是否确认评估报告修复。当前处于评估驱动修复轮：评估报告已给出明确文件路径、问题定位和修复动作时，视为本轮已有修复授权。",
                                 "不要再询问用户是否确认、是否继续或是否采用建议；请立即基于评估报告创建修复 TODO，读取对应文件并在原文件原路径上执行最小必要修改。",
                                 "只有评估报告缺少可定位目标、缺少修复动作，或确实需要用户提供外部素材、账号授权、主观取舍时，才可以等待用户输入。",
                                 "评估结论正文如下：",
                                 pendingEvaluatorRepairDirective.finalReply || "(评估结论为空，请基于已有信息推断修复方案)",
-                            ].join("\n"),
-                        });
+                            ].join("\n"))
+                        );
                         emit({ type: "stage", content: "评估报告已有明确修复建议，主Agent将直接修复，不再等待二次确认。" });
                         continue;
                     }
@@ -307,15 +294,14 @@ export class AgentChatComponent {
                 // 只要存在非终态任务，严禁退出循环；必须继续推进任务
                 if (nonTerminalTodos.length > 0) {
                     activeHistory = await prepareMessages(activeHistory);
-                    activeHistory.push({
-                        role: "system",
-                        content: [
+                    activeHistory.push(
+                        AIProviderFactory.buildMidConversationDirective(resolvedProvider, [
                             "检测到仍有 TODO 任务未到终态，先利用TODO工具检查并推进或更新这些任务，不要进入最终结论判断阶段。",
                             "请继续调用工具推进任务，优先处理以下未终态项：",
                             formatNonTerminalTodos(nonTerminalTodos),
                             "仅当所有任务都进入终态（completed 或 failed）后，才允许进入最终结论判断。"
-                        ].join("\n")
-                    });
+                        ].join("\n"))
+                    );
 
                     console.log(`${getTS()} [AgentChat] Non-terminal TODOs detected (${nonTerminalTodos.length}), continuing chat loop for user: ${userId}`);
                     continue;
@@ -386,32 +372,36 @@ export class AgentChatComponent {
                         // 将评估报告的修复要求作为本轮 user 指令，让模型以最高优先级执行修复。
                         const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId);
                         const evaluatorReport = evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)";
+                        const iterationUserContent = [
+                            "【迭代修复模式 — 评估Agent 已发现问题，请立即在原文件上逐项修复】",
+                            "",
+                            "你已经执行过一轮用户原始需求（见下方「原始需求」），并产出了交付物。",
+                            "评估Agent 已完成审查并发现若干问题。你当前处于迭代修复阶段，不是首次执行。",
+                            "",
+                            "你的唯一任务：解析下方评估报告中的「可直接修复清单」，按 P0 → P1 → P2 → P3 优先级，",
+                            "在原目标文件上逐项执行最小必要修改。每修复一项，更新 TODO 状态。",
+                            "",
+                            "铁律：",
+                            "- 禁止把原始需求当作新任务重新规划、重新执行、重新生成",
+                            "- 禁止新建 V2/V3/修正版/最终版 等平行文件绕开问题",
+                            "- 必须先读取目标文件，再在原文件上局部替换/插入/删除",
+                            "- 评估报告已给出文件路径和修复动作 → 视为已有修复授权，直接修复，不要询问用户",
+                            "- 只有缺少外部素材、账号授权或无法定位目标文件时，才可请求用户介入",
+                            "",
+                            "【原始需求（仅供参考，不要重新执行）】",
+                            firstUserIntent,
+                            "",
+                            "【评估Agent 的评估报告 — 包含可直接修复清单】",
+                            evaluatorReport,
+                        ].join("\n");
+                        // 切换置顶用户消息：后续 prepareMessages 重建历史时以修复指令为 pinned user，
+                        // 防止原始用户意图被重新注入、修复指令被丢失。
+                        currentPinnedUserMessage = iterationUserContent;
                         activeHistory = [
                             { role: "system", content: iterSystemPrompt },
                             {
                                 role: "user",
-                                content: [
-                                    "【迭代修复模式 — 评估Agent 已发现问题，请立即在原文件上逐项修复】",
-                                    "",
-                                    "你已经执行过一轮用户原始需求（见下方「原始需求」），并产出了交付物。",
-                                    "评估Agent 已完成审查并发现若干问题。你当前处于迭代修复阶段，不是首次执行。",
-                                    "",
-                                    "你的唯一任务：解析下方评估报告中的「可直接修复清单」，按 P0 → P1 → P2 → P3 优先级，",
-                                    "在原目标文件上逐项执行最小必要修改。每修复一项，更新 TODO 状态。",
-                                    "",
-                                    "铁律：",
-                                    "- 禁止把原始需求当作新任务重新规划、重新执行、重新生成",
-                                    "- 禁止新建 V2/V3/修正版/最终版 等平行文件绕开问题",
-                                    "- 必须先读取目标文件，再在原文件上局部替换/插入/删除",
-                                    "- 评估报告已给出文件路径和修复动作 → 视为已有修复授权，直接修复，不要询问用户",
-                                    "- 只有缺少外部素材、账号授权或无法定位目标文件时，才可请求用户介入",
-                                    "",
-                                    "【原始需求（仅供参考，不要重新执行）】",
-                                    firstUserIntent,
-                                    "",
-                                    "【评估Agent 的评估报告 — 包含可直接修复清单】",
-                                    evaluatorReport,
-                                ].join("\n"),
+                                content: iterationUserContent,
                             },
                         ];
                         emit({ type: "stage", content: "评估完成：需要继续迭代，主Agent正在根据评估报告执行下一轮..." });

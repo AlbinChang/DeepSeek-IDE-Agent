@@ -1,4 +1,6 @@
 import { config as globalConfig } from "@/config/index.js";
+import { AIProviderFactory } from "@/services/AIProviderFactory.js";
+import type { ModelProviderConfig } from "@/services/SettingsService.js";
 
 export interface MessagePreparationOptions {
     systemPrompt: string;
@@ -8,6 +10,12 @@ export interface MessagePreparationOptions {
     minMessagesBeforeTrim?: number;
     maxBytes?: number;
     lowWatermarkBytes?: number;
+    /**
+     * 当前使用的模型供应商配置。
+     * Qwen 系模型不允许中途插入 system 消息，历史中的中途 system 指令会降级为
+     * user 消息（加前缀），非 Qwen 模型保持 system 原样。
+     */
+    provider?: Partial<ModelProviderConfig>;
 }
 
 /**
@@ -40,7 +48,15 @@ export class MessagePreparationService {
 
         // pinnedUserIndex之前的消息不做裁剪，直接加入结果
         if (pinnedUserIndex > 0) {
-            result.push(...msgsToProcess.slice(1, pinnedUserIndex+1)); //1是因为第0条是system消息，已经加入result了
+            // Qwen 兼容：该区间内若存在中途 system 指令（非首条系统提示词），
+            // 降级为 user 消息并加前缀，避免 Qwen 网关拒绝中途 system。
+            result.push(
+                ...msgsToProcess.slice(1, pinnedUserIndex + 1).map((m: any) =>
+                    m.role === "system" && m.content !== systemPrompt
+                        ? AIProviderFactory.buildMidConversationDirective(options.provider, m.content)
+                        : m
+                )
+            ); //1是因为第0条是system消息，已经加入result了
             msgsToProcess = msgsToProcess.slice(pinnedUserIndex+1);
         }
         else
@@ -97,12 +113,21 @@ export class MessagePreparationService {
             const m = msgsToProcess[i];
             if (m.role === "system") {
                 if (m.content !== systemPrompt) {
-                    result.push({ role: "system", content: m.content });
+                    // Qwen 兼容：中途 system 指令降级为 user 消息（加前缀），
+                    // 其他模型保持 system 原样（buildMidConversationDirective 内部判定）。
+                    result.push(AIProviderFactory.buildMidConversationDirective(options.provider, m.content));
                 }
                 continue;
             }
 
             if (m.role === "user") {
+                // 去重：与置顶 pinned user 完全相同的消息已加入结果，跳过；
+                // 其余 user 消息（如 Qwen 模式下降级而来的中途指令、迭代修复指令）必须保留，
+                // 否则 Qwen 的中途系统提示语义会在 prepareMessages 重建后被丢弃。
+                if (m.content === pinnedUserMsg.content) {
+                    continue;
+                }
+                result.push({ role: "user", content: m.content ?? "" });
                 continue;
             }
 

@@ -150,6 +150,51 @@ export class AIProviderFactory {
     }
 
     /**
+     * Qwen 系模型「中途注入指令」时附加在 user 消息上的前缀。
+     * Qwen 网关不允许在对话中间插入 system 消息（仅首条可为 system），
+     * 因此所有中途系统指令统一降级为 user 消息并加此前缀，明确标注「非用户指令」。
+     */
+    static readonly MID_CONVERSATION_DIRECTIVE_PREFIX = '系统提示(非用户指令): ';
+
+    /**
+     * 构建「中途注入」的指令消息（对话循环推进指令 / 评估修复指令等）：
+     * - Qwen 系模型：中间不允许插入 system 消息 → 返回 role=user 且内容加前缀
+     * - 其他模型（DeepSeek 等）：保持 role=system 原样返回
+     * 首条 system 消息（系统提示词）不经过此方法，保持 system 角色不变。
+     */
+    static buildMidConversationDirective(
+        providerInput: Partial<ModelProviderConfig> | undefined,
+        content: string,
+    ): { role: 'system' | 'user'; content: string } {
+        if (this.isQwenProvider(providerInput)) {
+            return { role: 'user', content: `${this.MID_CONVERSATION_DIRECTIVE_PREFIX}${content}` };
+        }
+        return { role: 'system', content };
+    }
+
+    /**
+     * 请求前安全网：将消息序列中除首条以外的所有 system 消息统一降级为
+     * user 消息（Qwen 不允许中途插入 system）。仅数组首条（index 0）system 保留。
+     * 非 Qwen 模型原样返回，保证 DeepSeek 等模型的既有行为零变化。
+     */
+    static buildProviderSafeMessages(
+        messages: any[],
+        providerInput?: Partial<ModelProviderConfig>,
+    ): any[] {
+        if (!this.isQwenProvider(providerInput)) return messages;
+
+        return messages.map((m, index) => {
+            if (m.role === 'system' && index === 0) {
+                return m;
+            }
+            if (m.role === 'system') {
+                return { ...m, role: 'user', content: `${this.MID_CONVERSATION_DIRECTIVE_PREFIX}${m.content ?? ''}` };
+            }
+            return m;
+        });
+    }
+
+    /**
      * 将内部统一档位映射为具体供应商支持的 reasoning_effort 取值：
      * - 'default' → null（不发送该字段，采用模型默认）
      * - DeepSeek: high | max 原样透传
