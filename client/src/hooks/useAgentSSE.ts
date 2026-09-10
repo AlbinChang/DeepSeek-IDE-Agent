@@ -445,6 +445,24 @@ export function useAgentSSE() {
 
         const pendingBufferRef: { current: PendingChunk[] } = { current: [] };
         let rafId: number | null = null;
+        // 目录树刷新去抖计时器：命令类工具（如下载图片的 run_powershell_command）
+        // 会在文件写入工具集之外创建/修改文件，需在工具结果流式到达期间
+        // 批量收敛为少量 ui:file-tree:refresh 事件，避免高频触发 listFiles
+        let treeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+        const scheduleTreeRefresh = (immediate = false) => {
+            if (treeRefreshTimer !== null) {
+                clearTimeout(treeRefreshTimer);
+                treeRefreshTimer = null;
+            }
+            if (immediate) {
+                window.dispatchEvent(new CustomEvent('ui:file-tree:refresh'));
+                return;
+            }
+            treeRefreshTimer = setTimeout(() => {
+                treeRefreshTimer = null;
+                window.dispatchEvent(new CustomEvent('ui:file-tree:refresh'));
+            }, 600);
+        };
         // 标记是否需要在本次 flush 前取消已有 rAF（用于 terminal 事件立即刷新）
         let needsImmediateFlush = false;
 
@@ -711,13 +729,28 @@ export function useAgentSSE() {
                     'apply_patch',
                     'replace_in_file',
                 ]);
-                if (chunk.method === 'tool/result' && fileWriteTools.has(chunk.params?.toolName)) {
-                    const filePath = chunk.params?.filePath;
-                    if (filePath && typeof filePath === 'string') {
-                        window.dispatchEvent(new CustomEvent('ui:file:changed', {
-                            detail: { path: filePath, absolutePath: chunk.params?.absolutePath },
-                        }));
-                        window.dispatchEvent(new CustomEvent('ui:file-tree:refresh'));
+                // 命令/终端类工具可能间接创建、下载、删除文件
+                // （如 run_powershell_command 的 Invoke-WebRequest 下载图片到 docs/images/），
+                // 其结果不携带 filePath，但仍必须触发目录树刷新
+                const shellTools = new Set([
+                    'run_powershell_command',
+                    'run_cmd_command',
+                    'execute_command',
+                    'terminal_execute',
+                    'run_terminal_command',
+                ]);
+                if (chunk.method === 'tool/result') {
+                    const toolName = chunk.params?.toolName;
+                    if (fileWriteTools.has(toolName)) {
+                        const filePath = chunk.params?.filePath;
+                        if (filePath && typeof filePath === 'string') {
+                            window.dispatchEvent(new CustomEvent('ui:file:changed', {
+                                detail: { path: filePath, absolutePath: chunk.params?.absolutePath },
+                            }));
+                        }
+                        scheduleTreeRefresh();
+                    } else if (shellTools.has(toolName)) {
+                        scheduleTreeRefresh();
                     }
                 }
             } else if (chunk.type === 'init') {
@@ -731,6 +764,9 @@ export function useAgentSSE() {
                     pendingBufferRef.current.push({ kind: 'doneText', content: doneText });
                 }
                 pendingBufferRef.current.push({ kind: 'done' });
+                // 回合结束：无论工具类型，兜底刷新目录树，
+                // 覆盖命令类工具（下载图片等）造成的文件系统变化
+                scheduleTreeRefresh(true);
             }
 
             // ── 刷新策略 ──
@@ -797,6 +833,8 @@ export function useAgentSSE() {
                 rafId = null;
             }
             flushAllPending();
+            // 异常终止同样兜底刷新目录树
+            scheduleTreeRefresh(true);
 
             if (e.name === 'AbortError') {
                 console.log("SSE Request Aborted");
@@ -818,6 +856,10 @@ export function useAgentSSE() {
         } finally { 
             setIsLoading(false); 
             abortControllerRef.current = null;
+            if (treeRefreshTimer !== null) {
+                clearTimeout(treeRefreshTimer);
+                treeRefreshTimer = null;
+            }
         }
     }, [workspaceRoot, locale, provider, model, settings]);
 

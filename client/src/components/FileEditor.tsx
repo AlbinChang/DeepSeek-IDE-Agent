@@ -14,7 +14,7 @@ import { useAgentContext } from '@/providers/AgentContext';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { electronBridge } from '@/services/electron-bridge';
 import { isSameFilePath } from '@/utils/path';
-import { resolveWorkspaceRelativePath } from '@/utils/markdownLinks';
+import { resolveMarkdownLinkCandidates } from '@/utils/markdownLinks';
 
 // PDF 预览组件按需懒加载（避免为所有用户增加 ~200KB bundle）
 const PdfPreview = lazy(() => import('@/components/PdfPreview'));
@@ -1098,11 +1098,22 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
             provideLinks: (model) => {
                 const content = model.getValue();
                 // 从模型 URI 推导当前 MD 文件的工作区相对路径（用于解析 ./ 与 ../）
-                const sourceFilePath = model.uri?.scheme === 'file'
+                const rawUriPath = model.uri?.scheme === 'file'
                     ? String(model.uri.path || '').replace(/^\/+/, '')
                     : '';
+                // 归一化：若模型 URI 携带工作区绝对前缀（如 D:/web-ide-agent/docs/x.md），
+                // 裁剪为工作区相对路径，保证候选路径均为工作区相对形态
+                const rootNorm = String(workspaceRoot || '')
+                    .replace(/\\/g, '/')
+                    .replace(/\/+$/, '')
+                    .toLowerCase();
+                const uriNorm = rawUriPath.replace(/\\/g, '/');
+                const sourceFilePath =
+                    rootNorm && uriNorm.toLowerCase().startsWith(rootNorm + '/')
+                        ? uriNorm.slice(rootNorm.length + 1)
+                        : uriNorm;
                 const links: monaco.languages.ILink[] = [];
-                // 匹配 [text](url)（URL 不含空格/换行；忽略 title 语法）
+                // 匹配 [text](url) 与 ![alt](url)（URL 不含空格/换行；忽略 title 语法）
                 const linkRegex = /\[([^\]]*)\]\(([^)\s]+)\)/g;
                 let m: RegExpExecArray | null;
                 while ((m = linkRegex.exec(content)) !== null) {
@@ -1112,17 +1123,50 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                     // URL 在内容中的偏移：'[' + text + '](' 之后
                     const urlStart = m.index + (m[1]?.length || 0) + 3;
                     const urlEnd = urlStart + rawUrl.length;
-                    const resolved = resolveWorkspaceRelativePath(rawUrl, sourceFilePath);
-                    if (!resolved) continue;
+                    // 候选路径：标准 Markdown（MD 目录相对）优先，工作区根相对兜底
+                    const candidates = resolveMarkdownLinkCandidates(rawUrl, sourceFilePath);
+                    if (candidates.length === 0) continue;
                     const start = model.getPositionAt(urlStart);
                     const end = model.getPositionAt(urlEnd);
-                    links.push({
+                    // ILink 没有 resolve 字段，Monaco 只在 link.url 为空时调用 provider.resolveLink。
+                    // 通过私有扩展字段把候选路径挂在 link 对象上，点击时做存在性校验（无共享 Map 竞态）
+                    const link = {
                         range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column),
-                        url: monaco.Uri.parse(`file:///${resolved.replace(/\\/g, '/')}`),
-                        tooltip: `打开文件: ${resolved}`,
-                    });
+                        // 不提供 url：由 resolveLink 在校验后生成 file:// URI
+                        tooltip: `打开文件: ${candidates[0]}`,
+                        _mdLinkCandidates: candidates,
+                    } as monaco.languages.ILink & { _mdLinkCandidates?: string[] };
+                    links.push(link);
                 }
                 return { links };
+            },
+            resolveLink: async (link) => {
+                const candidates = (link as monaco.languages.ILink & { _mdLinkCandidates?: string[] })
+                    ._mdLinkCandidates || [];
+                const fallbackPath = String(link.tooltip || '').replace(/^打开文件:\s*/, '');
+                const toFileUri = (p: string) =>
+                    monaco.Uri.parse(`file:///${p.replace(/\\/g, '/')}`);
+                if (candidates.length === 0) {
+                    return { ...link, url: toFileUri(fallbackPath) };
+                }
+                // 点击时按候选顺序做存在性校验：优先标准 Markdown 语义，
+                // 不存在时回退工作区根相对路径，修复「图片相对链接无法跳转」问题
+                let chosen = candidates[0];
+                try {
+                    for (const candidate of candidates) {
+                        const res = await electronBridge.fileExists({
+                            filePath: candidate,
+                            root: workspaceRoot || undefined,
+                        });
+                        if (res?.success && res.exists) {
+                            chosen = candidate;
+                            break;
+                        }
+                    }
+                } catch (err) {
+                    console.warn('[Editor] markdown link existence check failed:', err);
+                }
+                return { ...link, url: toFileUri(chosen) };
             },
         });
         console.log('[Editor] markdown link provider registered (Ctrl+hover → hand cursor, Ctrl+click → open file)');

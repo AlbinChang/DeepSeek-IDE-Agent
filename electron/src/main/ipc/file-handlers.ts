@@ -579,6 +579,19 @@ export function registerFileIpc(ipcMain: IpcMain) {
         }
     });
 
+    // ── 检查文件/目录是否存在（轻量校验，供 Markdown 链接候选路径解析等场景使用） ──
+    ipcMain.handle('file:exists', async (_event, params: {
+        filePath: string;
+        root?: string;
+    }) => {
+        try {
+            const resolvedPath = resolveSafePath(params.filePath, params.root);
+            return { success: true, exists: fs.existsSync(resolvedPath), resolvedPath };
+        } catch (err: any) {
+            return { success: false, error: err?.message || String(err) };
+        }
+    });
+
     // ── 读取二进制文件（base64 编码返回，用于 PDF/图片等非文本预览） ──
     ipcMain.handle('file:readBinary', async (_event, params: {
         filePath: string;

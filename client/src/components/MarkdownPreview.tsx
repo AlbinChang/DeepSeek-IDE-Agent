@@ -5,7 +5,7 @@ import rehypeRaw from 'rehype-raw';
 import { Search, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
 import { electronBridge } from '@/services/electron-bridge';
-import { resolveWorkspaceRelativePath } from '@/utils/markdownLinks';
+import { resolveMarkdownLinkCandidates } from '@/utils/markdownLinks';
 
 const Mermaid = lazy(() => import('@/components/Mermaid').then((mod) => ({ default: mod.Mermaid })));
 
@@ -1036,11 +1036,11 @@ interface MarkdownLinkProps {
   workspaceRoot?: string | null;
 }
 
-const MarkdownLink: React.FC<MarkdownLinkProps> = ({ href, children, filePath }) => {
+const MarkdownLink: React.FC<MarkdownLinkProps> = ({ href, children, filePath, workspaceRoot }) => {
   const raw = String(href || '').trim();
   const isExternal = /^(https?:|mailto:|tel:)/i.test(raw);
 
-  const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+  const handleClick = async (e: React.MouseEvent<HTMLAnchorElement>) => {
     if (!raw || raw === '#') return;
 
     // 锚点：在当前预览内滚动定位（不再新开窗口）
@@ -1057,7 +1057,25 @@ const MarkdownLink: React.FC<MarkdownLinkProps> = ({ href, children, filePath })
     // 工作区相对链接：解析路径 → 在当前窗口的编辑器中打开
     if (!isExternal) {
       e.preventDefault();
-      const resolved = resolveWorkspaceRelativePath(raw, filePath);
+      // 候选路径：标准 Markdown（MD 目录相对）优先，工作区根相对兜底；
+      // 按存在性校验选取第一个真实存在的文件
+      const candidates = resolveMarkdownLinkCandidates(raw, filePath);
+      if (candidates.length === 0) return;
+      let resolved = candidates[0];
+      try {
+        for (const candidate of candidates) {
+          const res = await electronBridge.fileExists({
+            filePath: candidate,
+            root: workspaceRoot || undefined,
+          });
+          if (res?.success && res.exists) {
+            resolved = candidate;
+            break;
+          }
+        }
+      } catch {
+        // 存在性检查失败：退回首选候选
+      }
       if (resolved) {
         console.log(`[MarkdownPreview] Opening workspace file from link: ${resolved}`);
         window.dispatchEvent(new CustomEvent('ui:file:select', { detail: resolved }));
@@ -1120,50 +1138,36 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, filePath, works
     setResolving(true);
 
     const resolveAndLoad = async () => {
-      try {
-        // 解析相对路径：基于当前 MD 文件所在目录
-        let absolutePath: string;
-        if (filePath) {
-          const mdDir = filePath.replace(/[/\\][^/\\]*$/, ''); // MD 文件所在目录
-          absolutePath = mdDir ? `${mdDir}/${rawSrc}`.replace(/\/+/g, '/') : rawSrc;
-        } else {
-          absolutePath = rawSrc;
-        }
-
-        // 规范化路径（处理 ../ 等）
-        const parts = absolutePath.split('/');
-        const resolved: string[] = [];
-        for (const part of parts) {
-          if (part === '..') {
-            resolved.pop();
-          } else if (part !== '.' && part !== '') {
-            resolved.push(part);
-          }
-        }
-        const normalizedPath = resolved.join('/');
-
-        if (!normalizedPath) {
-          if (!cancelled) setError(true);
-          return;
-        }
-
-        const result = await electronBridge.readFileBinary({
-          filePath: normalizedPath,
-          root: workspaceRoot,
-        });
-
-        if (cancelled) return;
-
-        if (result?.success && result.base64) {
-          const mime = result.mimeType || guessMimeFromExt(normalizedPath);
-          setResolvedSrc(`data:${mime};base64,${result.base64}`);
-          setResolving(false);
-        } else {
-          setError(true);
-        }
-      } catch {
+      // 候选路径：标准 Markdown（MD 目录相对）优先，工作区根相对兜底，
+      // 与编辑器 Ctrl+点击链接的解析逻辑保持一致
+      const candidates = resolveMarkdownLinkCandidates(rawSrc, filePath);
+      if (candidates.length === 0) {
         if (!cancelled) setError(true);
+        return;
       }
+
+      for (const candidate of candidates) {
+        try {
+          const result = await electronBridge.readFileBinary({
+            filePath: candidate,
+            root: workspaceRoot,
+          });
+
+          if (cancelled) return;
+
+          if (result?.success && result.base64) {
+            const mime = result.mimeType || guessMimeFromExt(candidate);
+            setResolvedSrc(`data:${mime};base64,${result.base64}`);
+            setResolving(false);
+            return;
+          }
+          // 该候选不存在/读取失败：继续尝试下一个候选
+        } catch {
+          // 该候选读取异常：继续尝试下一个候选
+        }
+      }
+
+      if (!cancelled) setError(true);
     };
 
     resolveAndLoad();

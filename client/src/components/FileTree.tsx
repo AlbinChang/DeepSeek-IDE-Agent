@@ -81,6 +81,11 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   const [, setRecentWorkspaces] = useState<RecentWorkspaceEntry[]>([]);
   const pollInFlightRef = useRef(false);
   const pollAbortRef = useRef<AbortController | null>(null);
+  /** 当前节点树的镜像引用（供 UI 事件回调读取最新展开状态，避免闭包过期） */
+  const nodesRef = useRef<FileNode[]>([]);
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
 
   // ── 新建文件/文件夹状态 ──
   const [newItem, setNewItem] = useState<{ type: 'file' | 'folder'; parentPath: string } | null>(null);
@@ -442,7 +447,27 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         }
     };
 
-    const onRefreshRequest = () => refreshPath('.');
+    const onRefreshRequest = () => {
+      refreshPath('.');
+      // 同步刷新当前已展开的目录：
+      // 根目录 mergeNodes 会保留已展开节点的旧 children，若不主动重取，
+      // Agent 新写入的文件（如 docs/images）在已展开目录中要等到轮询周期才可见
+      const openPaths: string[] = [];
+      const collectOpenPaths = (list: FileNode[]) => {
+        for (const node of list) {
+          if (openPaths.length >= MAX_AUTO_REFRESH_PATHS) return;
+          if (node.jarBase) continue;
+          if (node.isDirectory && node.isOpen && !shouldSkipAutoRefreshPath(node.path)) {
+            openPaths.push(node.path);
+          }
+          if (node.children) collectOpenPaths(node.children);
+        }
+      };
+      collectOpenPaths(nodesRef.current);
+      for (const p of openPaths) {
+        void refreshPath(p, true);
+      }
+    };
     window.addEventListener(GATEWAY_EVENT, handleWsMessage);
     window.addEventListener('ui:file-tree:refresh', onRefreshRequest);
 
@@ -671,7 +696,13 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
       return updateNode(currentNodes);
     });
 
-    if (isNowOpen && (!node.children || node.children.length === 0)) {
+    // 修复「Agent 创建文件/目录后目录树不更新」问题：
+    // 普通目录每次展开都强制重新拉取子项（此前仅在没有缓存子项时才拉取，
+    // 导致 docs/ 目录已缓存子项时，Agent 新建的 docs/images 无法出现在目录树中）；
+    // JAR/WAR/EAR 归档内部内容在运行期不变，保留「仅首次展开拉取」策略。
+    const needsChildrenFetch =
+      isNowOpen && ((node.jarBase || isArchive) ? (!node.children || node.children.length === 0) : true);
+    if (needsChildrenFetch) {
       try {
         if (!workspaceRoot) {
           return;

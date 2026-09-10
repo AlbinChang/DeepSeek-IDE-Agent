@@ -229,6 +229,7 @@ interface ElectronAPI {
     listFiles: (params: ListFilesParams) => Promise<ListFilesResult>;
     searchFiles: (params: SearchFilesParams) => Promise<SearchFilesResult>;
     getFileMd5: (params: { filePath: string }) => Promise<{ success: boolean; md5?: string; error?: string }>;
+    fileExists: (params: { filePath: string; root?: string }) => Promise<{ success: boolean; exists?: boolean; resolvedPath?: string; error?: string }>;
     deleteFile: (params: { filePath: string; root?: string }) => Promise<{ success: boolean; error?: string }>;
     renameFile: (params: { oldPath: string; newPath: string; root?: string }) => Promise<{ success: boolean; newPath?: string; error?: string }>;
 

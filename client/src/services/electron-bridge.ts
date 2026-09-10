@@ -170,6 +170,10 @@ export const electronBridge = {
     async listFiles(params: { dirPath: string; depth?: number; root?: string }) {
         return callIpc('listFiles', [params]);
     },
+    /** 轻量存在性检查（Markdown 链接候选路径解析等场景） */
+    async fileExists(params: { filePath: string; root?: string }): Promise<{ success: boolean; exists?: boolean; error?: string }> {
+        return callIpc('fileExists', [params]);
+    },
     async searchFiles(params: { pattern: string; root?: string; maxResults?: number }) {
         return callIpc('searchFiles', [params]);
     },

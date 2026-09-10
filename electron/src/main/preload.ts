@@ -30,6 +30,7 @@ export interface ElectronAPI {
     listFiles: (params: ListFilesParams) => Promise<ListFilesResult>;
     searchFiles: (params: SearchFilesParams) => Promise<SearchFilesResult>;
     getFileMd5: (params: { filePath: string }) => Promise<{ md5: string }>;
+    fileExists: (params: { filePath: string; root?: string }) => Promise<{ success: boolean; exists?: boolean; resolvedPath?: string; error?: string }>;
     deleteFile: (params: { filePath: string; root?: string }) => Promise<{ success: boolean; error?: string }>;
     renameFile: (params: { oldPath: string; newPath: string; root?: string }) => Promise<{ success: boolean; newPath?: string; error?: string }>;
     listJarContents: (params: { jarPath: string; innerPath?: string; root?: string }) => Promise<{ success: boolean; files?: Array<{ name: string; type: 'file' | 'directory'; path: string; isDirectory: boolean; isFile: boolean }>; totalCount?: number; error?: string }>;
@@ -212,6 +213,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     listFiles: (params: ListFilesParams) => ipcRenderer.invoke('file:list', params),
     searchFiles: (params: SearchFilesParams) => ipcRenderer.invoke('file:search', params),
     getFileMd5: (params: { filePath: string }) => ipcRenderer.invoke('file:md5', params),
+    fileExists: (params: { filePath: string; root?: string }) => ipcRenderer.invoke('file:exists', params),
     deleteFile: (params: { filePath: string; root?: string }) => ipcRenderer.invoke('file:delete', params),
     renameFile: (params: { oldPath: string; newPath: string; root?: string }) => ipcRenderer.invoke('file:rename', params),
     listJarContents: (params: { jarPath: string; innerPath?: string; root?: string }) => ipcRenderer.invoke('file:listJar', params),
