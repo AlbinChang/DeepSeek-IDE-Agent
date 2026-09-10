@@ -1194,21 +1194,31 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, filePath, works
   }
 
   return (
-    <span className={`my-4 block ${loaded ? '' : 'min-h-[60px]'}`}>
+    <span className="my-4 block">
       {!loaded && (
-        <div className="flex items-center gap-2 rounded-sm border border-white/5 bg-white/[0.02] px-4 py-3">
+        <div className="mb-2 flex items-center gap-2 rounded-sm border border-white/5 bg-white/[0.02] px-4 py-3">
           <div className="h-3 w-3 animate-pulse rounded-full bg-white/10" />
           <span className="text-[8pt] text-white/30">加载图片中...</span>
         </div>
       )}
+      {/*
+        图片渲染修复说明：
+        - 不能使用 loading="lazy" + 初始 display:none（hidden）的组合：
+          Chromium 对懒加载图片的加载决策依赖元素布局与视口接近度，
+          display:none 状态下懒加载图片不会发起网络请求，
+          而解除 hidden 又依赖 onLoad 事件 → 形成死锁，图片永远无法渲染。
+        - 改为始终渲染在布局流中，用 opacity 过渡展示，避免死锁。
+        - referrerPolicy="no-referrer"：Electron 页面源为 file:// 或 localhost，
+          默认 Referer 可能触发目标站点防盗链，禁用 Referer 提升兼容性。
+      */}
       <img
         src={finalSrc}
         alt={alt || ''}
         onLoad={() => setLoaded(true)}
         onError={() => setError(true)}
-        className={`max-w-full rounded-sm ${loaded ? 'block' : 'hidden'}`}
+        referrerPolicy="no-referrer"
+        className={`max-w-full rounded-sm transition-opacity duration-300 ${loaded ? 'opacity-100' : 'opacity-0'}`}
         style={{ maxHeight: '400px', objectFit: 'contain' }}
-        loading="lazy"
       />
     </span>
   );
