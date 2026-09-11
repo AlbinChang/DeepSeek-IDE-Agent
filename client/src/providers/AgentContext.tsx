@@ -27,7 +27,7 @@ export interface ModelProviderConfig {
     apiKey: string;
     baseURL?: string;
     enableThinking?: boolean;
-    defaultReasoningEffort?: 'default' | 'high' | 'max';
+    defaultReasoningEffort?: 'default' | 'low' | 'high' | 'max';
 }
 
 export interface UserSettings {
@@ -97,7 +97,10 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
             apiKey: (raw?.apiKey || '').trim(),
             baseURL: (raw?.baseURL || DEFAULT_PROVIDER.baseURL || '').trim() || DEFAULT_PROVIDER.baseURL,
             enableThinking: raw?.enableThinking !== false,
-            defaultReasoningEffort: raw?.defaultReasoningEffort === 'max' ? 'max' : raw?.defaultReasoningEffort === 'default' ? 'default' : 'high',
+            defaultReasoningEffort: raw?.defaultReasoningEffort === 'max' ? 'max'
+                : raw?.defaultReasoningEffort === 'low' ? 'low'
+                : raw?.defaultReasoningEffort === 'default' ? 'default'
+                : 'high',
         };
     };
 

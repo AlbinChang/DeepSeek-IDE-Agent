@@ -44,11 +44,11 @@ const normalizeProviderId = (raw: string, fallback: string): string => {
 };
 
 /**
- * 归一化思考强度档位：仅接受 default | high | max，非法值回落 high。
+ * 归一化思考强度档位：仅接受 default | low | high | max，非法值回落 high。
  * default 表示不发送 reasoning_effort 字段，采用模型默认思考强度。
  */
-const normalizeReasoningEffort = (raw: unknown): 'default' | 'high' | 'max' =>
-    raw === 'max' ? 'max' : raw === 'default' ? 'default' : 'high';
+const normalizeReasoningEffort = (raw: unknown): 'default' | 'low' | 'high' | 'max' =>
+    raw === 'max' ? 'max' : raw === 'low' ? 'low' : raw === 'default' ? 'default' : 'high';
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     const { settings, updateSettings, provider, locale, setLocale, setProvider, setModel, workspaceRoot } = useAgentContext();
@@ -553,6 +553,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                                                     className="w-full bg-[#020202] border border-white/10 rounded-sm p-3 text-[11px] text-white/90 outline-none focus:border-[#0088ff]/40 transition-all font-black appearance-none cursor-pointer pr-10 disabled:opacity-40 disabled:cursor-not-allowed"
                                                 >
                                                     <option value="default">DEFAULT (模型默认，不发送强度字段)</option>
+                                                    <option value="low">LOW (轻量推理，省 Token)</option>
                                                     <option value="high">HIGH (推荐)</option>
                                                     <option value="max">MAX (最强推理)</option>
                                                 </select>

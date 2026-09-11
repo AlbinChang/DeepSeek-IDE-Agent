@@ -14,9 +14,9 @@ export interface ModelProviderConfig {
     baseURL?: string;
     enableThinking?: boolean;
     /**
-     * 思考强度：default（不发送字段，采用模型默认）| high | max
+     * 思考强度：default（不发送字段，采用模型默认）| low | high | max
      */
-    defaultReasoningEffort?: 'default' | 'high' | 'max';
+    defaultReasoningEffort?: 'default' | 'low' | 'high' | 'max';
 }
 
 export interface UserSettings {
@@ -61,10 +61,10 @@ export class SettingsService {
     }
 
     /**
-     * 归一化思考强度档位：仅接受 default | high | max，非法值回落 high。
+     * 归一化思考强度档位：仅接受 default | low | high | max，非法值回落 high。
      */
-    private static normalizeReasoningEffort(raw: unknown): 'default' | 'high' | 'max' {
-        if (raw === 'default' || raw === 'max') return raw;
+    private static normalizeReasoningEffort(raw: unknown): 'default' | 'low' | 'high' | 'max' {
+        if (raw === 'default' || raw === 'low' || raw === 'max') return raw;
         return 'high';
     }
 

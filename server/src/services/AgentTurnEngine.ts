@@ -516,8 +516,9 @@ export class AgentTurnEngine {
             // 构建 assistant 消息
             // ---------------------------------------------------------------
             const assistantMsg: any = { role: "assistant", content: fullContent };
-            // 【原封不动】DeepSeek thinking mode 要求带 tool_calls 的 assistant 消息在后续请求中
-            // 完整回传 reasoning_content，否则 API 返回 400。
+            // 【原封不动】DeepSeek thinking mode（2026-09-10 口径）：请求携带 tools 参数时，
+            // 后续每一轮 assistant 消息都必须完整回传 reasoning_content，否则 API 返回 400
+            //（判定依据是「是否携带 tools」，而非「该轮是否实际发生工具调用」）。
             // 此处把本轮流式采集到的推理内容逐字写入，不做任何加工：
             //  - 模型有输出 → 原样携带；
             //  - 模型未输出（续接轮）→ 保留空字符串，与 API 返回的消息形态一致，不伪造、不删减。

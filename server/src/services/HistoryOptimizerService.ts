@@ -12,7 +12,8 @@ import { extractReasoningText } from "../utils/ReasoningUtils.js";
  *
  * 实际职责：历史消息裁剪、超长上下文压缩。
  * 【原封不动原则】reasoning_content 不做任何加工（不增、不删、不改）：
- * DeepSeek thinking mode 要求带 tool_calls 的轮次必须完整回传推理内容。
+ * DeepSeek thinking mode（2026-09-10 口径）要求携带 tools 参数的请求，历史中
+ * 每一轮 assistant 消息都必须完整回传推理内容（与是否实际工具调用无关）。
  * 当前架构为主 Agent + 评估 Agent 双核引擎循环，此服务为二者的共享历史管理层，
  * 并非独立的智能子代理。
  */
@@ -82,9 +83,9 @@ export class HistoryOptimizerService {
     /**
      * 历史消息合规化处理。
      * 【原封不动原则】reasoning_content 不做任何加工（不清空、不篡改、不新增）：
-     * DeepSeek thinking mode 要求带 tool_calls 的轮次必须完整回传推理内容，
-     * 未带 tool_calls 的轮次回传也会被 API 忽略，因此统一保持原样。
-     * 本方法仅负责内容字段的合规化（补齐空 content），不触碰 reasoning_content。
+     * DeepSeek thinking mode（2026-09-10 口径）要求携带 tools 参数的请求，历史中
+     * 每一轮 assistant 消息都必须回传推理内容（与是否实际工具调用无关），
+     * 因此统一保持原样。本方法仅负责内容字段的合规化（补齐空 content），不触碰 reasoning_content。
      */
     public cleanHistory(messages: any[]): any[] {
         return messages.map((msg, index) => {

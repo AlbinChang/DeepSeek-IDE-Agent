@@ -196,7 +196,7 @@ export function registerSettingsIpc(ipcMain: IpcMain) {
             apiKey: string;
             baseURL: string;
             enableThinking?: boolean;
-            defaultReasoningEffort?: string;
+            defaultReasoningEffort?: 'default' | 'low' | 'high' | 'max';
         };
     }) => {
         try {

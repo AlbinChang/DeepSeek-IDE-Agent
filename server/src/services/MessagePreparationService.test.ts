@@ -183,6 +183,35 @@ describe("MessagePreparationService.buildMessages — 工具调用链完整性",
         const assistant = result.find((m) => m.role === "assistant");
         expect(assistant?.reasoning_content).toBe("最终回答前的推理");
     });
+
+    it("仅含 reasoning_content 的 assistant 轮次不被丢弃（携带 tools 请求须回传）", () => {
+        // DeepSeek thinking mode（2026-09-10 口径）：携带 tools 的请求要求所有轮次回传
+        // reasoning_content；中间轮可能 content 为空、只输出思维链，必须原封保留。
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            { role: "assistant", content: "", reasoning_content: "中间轮只输出思维链" },
+        ];
+
+        const result = build(messages);
+
+        const assistants = result.filter((m) => m.role === "assistant");
+        expect(assistants).toHaveLength(1);
+        expect(assistants[0].reasoning_content).toBe("中间轮只输出思维链");
+        expect(assistants[0].content).toBe("");
+    });
+
+    it("content 与 reasoning_content 均为空的 assistant 空轮仍被丢弃", () => {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            { role: "assistant", content: "" },
+        ];
+
+        const result = build(messages);
+
+        expect(result.filter((m) => m.role === "assistant")).toHaveLength(0);
+    });
 });
 
 describe("MessagePreparationService.buildMessages — Qwen 中途 system 兼容", () => {

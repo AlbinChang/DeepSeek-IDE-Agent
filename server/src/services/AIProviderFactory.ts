@@ -2,12 +2,16 @@ import OpenAI from 'openai';
 import type { ModelProviderConfig } from '@/services/SettingsService.js';
 
 /**
- * 内部统一的思考强度档位：
- * - 'default': 不发送 reasoning_effort / thinking 字段，完全采用模型默认思考强度
+ * 内部统一的思考强度档位（对齐 DeepSeek 官方 thinking mode 口径，2026-09-10）：
+ * - 'default': 不发送 reasoning_effort / thinking 字段，完全采用模型默认思考强度（官方默认 high）
+ * - 'low': 轻量档（DeepSeek 原样透传 low；Qwen 原样透传 low）
  * - 'high': 平衡档（DeepSeek 原样透传；Qwen 映射为 medium）
  * - 'max': 最强档（DeepSeek 原样透传；Qwen 映射为 xhigh）
+ *
+ * DeepSeek 官方别名归一化（请求传入 effort → 实际映射 effort）：
+ *   minimal → low, low → low, medium → high, high → high, xhigh → high, max → max, ultra → max
  */
-export type ReasoningEffortLevel = 'default' | 'high' | 'max';
+export type ReasoningEffortLevel = 'default' | 'low' | 'high' | 'max';
 
 /**
  * 对应重构需求：原生 DeepSeek 客户端工厂
@@ -114,11 +118,38 @@ export class AIProviderFactory {
     }
 
     /**
-     * 归一化思考强度档位：仅接受 default | high | max，非法值回落 high。
+     * DeepSeek 官方 effort 别名 → 内部档位归一化映射（thinking mode 官方口径 2026-09-10）。
+     */
+    static readonly OFFICIAL_EFFORT_ALIASES: Readonly<Record<string, ReasoningEffortLevel>> = Object.freeze({
+        minimal: 'low',
+        low: 'low',
+        medium: 'high',
+        high: 'high',
+        xhigh: 'high',
+        max: 'max',
+        ultra: 'max',
+    });
+
+    /**
+     * 归一化思考强度档位：仅接受 default | low | high | max，非法值回落 high。
      */
     static normalizeReasoningEffort(raw: unknown): ReasoningEffortLevel {
-        if (raw === 'default' || raw === 'high' || raw === 'max') return raw;
+        if (raw === 'default' || raw === 'low' || raw === 'high' || raw === 'max') return raw;
         return 'high';
+    }
+
+    /**
+     * 将请求层（wire）传入的思考强度字符串归一化为内部档位，兼容 DeepSeek 官方别名：
+     * minimal→low、low→low、medium→high、high→high、xhigh→high、max→max、ultra→max。
+     * 'default' 表示客户端显式选择不发送强度字段；空值/非字符串/无法识别返回 null，
+     * 由调用方决定是否回落到 provider 默认档。
+     */
+    static parseReasoningEffortAlias(raw: unknown): ReasoningEffortLevel | null {
+        if (typeof raw !== 'string') return null;
+        const s = raw.trim().toLowerCase();
+        if (!s) return null;
+        if (s === 'default') return 'default';
+        return this.OFFICIAL_EFFORT_ALIASES[s] ?? null;
     }
 
     /**
@@ -130,7 +161,7 @@ export class AIProviderFactory {
         providerInput?: Partial<ModelProviderConfig>,
         reasoningEffort?: ReasoningEffortLevel | null,
     ): ReasoningEffortLevel {
-        if (reasoningEffort === 'default' || reasoningEffort === 'high' || reasoningEffort === 'max') {
+        if (reasoningEffort === 'default' || reasoningEffort === 'low' || reasoningEffort === 'high' || reasoningEffort === 'max') {
             return reasoningEffort;
         }
         const provider = this.normalizeProvider(providerInput);
@@ -197,8 +228,9 @@ export class AIProviderFactory {
     /**
      * 将内部统一档位映射为具体供应商支持的 reasoning_effort 取值：
      * - 'default' → null（不发送该字段，采用模型默认）
-     * - DeepSeek: high | max 原样透传
-     * - Qwen: max → xhigh（最强档）；high → medium（Qwen 无 high 档位，仅支持 xhigh/medium/low）
+     * - DeepSeek: low | high | max 原样透传（官方口径）
+     * - Qwen: max → xhigh（最强档）；high → medium；low → low
+     *   （Qwen 无 high 档位，仅支持 xhigh/medium/low）
      */
     static mapReasoningEffort(
         providerInput?: Partial<ModelProviderConfig>,
@@ -209,7 +241,7 @@ export class AIProviderFactory {
 
         if (level === 'default') return null;
         if (this.isQwenProvider(provider)) {
-            return level === 'max' ? 'xhigh' : 'medium';
+            return level === 'max' ? 'xhigh' : level === 'low' ? 'low' : 'medium';
         }
         return level;
     }

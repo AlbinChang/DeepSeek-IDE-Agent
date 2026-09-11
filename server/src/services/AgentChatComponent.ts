@@ -50,7 +50,7 @@ export class AgentChatComponent {
         locale?: string, 
         abortSignal?: AbortSignal,
         onChunk?: (chunk: any) => void,
-        reasoningEffort?: 'default' | 'high' | 'max',
+        reasoningEffort?: 'default' | 'low' | 'high' | 'max',
         providerConfig?: ModelProviderConfig,
         workspaceRoot?: string,
         requestId?: string,
@@ -102,7 +102,7 @@ export class AgentChatComponent {
         agentService.logRegisteredTools();
 
         // 2026.04: 思考强度 (reasoning_effort)
-        // 内部统一档位：default（不发送字段，采用模型默认）| high | max。
+        // 内部统一档位：default（不发送字段，采用模型默认）| low | high | max。
         // Qwen 系模型在 buildThinkingOptions 内进一步映射为 xhigh/medium/low。
         const effectiveReasoningEffort = AIProviderFactory.resolveReasoningEffort(resolvedProvider, reasoningEffort);
         const mappedReasoningEffort = AIProviderFactory.mapReasoningEffort(resolvedProvider, effectiveReasoningEffort);

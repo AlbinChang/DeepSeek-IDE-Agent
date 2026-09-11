@@ -60,18 +60,12 @@ export async function setupChatSSE(fastify: FastifyInstance, agentService: Agent
             });
         }
 
-        // 2026.04: 思考强度归一化 —— 内部统一 default | high | max
+        // 2026.04: 思考强度归一化 —— 内部统一 default | low | high | max
         // default: 不发送 reasoning_effort，采用模型默认；undefined: 未提供，回落到 provider 配置默认
-        // 兼容 DeepSeek 官方 low/medium → high；xhigh → max
-        const normalizeEffort = (v: any): 'default' | 'high' | 'max' | undefined => {
-            if (typeof v !== 'string' || !v.trim()) return undefined;
-            const s = v.trim().toLowerCase();
-            if (s === 'default') return 'default';
-            if (s === 'max' || s === 'xhigh') return 'max';
-            if (s === 'high' || s === 'medium' || s === 'low') return 'high';
-            return undefined;
-        };
-        const effectiveReasoningEffort = normalizeEffort(reasoningEffort);
+        // DeepSeek 官方别名口径（2026-09-10）由 AIProviderFactory.parseReasoningEffortAlias 统一归一化：
+        // minimal→low、low→low、medium→high、high→high、xhigh→high、max→max、ultra→max
+        const parsedReasoningEffort = AIProviderFactory.parseReasoningEffortAlias(reasoningEffort);
+        const effectiveReasoningEffort = parsedReasoningEffort === null ? undefined : parsedReasoningEffort;
 
         // 【缓存策略】后端生成 request_id 作为系统提示词缓存的 key
         // request_id ≠ traceId：traceId 由前端生成用于全链路追踪，requestId 由后端生成用于对话级缓存

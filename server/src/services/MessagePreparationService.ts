@@ -131,14 +131,17 @@ export class MessagePreparationService {
                 continue;
             }
 
-            if (!m.role || (!m.content && !m.tool_calls && !m.tool_call_id)) continue;
+            // 携带 tools 的请求要求所有 assistant 轮次完整回传 reasoning_content（DeepSeek 官方口径），
+            // 纯推理轮（content 为空、仅含 reasoning_content）也必须保留，保证「原封不动」。
+            if (!m.role || (!m.content && !m.tool_calls && !m.tool_call_id && !m.reasoning_content)) continue;
 
             const clean: any = { role: m.role, content: m.content || "" };
             if (m.tool_calls) clean.tool_calls = m.tool_calls;
             if (m.tool_call_id) clean.tool_call_id = m.tool_call_id;
 
-            // 【原封不动】DeepSeek thinking mode 协议：assistant 消息的 reasoning_content
-            // 必须逐字透传给后续请求（带 tool_calls 的轮次缺失/为空会触发 API 400）。
+            // 【原封不动】DeepSeek thinking mode 协议（2026-09-10 口径）：本项目所有请求都携带 tools
+            // 参数，因此历史中每一轮 assistant 消息的 reasoning_content 都必须逐字透传，
+            // 缺失会触发 API 400（判定依据是「是否携带 tools」，而非「该轮是否实际工具调用」）。
             // 源消息有该字段就原样复制（含空字符串），没有就不新增 —— 不增、不删、不改。
             if (m.role === "assistant" && Object.prototype.hasOwnProperty.call(m, "reasoning_content")) {
                 clean.reasoning_content = m.reasoning_content;
