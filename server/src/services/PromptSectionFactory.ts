@@ -24,7 +24,7 @@ import {
     TempFilePolicySection,
     BrowserPolicySection,
     McpToolsSection,
-    RecentInstructionsSection,
+    UserInstructsPolicySection,
     NeverMistakeSection,
     UserPreferenceSection,
     IntentAlignmentSection,
@@ -51,6 +51,8 @@ export function createStandardBuilder(agentConfig: any): SystemPromptBuilder {
     builder.register(new RoleSection(agentConfig));
     builder.register(new CapabilitiesSection(agentConfig));
     builder.register(new WorkspaceProfileSection());
+    // 历史指令记忆策略：静态策略文本（按需检索，不无条件注入历史指令）
+    builder.register(new UserInstructsPolicySection());
 
     // Low-Churn 区 — 低频变化（随 workspace 切换变化）
     builder.register(new SkillsIndexSection());
@@ -64,7 +66,6 @@ export function createStandardBuilder(agentConfig: any): SystemPromptBuilder {
     builder.register(new TempFilePolicySection());
     builder.register(new BrowserPolicySection());
     builder.register(new McpToolsSection());
-    builder.register(new RecentInstructionsSection());
     builder.register(new NeverMistakeSection());
     builder.register(new UserPreferenceSection());
     builder.register(new IntentAlignmentSection());

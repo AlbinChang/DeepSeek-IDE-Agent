@@ -13,7 +13,6 @@ import { BrowserMcpAdapter } from '@/services/BrowserMcpAdapter.js';
 import { McpService } from '@/services/McpService.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 import { WORKSPACE_SKILL_DIRECTORIES } from '@/utils/WorkspaceSkillPaths.js';
-import { config as globalConfig } from '@/config/index.js';
 import { CONFIG_ROOT } from '@/utils/PathUtils.js';
 import * as path from 'node:path';
 import { readFile } from 'node:fs/promises';
@@ -422,31 +421,26 @@ export class McpToolsSection extends BasePromptSection {
 }
 
 /**
- * 近期历史指令记忆
- * priority: dynamic
+ * 历史用户指令记忆策略（按需检索，禁止无条件注入）
+ * priority: static
+ *
+ * 设计原则：历史指令不再自动注入系统提示词（避免每轮消耗 token、污染当前意图上下文）。
+ * 仅当本轮用户指令不明确、必须结合历史指令才能正确理解意图时，
+ * Agent 才被允许调用 read_file 读取 .memory/user_instructs.json。
  */
-export class RecentInstructionsSection extends BasePromptSection {
-    readonly id = 'recent-instructions';
-    readonly priority: PromptPriority = 'dynamic';
+export class UserInstructsPolicySection extends BasePromptSection {
+    readonly id = 'user-instructs-policy';
+    readonly priority: PromptPriority = 'static';
 
-    async build(ctx: PromptBuildContext): Promise<string> {
-        try {
-            const { workspaceRoot } = ctx;
-            const records = await MemoryService.getRecentInstructions(
-                workspaceRoot,
-                globalConfig.memory.recentInstructionsLimit,
-                globalConfig.memory.recentInstructionsSkip,
-            );
-            if (!records || records.length === 0) return '';
-
-            return [
-                '### 历史用户指令记录 (Recent Instructions Memory)',
-                '以下为此工作区最近的指令（时间倒序）：',
-                ...records.map((r, i) => `${i + 1}. [${r.date}] ${r.instruction}`),
-            ].join('\n');
-        } catch {
-            return '';
-        }
+    async build(_ctx: PromptBuildContext): Promise<string> {
+        return [
+            '### 历史用户指令记忆策略 (USER INSTRUCTS MEMORY — 按需检索)',
+            '- 历史指令按时间倒序归档于工作区 `.memory/user_instructs.json`（最多保留最近 20 条，每轮用户指令自动记录）。',
+            '- **默认禁止检索**：当前用户指令语义明确、意图清晰时，直接执行任务，严禁读取该文件。',
+            '- **允许检索的唯一情形**：当前用户指令不明确（如指代不明「它/那个/上次的」、省略了上下文、缩写无法理解、仅靠本轮无法确定操作对象），且必须结合历史用户指令才能正确理解用户真实意图时，才可调用 `read_file` 读取 `.memory/user_instructs.json` 补充上下文。',
+            '- 检索后仅把与当前意图相关的历史指令作为理解依据：严禁照搬历史任务重新执行，严禁把历史指令当成用户的新要求。',
+            '- 若检索后仍无法确定意图，直接向用户确认，禁止猜测后执行。',
+        ].join('\n');
     }
 }
 

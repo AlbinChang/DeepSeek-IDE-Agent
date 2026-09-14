@@ -43,11 +43,16 @@ export interface PreferenceUpsertResult {
 
 /**
  * 长期指令记忆服务
- * 负责记录和在系统提示词中注入用户的长期指令历史
+ * 负责记录用户的长期指令历史（.memory/user_instructs.json，硬上限 20 条）。
+ * 注意：不再无条件注入系统提示词；仅当本轮用户指令不明确、必须结合历史指令
+ * 才能正确理解意图时，由 Agent 按提示词策略（UserInstructsPolicySection）
+ * 通过 read_file 工具按需读取该文件。
  */
 export class MemoryService {
     private static readonly NEVER_MISTAKE_MAX = 20;
     private static readonly USER_PREFERENCE_MAX = 200;
+    /** user_instructs.json 硬上限：最多保留最近 20 条用户指令 */
+    private static readonly USER_INSTRUCTS_MAX = 20;
     // 置信度衰减半衰期：30天（对应毫秒）
     private static readonly PREFERENCE_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -100,13 +105,15 @@ export class MemoryService {
     }
 
     /**
-     * 获取全部记录
+     * 获取全部记录（读取时同样执行 20 条硬上限裁剪，兼容历史存量文件）
      */
     static async getInstructions(workspaceRoot: string): Promise<UserInstructionRecord[]> {
         const filePath = this.getMemoryFile(workspaceRoot);
         try {
             const content = await fs.readFile(filePath, 'utf8');
-            return JSON.parse(content);
+            const parsed = JSON.parse(content);
+            if (!Array.isArray(parsed)) return [];
+            return parsed.slice(0, this.USER_INSTRUCTS_MAX);
         } catch {
             return [];
         }
@@ -129,8 +136,9 @@ export class MemoryService {
         // 插入到数组开头（时间倒序排列）
         records.unshift(newRecord);
         
-        // 控制文件体积，最多保留最近 N 条（由 .env 配置）
-        const maxStored = globalConfig.memory.maxStoredInstructions;
+        // 硬上限：user_instructs.json 最多保留最近 20 条用户指令；
+        // .env 的 AGENT_MAX_STORED_INSTRUCTIONS 只能调低，不能超过 20。
+        const maxStored = Math.min(globalConfig.memory.maxStoredInstructions, this.USER_INSTRUCTS_MAX);
         if (records.length > maxStored) {
             records.length = maxStored;
         }
@@ -138,19 +146,6 @@ export class MemoryService {
         await fs.writeFile(filePath, JSON.stringify(records, null, 2), 'utf8');
     }
 
-    /**
-     * 按照偏移量获取最近几次的用户指令
-     * @param limit 获取条数
-     * @param skip 偏移跃过最新条数（最新1条已在user消息，所以通常 skip=1）
-     */
-    static async getRecentInstructions(
-        workspaceRoot: string,
-        limit: number = globalConfig.memory.recentInstructionsLimit,
-        skip: number = globalConfig.memory.recentInstructionsSkip
-    ): Promise<UserInstructionRecord[]> {
-        const records = await this.getInstructions(workspaceRoot);
-        return records.slice(skip, skip + limit);
-    }
 
     /**
      * 获取防重复犯错记忆规则

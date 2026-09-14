@@ -109,9 +109,8 @@ export const config = {
 
     // 用户指令记忆配置
     memory: {
-        recentInstructionsLimit: parsePositiveInt(process.env.AGENT_RECENT_INSTRUCTIONS_LIMIT, 3, 0),
-        recentInstructionsSkip: parsePositiveInt(process.env.AGENT_RECENT_INSTRUCTIONS_SKIP, 1, 0),
-        maxStoredInstructions: parsePositiveInt(process.env.AGENT_MAX_STORED_INSTRUCTIONS, 100, 1),
+        // user_instructs.json 最多保留的指令条数（默认 20；MemoryService 另有 20 条硬上限，只能调低）
+        maxStoredInstructions: parsePositiveInt(process.env.AGENT_MAX_STORED_INSTRUCTIONS, 20, 1),
     },
 
     // Agent 运行参数
