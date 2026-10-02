@@ -468,6 +468,9 @@ export class AgentTurnEngine {
 
                     apiSuccess = true;
                     usage = accumulateTokenUsage(usage, localUsage);
+                    if (localUsage) {
+                        emit({ type: "usage", usage: localUsage });
+                    }
                     if (fullContent && fullContent.trim()) {
                         lastNonEmptyAssistantContent = fullContent.trim();
                     }

@@ -417,6 +417,34 @@ export function useAgentSSE() {
         // 双重 setMessages + setData 调用，大幅减少重渲染次数。
         // ═══════════════════════════════════════════════════════════════
         const currentAssistantMsgId = createClientId();
+        const usageTimestamp = Date.now();
+        let accumulatedUsage: TokenUsage | null = null;
+        let tokenUsagePersisted = false;
+        let tokenUsageWriteQueue = Promise.resolve();
+        const persistTokenUsage = (usage: TokenUsage | null) => {
+            if (!usage || !Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) return;
+            tokenUsagePersisted = true;
+            const record = {
+                id: currentAssistantMsgId,
+                workspaceRoot,
+                timestamp: usageTimestamp,
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                totalTokens: usage.totalTokens,
+            };
+            tokenUsageWriteQueue = tokenUsageWriteQueue
+                .then(() => recordTokenUsage(record))
+                .catch(console.error);
+        };
+        const accumulateTokenUsage = (usage: TokenUsage) => {
+            if (![usage.inputTokens, usage.outputTokens, usage.totalTokens].every(Number.isFinite)) return;
+            accumulatedUsage = {
+                inputTokens: (accumulatedUsage?.inputTokens || 0) + usage.inputTokens,
+                outputTokens: (accumulatedUsage?.outputTokens || 0) + usage.outputTokens,
+                totalTokens: (accumulatedUsage?.totalTokens || 0) + usage.totalTokens,
+            };
+            persistTokenUsage(accumulatedUsage);
+        };
 
         // 统一的 pending 缓冲区：累积 text/reasoning delta、annotation、stage、progress、todo
         type PendingChunk =
@@ -429,6 +457,7 @@ export function useAgentSSE() {
             | { kind: 'init'; traceId: string }
             | { kind: 'error'; content: string }
             | { kind: 'doneText'; content: string }
+            | { kind: 'usage'; usage: TokenUsage }
             | { kind: 'done'; usage: TokenUsage | null }
             | { kind: 'diagnostics'; entries: import('@/providers/AgentContext').ProblemEntry[] };
 
@@ -495,12 +524,17 @@ export function useAgentSSE() {
                     case 'init': initTraceId = chunk.traceId; break;
                     case 'error': errorContent = chunk.content; break;
                     case 'doneText': doneTextContent = chunk.content; break;
+                    case 'usage': accumulateTokenUsage(chunk.usage); break;
                     case 'done':
                         isDone = true;
                         doneUsage = chunk.usage;
                         break;
                     case 'diagnostics': diagnosticsEntries.push(...chunk.entries); break;
                 }
+            }
+
+            if (isDone && !tokenUsagePersisted) {
+                persistTokenUsage(accumulatedUsage?.totalTokens ? accumulatedUsage : doneUsage);
             }
 
             // ── 提交 messages（严格按事件到达顺序合并 text/reasoning/annotation/init/error/done） ──
@@ -618,16 +652,6 @@ export function useAgentSSE() {
                         last.isFinal = true;
                         db.chatHistory.put({ ...sanitizeMessageForClient(userMsg), workspaceRoot }).catch(console.error);
                         db.chatHistory.put({ ...sanitizeMessageForClient(last), workspaceRoot }).catch(console.error);
-                        if (doneUsage) {
-                            recordTokenUsage({
-                                id: last.id,
-                                workspaceRoot,
-                                timestamp: last.timestamp || Date.now(),
-                                inputTokens: doneUsage.inputTokens,
-                                outputTokens: doneUsage.outputTokens,
-                                totalTokens: doneUsage.totalTokens,
-                            }).catch(console.error);
-                        }
                     }
 
                     return trimMessagesForMemory(next);
@@ -766,6 +790,11 @@ export function useAgentSSE() {
                     } else if (shellTools.has(toolName)) {
                         scheduleTreeRefresh();
                     }
+                }
+            } else if (chunk.type === 'usage') {
+                const usage = chunk.usage as TokenUsage | null;
+                if (usage && typeof usage === 'object') {
+                    pendingBufferRef.current.push({ kind: 'usage', usage });
                 }
             } else if (chunk.type === 'init') {
                 pendingBufferRef.current.push({ kind: 'init', traceId: chunk.traceId });

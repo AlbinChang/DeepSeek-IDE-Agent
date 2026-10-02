@@ -184,19 +184,25 @@ export const StatusBar: React.FC = () => {
 
     useEffect(() => {
         let isActive = true;
+        let refreshSequence = 0;
 
         const refreshTokenUsage = async () => {
+            const sequence = ++refreshSequence;
             if (!workspaceRoot) {
-                if (isActive) setTokenUsage({ daily: [], todayTokens: 0, totalTokens: 0 });
+                if (isActive && sequence === refreshSequence) {
+                    setTokenUsage({ daily: [], todayTokens: 0, totalTokens: 0 });
+                }
                 return;
             }
 
             try {
                 const summary = await getWorkspaceTokenUsageSummary(workspaceRoot);
-                if (isActive) setTokenUsage(summary);
+                if (isActive && sequence === refreshSequence) setTokenUsage(summary);
             } catch (error) {
                 console.warn('[StatusBar] Token usage read failed:', error);
-                if (isActive) setTokenUsage({ daily: [], todayTokens: 0, totalTokens: 0 });
+                if (isActive && sequence === refreshSequence) {
+                    setTokenUsage({ daily: [], todayTokens: 0, totalTokens: 0 });
+                }
             }
         };
 
