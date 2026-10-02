@@ -9,6 +9,7 @@ import { EvaluationAgentService } from "@/services/EvaluationAgentService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
 import { FileIO } from "@/utils/FileIO.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
+import { accumulateTokenUsage, type TokenUsage } from "@/utils/TokenUsage.js";
 
 const getTS = () => getBeijingLogTimePrefix();
 
@@ -227,11 +228,10 @@ export class AgentChatComponent {
             let pendingEvaluatorRepairDirective: { finalReply: string } | null = null;
             let evaluatorRepairConfirmationRetries = 0;
             let mainAgentFinalReply = "";
+            let totalUsage: TokenUsage | null = null;
 
             while(true)
             {
-                let usage: any = null;
-
                 // 执行 Agent 轮次引擎（AI 流式调用 → 工具执行 → 循环，直到无工具调用为止）
                 const turnResult = await AgentTurnEngine.runTurns({
                     client,
@@ -254,7 +254,7 @@ export class AgentChatComponent {
                 });
 
                 activeHistory = turnResult.activeHistory;
-                usage = turnResult.usage;
+                totalUsage = accumulateTokenUsage(totalUsage, turnResult.usage);
                 totalSteps = turnResult.totalSteps;
                 mainAgentFinalReply = turnResult.finalAssistantContent || "";
 
@@ -282,7 +282,7 @@ export class AgentChatComponent {
                     emit({
                         type: "done",
                         content: mainAgentFinalReply || "需要你提供进一步信息或做出决策后才能继续，请回复后我再执行下一步。",
-                        usage,
+                        usage: totalUsage,
                     });
                     return;
                 }
@@ -326,7 +326,7 @@ export class AgentChatComponent {
                         : "目标已达成，结束对话。";
                     console.log(`${getTS()} [AgentChat] All TODOs terminal (${todos.length} items), ending chat loop for user: ${userId}`);
                     clearPromptCache();
-                    emit({ type: "done", content: mainAgentFinalReply || statusText, usage });
+                    emit({ type: "done", content: mainAgentFinalReply || statusText, usage: totalUsage });
                     return;
                 }
 
@@ -349,6 +349,7 @@ export class AgentChatComponent {
                         userInstruction: String(lastUserMsgRecord?.content || ""),
                         mainAgentFinalReply,
                     });
+                    totalUsage = accumulateTokenUsage(totalUsage, evaluationResult.usage);
 
                     // 评估Agent结论：需要主Agent继续迭代
                     if (evaluationResult.decision === "continue_main_agent") {
@@ -424,7 +425,7 @@ export class AgentChatComponent {
                     emit({
                         type: "done",
                         content: mainAgentFinalReply || `评估已完成：${decisionLabel}。`,
-                        usage: usage,
+                        usage: totalUsage,
                     });
                     return;
                    

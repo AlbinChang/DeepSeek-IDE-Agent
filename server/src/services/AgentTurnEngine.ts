@@ -29,6 +29,7 @@ import { TelemetryService } from "@/services/TelemetryService.js";
 import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 import { classifyRetryableError, computeRetryDelayMs } from "@/utils/ApiRetryUtils.js";
+import { accumulateTokenUsage, normalizeTokenUsage, type TokenUsage } from "@/utils/TokenUsage.js";
 import { extractReasoningText } from "../utils/ReasoningUtils.js";
 
 const getTS = () => getBeijingLogTimePrefix();
@@ -247,8 +248,8 @@ export interface AgentTurnEngineOptions {
 export interface AgentTurnEngineResult {
     /** 经过所有轮次执行后的活跃历史（可直接传入下一次 runTurns 或外层逻辑） */
     activeHistory: any[];
-    /** 最后一轮 API 返回的 usage 对象（含 total_tokens 等），无调用时为 null */
-    usage: any;
+    /** 本次 runTurns 中所有成功模型调用的累计用量；无 usage 数据时为 null */
+    usage: TokenUsage | null;
     /**
      * 本次 runTurns 执行的轮次数。
      * 结合调用方传入的 totalSteps 可还原全局步骤计数。
@@ -291,7 +292,7 @@ export class AgentTurnEngine {
         } = options;
 
         let activeHistory = [...options.activeHistory];
-        let usage: any = null;
+        let usage: TokenUsage | null = null;
         let turns = 0;
         let totalSteps = options.totalSteps ?? 0;
         let finalAssistantContent = "";
@@ -326,7 +327,7 @@ export class AgentTurnEngine {
             let fullContent = "";
             let fullReasoning = "";
             let toolCalls: any[] = [];
-            let localUsage: any = null;
+            let localUsage: TokenUsage | null = null;
 
             while (retryCount <= MAX_ALLOWED_RETRIES && !apiSuccess) {
                 try {
@@ -424,7 +425,7 @@ export class AgentTurnEngine {
                     if (response) {
                         for await (const chunk of response as any) {
                             if (chunk.usage) {
-                                localUsage = chunk.usage;
+                                localUsage = normalizeTokenUsage(chunk.usage) || localUsage;
                             }
 
                             const delta = chunk.choices[0]?.delta as any;
@@ -466,7 +467,7 @@ export class AgentTurnEngine {
                     emitStreamProgress("complete", 0, undefined, true);
 
                     apiSuccess = true;
-                    if (localUsage) usage = localUsage;
+                    usage = accumulateTokenUsage(usage, localUsage);
                     if (fullContent && fullContent.trim()) {
                         lastNonEmptyAssistantContent = fullContent.trim();
                     }
@@ -712,8 +713,8 @@ export class AgentTurnEngine {
             // Telemetry：记录本轮 token 用量与耗时
             // ---------------------------------------------------------------
             const turnDuration = Date.now() - startTimeStamp;
-            if (usage) {
-                const totalTokensConsumed = usage.total_tokens || 0;
+            if (localUsage) {
+                const totalTokensConsumed = localUsage.totalTokens;
                 TelemetryService.recordRequest(
                     true,
                     turnDuration,

@@ -2,7 +2,7 @@
 import Dexie from "dexie";
 import { USER_ID } from "@/config";
 import { useAgentContext, useTodoContext, useProblemContext } from "@/providers/AgentContext";
-import { db } from "@/services/db";
+import { clearWorkspaceChatHistory, db, recordTokenUsage, type TokenUsage } from "@/services/db";
 import { createClientId } from "@/utils/id";
 import { electronBridge } from "@/services/electron-bridge";
 
@@ -429,7 +429,7 @@ export function useAgentSSE() {
             | { kind: 'init'; traceId: string }
             | { kind: 'error'; content: string }
             | { kind: 'doneText'; content: string }
-            | { kind: 'done' }
+            | { kind: 'done'; usage: TokenUsage | null }
             | { kind: 'diagnostics'; entries: import('@/providers/AgentContext').ProblemEntry[] };
 
         /**
@@ -480,6 +480,7 @@ export function useAgentSSE() {
             let initTraceId: string | null = null;
             let errorContent: string | null = null;
             let doneTextContent: string | null = null;
+            let doneUsage: TokenUsage | null = null;
             let isDone = false;
             const diagnosticsEntries: import('@/providers/AgentContext').ProblemEntry[] = [];
 
@@ -494,7 +495,10 @@ export function useAgentSSE() {
                     case 'init': initTraceId = chunk.traceId; break;
                     case 'error': errorContent = chunk.content; break;
                     case 'doneText': doneTextContent = chunk.content; break;
-                    case 'done': isDone = true; break;
+                    case 'done':
+                        isDone = true;
+                        doneUsage = chunk.usage;
+                        break;
                     case 'diagnostics': diagnosticsEntries.push(...chunk.entries); break;
                 }
             }
@@ -614,6 +618,16 @@ export function useAgentSSE() {
                         last.isFinal = true;
                         db.chatHistory.put({ ...sanitizeMessageForClient(userMsg), workspaceRoot }).catch(console.error);
                         db.chatHistory.put({ ...sanitizeMessageForClient(last), workspaceRoot }).catch(console.error);
+                        if (doneUsage) {
+                            recordTokenUsage({
+                                id: last.id,
+                                workspaceRoot,
+                                timestamp: last.timestamp || Date.now(),
+                                inputTokens: doneUsage.inputTokens,
+                                outputTokens: doneUsage.outputTokens,
+                                totalTokens: doneUsage.totalTokens,
+                            }).catch(console.error);
+                        }
                     }
 
                     return trimMessagesForMemory(next);
@@ -763,7 +777,7 @@ export function useAgentSSE() {
                 if (doneText && doneText !== 'Processing complete') {
                     pendingBufferRef.current.push({ kind: 'doneText', content: doneText });
                 }
-                pendingBufferRef.current.push({ kind: 'done' });
+                pendingBufferRef.current.push({ kind: 'done', usage: chunk.usage || null });
                 // 回合结束：无论工具类型，兜底刷新目录树，
                 // 覆盖命令类工具（下载图片等）造成的文件系统变化
                 scheduleTreeRefresh(true);
@@ -873,7 +887,7 @@ export function useAgentSSE() {
             // Electron 模式：通过 IPC 调用主进程清空会话（含 TODO 持久化清理）
             await electronBridge.clearSession({ userId: USER_ID, workspaceRoot });
             // 清空本地 IndexedDB
-            await db.chatHistory.where("workspaceRoot").equals(workspaceRoot).delete();
+            await clearWorkspaceChatHistory(workspaceRoot);
             setMessages([]);
             setInput("");
             setData([]);

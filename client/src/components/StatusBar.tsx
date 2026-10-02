@@ -3,6 +3,12 @@ import { GitBranch, Hash, Activity, User, Code2 } from 'lucide-react';
 import { USER_ID, GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { electronBridge } from '@/services/electron-bridge';
+import {
+    getBeijingDateKey,
+    getWorkspaceTokenUsageSummary,
+    TOKEN_USAGE_UPDATED_EVENT,
+    type WorkspaceTokenUsageSummary,
+} from '@/services/db';
 
 interface StatusBarData {
     user?: {
@@ -18,9 +24,6 @@ interface StatusBarData {
         branch: string;
         isDirty: boolean;
     };
-    tokens: {
-        total: number;
-    };
     memory?: {
         heapUsed: string;
         heapLimit: string;
@@ -34,6 +37,12 @@ interface StatusBarData {
 export const StatusBar: React.FC = () => {
     const { workspaceRoot, provider, model } = useAgentContext();
     const [status, setStatus] = useState<StatusBarData | null>(null);
+    const [tokenUsage, setTokenUsage] = useState<WorkspaceTokenUsageSummary>({
+        daily: [],
+        todayTokens: 0,
+        totalTokens: 0,
+    });
+    const [todayDate, setTodayDate] = useState(() => getBeijingDateKey(Date.now()));
     const [activeLang, setActiveLang] = useState('');
     const [activeFile, setActiveFile] = useState('');
     const [cursor, setCursor] = useState({ line: 0, column: 0, totalLines: 0, selection: 0 });
@@ -114,7 +123,6 @@ export const StatusBar: React.FC = () => {
                         id: model || prev?.model?.id || 'electron',
                     },
                     git: gitInfo,
-                    tokens: prev?.tokens || { total: 0 },
                 }));
             } catch (err) {
                 // 忽略错误
@@ -174,6 +182,48 @@ export const StatusBar: React.FC = () => {
         };
     }, [workspaceRoot, provider, model]); // 仅在工作区变化时重建轮询，避免语言变化触发重复定时器
 
+    useEffect(() => {
+        let isActive = true;
+
+        const refreshTokenUsage = async () => {
+            if (!workspaceRoot) {
+                if (isActive) setTokenUsage({ daily: [], todayTokens: 0, totalTokens: 0 });
+                return;
+            }
+
+            try {
+                const summary = await getWorkspaceTokenUsageSummary(workspaceRoot);
+                if (isActive) setTokenUsage(summary);
+            } catch (error) {
+                console.warn('[StatusBar] Token usage read failed:', error);
+                if (isActive) setTokenUsage({ daily: [], todayTokens: 0, totalTokens: 0 });
+            }
+        };
+
+        const handleTokenUsageUpdate = (event: Event) => {
+            const updatedWorkspace = (event as CustomEvent<{ workspaceRoot?: string }>).detail?.workspaceRoot;
+            if (!updatedWorkspace || updatedWorkspace === workspaceRoot) void refreshTokenUsage();
+        };
+
+        setTokenUsage({ daily: [], todayTokens: 0, totalTokens: 0 });
+        void refreshTokenUsage();
+        window.addEventListener(TOKEN_USAGE_UPDATED_EVENT, handleTokenUsageUpdate);
+
+        return () => {
+            isActive = false;
+            window.removeEventListener(TOKEN_USAGE_UPDATED_EVENT, handleTokenUsageUpdate);
+        };
+    }, [workspaceRoot]);
+
+    useEffect(() => {
+        const dateCheck = window.setInterval(() => {
+            const currentDate = getBeijingDateKey(Date.now());
+            setTodayDate(previousDate => previousDate === currentDate ? previousDate : currentDate);
+        }, 60_000);
+
+        return () => window.clearInterval(dateCheck);
+    }, []);
+
     const hasActiveFile = !!activeFile;
     const isBuiltIn = hasActiveFile && activeLang.includes('(BUILT-IN)');
     const normalizedLang = activeLang.replace(' (BUILT-IN)', '').trim();
@@ -194,6 +244,10 @@ export const StatusBar: React.FC = () => {
         : status?.git?.isDirty
             ? 'text-white opacity-90'
             : 'text-white opacity-40';
+    const todayTokens = tokenUsage.daily.find(day => day.date === todayDate)?.totalTokens || 0;
+    const todayTokenLabel = workspaceRoot ? todayTokens.toLocaleString() : '—';
+    const totalTokenLabel = workspaceRoot ? tokenUsage.totalTokens.toLocaleString() : '—';
+    const tokenUsageTitle = `当前工作区 token 用量（北京时间自然日）：今日 ${todayTokenLabel}，累计 ${totalTokenLabel}。仅统计开始记录后接口返回的真实 usage，既有会话无法回算。`;
 
     return (
         <div data-testid="status-bar" className="h-[24px] w-full bg-[#0a0a0a] flex items-center justify-between px-3 text-white select-none font-medium tracking-tight border-t border-white/10">
@@ -216,11 +270,15 @@ export const StatusBar: React.FC = () => {
 
             {/* 中间：运行时指标 & 警告 (对齐 19.3 节) */}
             <div className="flex items-center gap-6 h-full">
-                <div className="flex items-center gap-2" title={`用量: ${status?.tokens?.total || 0} tokens`}>
+                <div className="flex items-center gap-2" title={tokenUsageTitle}>
                     <Hash size={9} className="text-white opacity-20" />
-                    <div className="flex items-baseline gap-1">
-                        <span className="font-mono text-[8.5px] font-black tabular-nums text-white opacity-100">{(status?.tokens?.total || 0).toLocaleString()}</span>
-                        <span className="text-[7.5px] font-black text-white opacity-60">T</span>
+                    <div className="flex items-baseline gap-3">
+                        <span className="flex items-baseline gap-1 font-mono text-[8.5px] font-black tabular-nums text-white">
+                            {todayTokenLabel}<span className="font-sans text-[7.5px] text-white/60">T 今日</span>
+                        </span>
+                        <span className="flex items-baseline gap-1 border-l border-white/10 pl-2 font-mono text-[8.5px] font-black tabular-nums text-white">
+                            {totalTokenLabel}<span className="font-sans text-[7.5px] text-white/60">T 累计</span>
+                        </span>
                     </div>
                 </div>
 

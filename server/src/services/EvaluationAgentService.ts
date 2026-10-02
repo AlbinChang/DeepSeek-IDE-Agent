@@ -3,6 +3,7 @@ import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
 import { AIProviderFactory } from "@/services/AIProviderFactory.js";
 import { HistoryOptimizerService } from "@/services/HistoryOptimizerService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
+import type { TokenUsage } from "@/utils/TokenUsage.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
 import { FileIO } from "@/utils/FileIO.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
@@ -39,7 +40,7 @@ export interface EvaluationAgentOutput {
     decision: EvaluationDecision;
     finalReply: string;
     reportContent: string;
-    usage: any;
+    usage: TokenUsage | null;
 }
 
 /**
@@ -143,7 +144,7 @@ export class EvaluationAgentService {
 
         const client = AIProviderFactory.getClient(providerConfig);
 
-        let turnResultUsage: any = null;
+        let turnResultUsage: TokenUsage | null = null;
         let finalReply = "";
         let decision: EvaluationDecision = "continue_main_agent";
         let issueCount = 1;

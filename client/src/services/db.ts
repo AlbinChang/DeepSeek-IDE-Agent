@@ -89,12 +89,49 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface TokenUsageRecord extends TokenUsage {
+  id: string;
+  workspaceRoot: string;
+  date: string;
+  timestamp: number;
+}
+
+export interface WorkspaceTokenUsageSummary {
+  daily: Array<{ date: string; totalTokens: number }>;
+  todayTokens: number;
+  totalTokens: number;
+}
+
+export const TOKEN_USAGE_UPDATED_EVENT = 'ui:token-usage:updated';
+
+const beijingDateFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Shanghai',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+export const getBeijingDateKey = (timestamp: number): string => {
+  const parts = beijingDateFormatter.formatToParts(new Date(timestamp));
+  const year = parts.find(part => part.type === 'year')?.value || '0000';
+  const month = parts.find(part => part.type === 'month')?.value || '00';
+  const day = parts.find(part => part.type === 'day')?.value || '00';
+  return `${year}-${month}-${day}`;
+};
+
 /**
  * 聊天历史持久化 (IndexedDB)
  * 对齐技术规范 第 9.0 节
  */
 export const db = new Dexie('DeepSeekIDEAgentDB') as Dexie & {
   chatHistory: EntityTable<ChatMessage, 'id'>;
+  tokenUsage: EntityTable<TokenUsageRecord, 'id'>;
 };
 
 db.version(4).stores({
@@ -108,3 +145,63 @@ db.version(5).stores({
     sanitizePersistedChatRow(row);
   });
 });
+
+db.version(6).stores({
+  chatHistory: 'id, workspaceRoot, timestamp, [workspaceRoot+timestamp]',
+  tokenUsage: 'id, workspaceRoot, date, [workspaceRoot+date]',
+});
+
+const toTokenCount = (value: number): number =>
+  Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+
+export const recordTokenUsage = async (
+  record: Omit<TokenUsageRecord, 'date'>,
+): Promise<void> => {
+  if (!record.id || !record.workspaceRoot) return;
+
+  const timestamp = Number.isFinite(record.timestamp) ? record.timestamp : Date.now();
+  const normalized = {
+    ...record,
+    timestamp,
+    date: getBeijingDateKey(timestamp),
+    inputTokens: toTokenCount(record.inputTokens),
+    outputTokens: toTokenCount(record.outputTokens),
+    totalTokens: toTokenCount(record.totalTokens),
+  };
+  if (normalized.totalTokens === 0) return;
+
+  // The assistant message ID makes repeated done events idempotent.
+  await db.tokenUsage.put(normalized);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(TOKEN_USAGE_UPDATED_EVENT, {
+      detail: { workspaceRoot: record.workspaceRoot },
+    }));
+  }
+};
+
+export const getWorkspaceTokenUsageSummary = async (
+  workspaceRoot: string,
+): Promise<WorkspaceTokenUsageSummary> => {
+  const records = await db.tokenUsage.where('workspaceRoot').equals(workspaceRoot).toArray();
+  const dailyTotals = new Map<string, number>();
+  let totalTokens = 0;
+
+  for (const record of records) {
+    const tokens = toTokenCount(record.totalTokens);
+    const date = record.date || getBeijingDateKey(record.timestamp);
+    dailyTotals.set(date, (dailyTotals.get(date) || 0) + tokens);
+    totalTokens += tokens;
+  }
+
+  const today = getBeijingDateKey(Date.now());
+  return {
+    daily: Array.from(dailyTotals, ([date, tokens]) => ({ date, totalTokens: tokens }))
+      .sort((left, right) => left.date.localeCompare(right.date)),
+    todayTokens: dailyTotals.get(today) || 0,
+    totalTokens,
+  };
+};
+
+export const clearWorkspaceChatHistory = async (workspaceRoot: string): Promise<void> => {
+  await db.chatHistory.where('workspaceRoot').equals(workspaceRoot).delete();
+};

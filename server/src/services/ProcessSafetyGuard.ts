@@ -7,7 +7,7 @@
  * 3. 禁止杀死系统关键服务进程（Windows services / Linux system daemons）
  * 4. 强制"杀进程必须显式指定 PID"的契约，禁止按进程名批量杀进程
  * 5. 禁止用户服务启动命令监听 Agent 受保护端口
- * 6. 跨平台：Windows (netstat / tasklist) + Linux/macOS (ss / lsof / /proc)
+ * 6. 跨平台：Windows (PowerShell CIM / netstat / tasklist) + Linux/macOS (ss / lsof / /proc)
  * 
  * 对齐：
  * - TECH_SPEC.md §5.0 & §17.0 运行规范
@@ -15,13 +15,45 @@
  * - 用户偏好：禁止自动降级模型、进程安全防护
  */
 
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import { config as globalConfig } from '@/config/index.js';
 
 /** 异步版 shell exec，替代 execSync，避免阻塞 Electron 主进程/Node 事件循环 */
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+type WindowsManagementClass = 'Win32_Process' | 'Win32_Service';
+type WindowsManagementProperty = 'ProcessId' | 'Name';
+
+const queryWindowsManagementProperty = async (
+    className: WindowsManagementClass,
+    filter: string,
+    property: WindowsManagementProperty,
+    timeout: number,
+): Promise<string[]> => {
+    const output = className === 'Win32_Process'
+        ? `$items | Where-Object { $_.ProcessId -ne $PID } | ForEach-Object { $_.${property} }`
+        : `$items | ForEach-Object { $_.${property} }`;
+    const script = [
+        "$ErrorActionPreference = 'Stop'",
+        `$filter = '${filter}'`,
+        'if (Get-Command -Name Get-CimInstance -ErrorAction SilentlyContinue) {',
+        `    $items = Get-CimInstance -ClassName '${className}' -Filter $filter`,
+        '} else {',
+        `    $items = Get-WmiObject -Class '${className}' -Filter $filter`,
+        '}',
+        output,
+    ].join('\n');
+    const { stdout } = await execFileAsync(
+        'powershell.exe',
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+        { timeout, encoding: 'utf8' },
+    );
+
+    return stdout.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+};
 
 // ============================================================================
 // 类型定义
@@ -255,18 +287,18 @@ export class ProcessSafetyGuard {
      */
     async refreshChildPids(): Promise<void> {
         try {
+            const refreshedChildPids = new Set<number>();
             if (this.isWin) {
-                // Windows: wmic process where (ParentProcessId={selfPid}) get ProcessId
-                const { stdout: raw } = await execAsync(
-                    `wmic process where (ParentProcessId=${this.selfPid}) get ProcessId /format:csv`,
-                    { timeout: 5000, encoding: 'utf8' }
+                const processIds = await queryWindowsManagementProperty(
+                    'Win32_Process',
+                    `ParentProcessId = ${this.selfPid}`,
+                    'ProcessId',
+                    5000,
                 );
-                const lines = raw.split('\n').filter(l => l.trim());
-                for (let i = 1; i < lines.length; i++) {
-                    const cols = lines[i].split(',');
-                    const pid = parseInt(cols[cols.length - 1]?.trim(), 10);
-                    if (pid && pid > 0 && pid !== this.selfPid) {
-                        this.childPids.add(pid);
+                for (const processId of processIds) {
+                    const pid = Number.parseInt(processId, 10);
+                    if (Number.isInteger(pid) && pid > 0 && pid !== this.selfPid) {
+                        refreshedChildPids.add(pid);
                     }
                 }
             } else {
@@ -277,12 +309,13 @@ export class ProcessSafetyGuard {
                 for (const line of raw.trim().split('\n')) {
                     const pid = parseInt(line.trim(), 10);
                     if (pid > 0 && pid !== this.selfPid) {
-                        this.childPids.add(pid);
+                        refreshedChildPids.add(pid);
                     }
                 }
             }
+            this.childPids = refreshedChildPids;
         } catch {
-            // 静默失败；self-awareness 非关键路径
+            // Query failures preserve the last successful snapshot for safety.
         }
     }
 
@@ -560,15 +593,15 @@ export class ProcessSafetyGuard {
                 };
             }
 
-            // 通过 wmic 检查是否是 Windows 服务
+            // 查询该进程是否托管 Windows 服务
             try {
-                const { stdout: svcRawOut } = await execAsync(
-                    `wmic service where (ProcessId=${pid}) get Name /format:csv 2>nul`,
-                    { timeout: 3000, encoding: 'utf8' }
+                const serviceNames = await queryWindowsManagementProperty(
+                    'Win32_Service',
+                    `ProcessId = ${pid}`,
+                    'Name',
+                    3000,
                 );
-                const svcRaw = svcRawOut.trim();
-                const svcLines = svcRaw.split('\n').filter(l => l.trim() && !l.startsWith('Node,'));
-                if (svcLines.length > 1) {
+                if (serviceNames.length > 0) {
                     return {
                         isSystemService: true,
                         processName: imageName,
