@@ -171,9 +171,13 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                             terminalEmitted = true;
                         }
                         // 将 SSE 事件格式映射为 IPC 事件
+                        // 注意：此处为显式字段白名单，新增事件字段（如 usage）必须同步转发，
+                        // 否则会被静默丢弃 —— 历史上 usage 字段曾在此丢失，导致状态栏 token 用量永不更新。
                         sendEvent({
                             type: chunk.type || 'text',
                             content: chunk.content ?? chunk.message,
+                            // usage：每次模型调用结束的增量用量；done 事件上则为整轮汇总用量
+                            usage: chunk.usage,
                             method: chunk.method,
                             params: chunk.params,
                             channel: chunk.channel,

@@ -14,11 +14,12 @@ import { SettingsService } from "@/services/SettingsService.js";
  * text: 最终回答文本内容流
  * annotation: 结构化标注（如：文件修改预览、代码块元数据等）
  * progress: 后端已接收的大模型输出字符计数（不包含具体文本内容）
+ * usage: 每次模型调用结束的 token 用量增量（done 事件上为整轮汇总），供状态栏实时展示
  * error: 错误信息
  * done: 传输完成标志
  * heartbeat: 保持连接活跃的心跳包
  */
-export type AgentSSEEvent = "init" | "stage" | "reasoning" | "text" | "annotation" | "progress" | "error" | "done" | "heartbeat";
+export type AgentSSEEvent = "init" | "stage" | "reasoning" | "text" | "annotation" | "progress" | "usage" | "error" | "done" | "heartbeat";
 
 export interface AgentSSEPayload {
     type: AgentSSEEvent;
@@ -37,6 +38,8 @@ export interface AgentSSEPayload {
     turn?: number;
     timestamp: number;
     isFinal?: boolean;
+    /** 每次模型调用结束的增量用量；done 事件上则为整轮汇总用量 */
+    usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
 }
 
 /**

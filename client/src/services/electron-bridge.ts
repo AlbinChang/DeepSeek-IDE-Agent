@@ -35,7 +35,14 @@ async function callIpc(method: string, args: any[]): Promise<any> {
 }
 
 // ── 事件类型 ──
-export type AgentSSEEventType = 'init' | 'stage' | 'reasoning' | 'text' | 'annotation' | 'progress' | 'error' | 'done' | 'heartbeat';
+export type AgentSSEEventType = 'init' | 'stage' | 'reasoning' | 'text' | 'annotation' | 'progress' | 'usage' | 'error' | 'done' | 'heartbeat';
+
+/** token 用量载荷（与 server/src/utils/TokenUsage.ts 的 TokenUsage 对齐） */
+export interface AgentTokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+}
 
 export interface AgentSSEPayload {
     type: AgentSSEEventType;
@@ -55,6 +62,8 @@ export interface AgentSSEPayload {
     timestamp: number;
     isFinal?: boolean;
     streamId?: string;
+    /** 每次模型调用结束的增量用量；done 事件上则为整轮汇总用量 */
+    usage?: AgentTokenUsage;
 }
 
 // ── 统一接口（仅 IPC 路径） ──
@@ -97,6 +106,8 @@ export const electronBridge = {
                 onEvent({
                     type: event.type,
                     content: event.content,
+                    // usage 必须透传：状态栏 token 用量依赖该字段做增量更新
+                    usage: event.usage,
                     traceId: event.traceId,
                     model: event.model,
                     method: event.method,

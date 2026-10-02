@@ -18,7 +18,7 @@ interface AgentChatParams {
 
 interface AgentEvent {
     streamId: string;
-    type: 'init' | 'stage' | 'reasoning' | 'text' | 'annotation' | 'progress' | 'error' | 'done' | 'heartbeat';
+    type: 'init' | 'stage' | 'reasoning' | 'text' | 'annotation' | 'progress' | 'usage' | 'error' | 'done' | 'heartbeat';
     content?: string;
     traceId?: string;
     model?: string;
@@ -34,6 +34,8 @@ interface AgentEvent {
     turn?: number;
     timestamp: number;
     isFinal?: boolean;
+    /** 每次模型调用结束的增量用量；done 事件上则为整轮汇总用量 */
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 }
 
 interface FileReadParams {
