@@ -30,6 +30,12 @@ import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 import { classifyRetryableError, computeRetryDelayMs } from "@/utils/ApiRetryUtils.js";
 import { accumulateTokenUsage, normalizeTokenUsage, type TokenUsage } from "@/utils/TokenUsage.js";
+import {
+    LLMRequestJournal,
+    type AgentStage,
+    type LLMRequestRecord,
+    type LLMRequestRecoveryContext,
+} from "@/services/LLMRequestJournal.js";
 import { extractReasoningText } from "../utils/ReasoningUtils.js";
 
 const getTS = () => getBeijingLogTimePrefix();
@@ -243,6 +249,12 @@ export interface AgentTurnEngineOptions {
      * 评估 Agent 的对话旅程是临时的、短暂的，不应污染主 Agent 的持久化历史。
      */
     skipPersist?: boolean;
+    /** 恢复时首个模型调用重放此原始请求体。 */
+    resumeRequest?: LLMRequestRecord;
+    /** 当前请求所属的 Agent 阶段。 */
+    agentStage?: AgentStage;
+    /** 用于在重启后重建外层 Agent 对话循环的上下文。 */
+    recoveryContext?: LLMRequestRecoveryContext;
 }
 
 export interface AgentTurnEngineResult {
@@ -291,7 +303,9 @@ export class AgentTurnEngine {
             startTimeStamp,
         } = options;
 
-        let activeHistory = [...options.activeHistory];
+        let activeHistory = options.resumeRequest
+            ? [...options.resumeRequest.payload.messages]
+            : [...options.activeHistory];
         let usage: TokenUsage | null = null;
         let turns = 0;
         let totalSteps = options.totalSteps ?? 0;
@@ -328,99 +342,115 @@ export class AgentTurnEngine {
             let fullReasoning = "";
             let toolCalls: any[] = [];
             let localUsage: TokenUsage | null = null;
+            const replayPayload = turns === 1 ? options.resumeRequest?.payload : undefined;
 
             while (retryCount <= MAX_ALLOWED_RETRIES && !apiSuccess) {
-                try {
-                    fullContent = "";
-                    fullReasoning = "";
-                    toolCalls = [];
-                    localUsage = null;
+                fullContent = "";
+                fullReasoning = "";
+                toolCalls = [];
+                localUsage = null;
 
-                    // currentTurnId 在重试时递增，确保前端生成新的消息气泡
-                    const currentTurnId = turns * 100 + retryCount;
-                    let toolArgumentChars = 0;
-                    let emittedClientReasoningChars = 0;
-                    let emittedClientContentChars = 0;
-                    let reasoningTruncationNotified = false;
-                    let contentTruncationNotified = false;
-                    let lastProgressEmitAt = 0;
-                    let lastProgressChars = 0;
-                    const emitStreamProgress = (
-                        channel: "content" | "reasoning" | "tool_arguments" | "complete",
-                        deltaChars: number = 0,
-                        toolName?: string,
-                        force: boolean = false
-                    ) => {
-                        const receivedChars = fullContent.length + fullReasoning.length + toolArgumentChars;
-                        if (receivedChars <= 0) return;
+                const currentTurnId = turns * 100 + retryCount;
+                let toolArgumentChars = 0;
+                let emittedClientReasoningChars = 0;
+                let emittedClientContentChars = 0;
+                let reasoningTruncationNotified = false;
+                let contentTruncationNotified = false;
+                let lastProgressEmitAt = 0;
+                let lastProgressChars = 0;
+                const emitStreamProgress = (
+                    channel: "content" | "reasoning" | "tool_arguments" | "complete",
+                    deltaChars: number = 0,
+                    toolName?: string,
+                    force: boolean = false
+                ) => {
+                    const receivedChars = fullContent.length + fullReasoning.length + toolArgumentChars;
+                    if (receivedChars <= 0) return;
 
-                        const now = Date.now();
-                        if (!force && now - lastProgressEmitAt < 300 && receivedChars - lastProgressChars < 2048) {
-                            return;
-                        }
+                    const now = Date.now();
+                    if (!force && now - lastProgressEmitAt < 300 && receivedChars - lastProgressChars < 2048) {
+                        return;
+                    }
 
-                        lastProgressEmitAt = now;
-                        lastProgressChars = receivedChars;
-                        emit({
-                            type: "progress",
-                            channel,
-                            receivedChars,
-                            contentChars: fullContent.length,
-                            reasoningChars: fullReasoning.length,
-                            toolArgumentChars,
-                            deltaChars,
-                            toolName,
-                            turn: currentTurnId,
-                            timestamp: now,
-                        });
-                    };
+                    lastProgressEmitAt = now;
+                    lastProgressChars = receivedChars;
+                    emit({
+                        type: "progress",
+                        channel,
+                        receivedChars,
+                        contentChars: fullContent.length,
+                        reasoningChars: fullReasoning.length,
+                        toolArgumentChars,
+                        deltaChars,
+                        toolName,
+                        turn: currentTurnId,
+                        timestamp: now,
+                    });
+                };
 
-                    const emitVisibleStreamDelta = (type: "reasoning" | "text", deltaText: string, turn: number) => {
-                        const isReasoning = type === "reasoning";
-                        const limit = isReasoning ? CLIENT_VISIBLE_REASONING_LIMIT : CLIENT_VISIBLE_CONTENT_LIMIT;
-                        const label = isReasoning ? "推理文本" : "回复正文";
-                        const emittedChars = isReasoning ? emittedClientReasoningChars : emittedClientContentChars;
-                        const alreadyNotified = isReasoning ? reasoningTruncationNotified : contentTruncationNotified;
+                const emitVisibleStreamDelta = (type: "reasoning" | "text", deltaText: string, turn: number) => {
+                    const isReasoning = type === "reasoning";
+                    const limit = isReasoning ? CLIENT_VISIBLE_REASONING_LIMIT : CLIENT_VISIBLE_CONTENT_LIMIT;
+                    const label = isReasoning ? "推理文本" : "回复正文";
+                    const emittedChars = isReasoning ? emittedClientReasoningChars : emittedClientContentChars;
+                    const alreadyNotified = isReasoning ? reasoningTruncationNotified : contentTruncationNotified;
 
-                        if (emittedChars >= limit) {
-                            if (!alreadyNotified) {
-                                const totalChars = isReasoning ? fullReasoning.length : fullContent.length;
-                                emit({ type, content: streamTruncationNotice(label, totalChars), turn });
-                                if (isReasoning) reasoningTruncationNotified = true;
-                                else contentTruncationNotified = true;
-                            }
-                            return;
-                        }
-
-                        const remaining = Math.max(0, limit - emittedChars);
-                        const visibleText = deltaText.length <= remaining ? deltaText : deltaText.slice(0, remaining);
-                        if (visibleText) {
-                            emit({ type, content: visibleText, turn });
-                            if (isReasoning) emittedClientReasoningChars += visibleText.length;
-                            else emittedClientContentChars += visibleText.length;
-                        }
-
-                        if (deltaText.length > remaining && !alreadyNotified) {
+                    if (emittedChars >= limit) {
+                        if (!alreadyNotified) {
                             const totalChars = isReasoning ? fullReasoning.length : fullContent.length;
                             emit({ type, content: streamTruncationNotice(label, totalChars), turn });
-                            if (isReasoning) {
-                                reasoningTruncationNotified = true;
-                                emittedClientReasoningChars = limit;
-                            } else {
-                                contentTruncationNotified = true;
-                                emittedClientContentChars = limit;
-                            }
+                            if (isReasoning) reasoningTruncationNotified = true;
+                            else contentTruncationNotified = true;
                         }
-                    };
+                        return;
+                    }
 
-                    const response = await client.chat.completions.create({
-                        model: finalModelId,
-                        messages: AIProviderFactory.buildProviderSafeMessages(activeHistory, options.provider),
-                        tools: toolsMetadata as any,
-                        stream: true,
-                        stream_options: { include_usage: true },
-                        ...thinkingOptions,
-                    } as any, { signal: abortSignal });
+                    const remaining = Math.max(0, limit - emittedChars);
+                    const visibleText = deltaText.length <= remaining ? deltaText : deltaText.slice(0, remaining);
+                    if (visibleText) {
+                        emit({ type, content: visibleText, turn });
+                        if (isReasoning) emittedClientReasoningChars += visibleText.length;
+                        else emittedClientContentChars += visibleText.length;
+                    }
+
+                    if (deltaText.length > remaining && !alreadyNotified) {
+                        const totalChars = isReasoning ? fullReasoning.length : fullContent.length;
+                        emit({ type, content: streamTruncationNotice(label, totalChars), turn });
+                        if (isReasoning) {
+                            reasoningTruncationNotified = true;
+                            emittedClientReasoningChars = limit;
+                        } else {
+                            contentTruncationNotified = true;
+                            emittedClientContentChars = limit;
+                        }
+                    }
+                };
+
+                const requestPayload = replayPayload ?? {
+                    model: finalModelId,
+                    messages: AIProviderFactory.buildProviderSafeMessages(activeHistory, options.provider),
+                    tools: toolsMetadata as any,
+                    stream: true,
+                    stream_options: { include_usage: true },
+                    ...thinkingOptions,
+                };
+
+                await LLMRequestJournal.getInstance().recordRequest({
+                    root,
+                    userId,
+                    modelId: typeof requestPayload.model === "string" ? requestPayload.model : finalModelId,
+                    providerId: options.provider?.id,
+                    agentStage: options.agentStage ?? "主Agent",
+                    traceId: currentTraceId,
+                    recoveryContext: options.recoveryContext,
+                    payload: requestPayload,
+                });
+
+                try {
+                    const response = await client.chat.completions.create(
+                        requestPayload as any,
+                        { signal: abortSignal },
+                    );
 
                     if (response) {
                         for await (const chunk of response as any) {

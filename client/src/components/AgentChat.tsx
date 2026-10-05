@@ -3,12 +3,14 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Virtuoso } from 'react-virtuoso';
 import { useAgentSSE } from '@/hooks/useAgentSSE';
-import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, XCircle, Brain, Copy, ClipboardCheck, ChevronDown, Bot } from 'lucide-react';
+import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, XCircle, Brain, Copy, ClipboardCheck, ChevronDown, Bot, AlertCircle } from 'lucide-react';
 import { TodoList } from './TodoList';
 import { SettingsModal } from '@/components/SettingsModal';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
 import { useAgentContext, useTodoContext } from '@/providers/AgentContext';
 import type { Message, MessagePart, StreamProgress } from '@/hooks/useAgentSSE';
+import { USER_ID } from '@/config';
+import { electronBridge, type AgentRecoveryInfo } from '@/services/electron-bridge';
 
 interface ChatMessageItemProps {
     message: Message;
@@ -220,9 +222,13 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
 });
 
 export const AgentChat: React.FC = () => {
-    const { messages, input, setInput, handleInputChange, handleSubmit, isLoading, stop, data, streamProgress, clearHistory } = useAgentSSE();
+    const { messages, input, setInput, handleInputChange, handleSubmit, isLoading, stop, data, streamProgress, clearHistory, resume } = useAgentSSE();
     useTodoContext();
     const { workspaceRoot, provider, model, settings, setProvider } = useAgentContext();
+    const [pendingRecovery, setPendingRecovery] = useState<AgentRecoveryInfo | null>(null);
+    const [isRecoveryPromptOpen, setIsRecoveryPromptOpen] = useState(false);
+    const [isRecoveryBusy, setIsRecoveryBusy] = useState(false);
+    const [recoveryError, setRecoveryError] = useState<string | null>(null);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isThinkingExpanded, setIsThinkingExpanded] = useState(true);
     const [isProviderMenuOpen, setIsProviderMenuOpen] = useState(false);
@@ -231,6 +237,87 @@ export const AgentChat: React.FC = () => {
     const providerMenuRef = useRef<HTMLDivElement>(null);
     const copyResetTimerRef = useRef<number | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    useEffect(() => {
+        if (!workspaceRoot) {
+            setPendingRecovery(null);
+            setIsRecoveryPromptOpen(false);
+            setRecoveryError(null);
+            return;
+        }
+
+        setPendingRecovery(null);
+        setIsRecoveryPromptOpen(false);
+        setRecoveryError(null);
+        let cancelled = false;
+        void (async () => {
+            try {
+                const result = await electronBridge.getAgentRecovery({ userId: USER_ID, root: workspaceRoot });
+                if (cancelled) return;
+                if (!result.success) {
+                    setRecoveryError(result.error || '读取上次未完成的 Agent 请求失败');
+                    return;
+                }
+                setPendingRecovery(result.recovery);
+                setIsRecoveryPromptOpen(!!result.recovery);
+                setRecoveryError(null);
+            } catch (error) {
+                if (cancelled) return;
+                console.error('[AgentChat] Failed to load pending recovery:', error);
+                setRecoveryError(error instanceof Error ? error.message : String(error));
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [workspaceRoot]);
+
+    const continueRecovery = useCallback(() => {
+        if (!pendingRecovery || isRecoveryBusy || isLoading) return;
+
+        setIsRecoveryBusy(true);
+        setIsRecoveryPromptOpen(false);
+        setRecoveryError(null);
+        void resume(pendingRecovery).then((success) => {
+            if (success) {
+                setPendingRecovery(null);
+                return;
+            }
+            setRecoveryError('恢复未能完成。原请求仍可重试，或选择放弃本次恢复。');
+            setIsRecoveryPromptOpen(true);
+        }).catch((error) => {
+            setRecoveryError(error instanceof Error ? error.message : String(error));
+            setIsRecoveryPromptOpen(true);
+        }).finally(() => {
+            setIsRecoveryBusy(false);
+        });
+    }, [pendingRecovery, isRecoveryBusy, isLoading, resume]);
+
+    const discardRecovery = useCallback(async () => {
+        if (!pendingRecovery || !workspaceRoot || isRecoveryBusy) return;
+
+        setIsRecoveryBusy(true);
+        setRecoveryError(null);
+        try {
+            const result = await electronBridge.discardAgentRecovery({
+                userId: USER_ID,
+                root: workspaceRoot,
+                requestIndex: pendingRecovery.requestIndex,
+            });
+            if (!result.success) {
+                setRecoveryError(result.error || '放弃恢复失败');
+                return;
+            }
+            setPendingRecovery(null);
+            setIsRecoveryPromptOpen(false);
+        } catch (error) {
+            console.error('[AgentChat] Failed to discard pending recovery:', error);
+            setRecoveryError(error instanceof Error ? error.message : String(error));
+        } finally {
+            setIsRecoveryBusy(false);
+        }
+    }, [pendingRecovery, workspaceRoot, isRecoveryBusy]);
 
     // 2026.04: 思考强度控制（对齐 DeepSeek 官方 thinking mode：reasoning_effort = low | high | max）
     // default: 不发送思考强度字段，采用模型默认（官方默认 high）；low: 轻量档；
@@ -966,6 +1053,13 @@ export const AgentChat: React.FC = () => {
                 />
             )}
 
+            {recoveryError && !isRecoveryPromptOpen && (
+                <div role='alert' className='mx-3 mb-2 flex items-center gap-2 rounded-lg border border-red-500/20 bg-red-950/30 px-3 py-2 text-[11px] text-red-300'>
+                    <AlertCircle className='h-3.5 w-3.5 shrink-0' />
+                    <span>{recoveryError}</span>
+                </div>
+            )}
+
             <form onSubmit={handleSubmit} className='px-1.5 pt-1.5 pb-px bg-black border-t border-white/5'>
                 {/* 2026.03: 实时 TODO 任务悬浮窗 (已解耦重构) */}
                 <div className="mission-pipeline-container">
@@ -1090,6 +1184,53 @@ export const AgentChat: React.FC = () => {
             </form>
             
             <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+
+            {isRecoveryPromptOpen && pendingRecovery && (
+                <div className='fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm'>
+                    <div
+                        role='alertdialog'
+                        aria-modal='true'
+                        aria-labelledby='agent-recovery-title'
+                        className='w-[400px] max-w-[90vw] rounded-xl border border-amber-500/20 bg-[#0b0b0b] p-5 shadow-[0_16px_60px_rgba(0,0,0,0.75)]'
+                    >
+                        <div id='agent-recovery-title' className='mb-3 flex items-center gap-2'>
+                            <AlertCircle className='h-4 w-4 text-amber-400' />
+                            <span className='text-xs font-bold text-white/90'>恢复上次未完成的对话？</span>
+                        </div>
+                        <p className='mb-3 text-[11px] leading-relaxed text-white/60'>
+                            检测到上次程序未正常退出，且最近的模型请求上下文通过了 CRC 校验。继续将重放该请求并恢复 Agent 执行流程。
+                        </p>
+                        <div className='mb-4 space-y-1 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-[10px] text-white/50'>
+                            <div>请求：request-{pendingRecovery.requestIndex}.json</div>
+                            <div>阶段：{pendingRecovery.agentStage}　模型：{pendingRecovery.modelId}</div>
+                            <div>时间：{new Date(pendingRecovery.timestamp).toLocaleString()}</div>
+                        </div>
+                        {recoveryError && (
+                            <p role='alert' className='mb-3 text-[11px] text-red-400'>{recoveryError}</p>
+                        )}
+                        <div className='flex items-center justify-end gap-2'>
+                            <button
+                                type='button'
+                                disabled={isRecoveryBusy}
+                                onClick={discardRecovery}
+                                className='rounded-lg border border-white/10 px-3 py-1.5 text-[11px] text-white/60 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-40'
+                            >
+                                放弃本次恢复
+                            </button>
+                            <button
+                                type='button'
+                                autoFocus
+                                disabled={isRecoveryBusy || isLoading}
+                                onClick={continueRecovery}
+                                className='flex items-center gap-1.5 rounded-lg bg-emerald-600/90 px-3 py-1.5 text-[11px] font-bold text-white transition-colors hover:bg-emerald-500 disabled:opacity-40'
+                            >
+                                {isRecoveryBusy ? <Loader2 className='h-3 w-3 animate-spin' /> : null}
+                                继续完成任务
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* 清空历史确认弹窗（React 自定义弹窗，替代 Electron 下有焦点副作用的 window.confirm） */}
             {isClearConfirmOpen && (

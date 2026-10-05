@@ -4,7 +4,7 @@ import { USER_ID } from "@/config";
 import { useAgentContext, useTodoContext, useProblemContext } from "@/providers/AgentContext";
 import { clearWorkspaceChatHistory, db, recordTokenUsage, type TokenUsage } from "@/services/db";
 import { createClientId } from "@/utils/id";
-import { electronBridge } from "@/services/electron-bridge";
+import { electronBridge, type AgentRecoveryInfo } from "@/services/electron-bridge";
 
 export interface MessagePart {
     id: string;
@@ -361,8 +361,11 @@ export function useAgentSSE() {
         setIsLoading(false);
     }, []);
 
-    const append = useCallback(async (msg: { id: string, role: 'user', content: string }) => {
-        if (!workspaceRoot) return;
+    const append = useCallback(async (
+        msg: { id: string, role: 'user', content: string },
+        recovery?: Pick<AgentRecoveryInfo, 'requestIndex' | 'traceId'>,
+    ): Promise<boolean> => {
+        if (!workspaceRoot) return false;
         
         setIsLoading(true);
         setInput("");
@@ -372,7 +375,7 @@ export function useAgentSSE() {
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
-        const currentTraceId = createClientId(); // 1. 前端强制生成 TraceID
+        const currentTraceId = recovery?.traceId || createClientId(); // 1. 前端强制生成 TraceID
 
         // 构建编辑器上下文（附加到用户消息，前端聊天窗口可见 + 后端 Agent 可感知）
         const ctx = editorContextRef.current;
@@ -398,7 +401,7 @@ export function useAgentSSE() {
                 ].join('\n');
             }
         }
-        const userInstruct = msg.content + (editorContext || '');
+        const userInstruct = recovery ? msg.content : msg.content + (editorContext || '');
 
         const userVisibleContent = capRenderedText(userInstruct, '用户输入');
         const userMsg: Message = { 
@@ -857,6 +860,7 @@ export function useAgentSSE() {
                     model,
                     traceId: currentTraceId,
                     reasoningEffort: reasoningEffortValue,
+                    recoveryRequestIndex: recovery?.requestIndex,
                 },
                 (chunk) => {
                     processStreamChunk(chunk);
@@ -870,6 +874,7 @@ export function useAgentSSE() {
                 rafId = null;
             }
             flushAllPending();
+            return !receivedErrorRef.current && !controller.signal.aborted;
         } catch (e: any) { 
             // 异常时也刷新剩余的 pending
             if (rafId !== null) {
@@ -886,7 +891,7 @@ export function useAgentSSE() {
                 console.error("SSE Connection Error:", e);
                 // 若错误已通过流内 error 事件渲染过，则不再重复创建错误消息，
                 // 避免同一错误在界面中出现两次。
-                if (receivedErrorRef.current) return;
+                if (receivedErrorRef.current) return false;
                 const errorMsg: Message = { 
                     id: createClientId(), 
                     role: 'assistant', 
@@ -897,6 +902,7 @@ export function useAgentSSE() {
                 };
                 setMessages(prev => trimMessagesForMemory([...prev, errorMsg]));
             }
+            return false;
         } finally { 
             setIsLoading(false); 
             abortControllerRef.current = null;
@@ -906,6 +912,14 @@ export function useAgentSSE() {
             }
         }
     }, [workspaceRoot, locale, provider, model, settings]);
+
+    const resume = useCallback(async (recovery: Pick<AgentRecoveryInfo, 'requestIndex' | 'traceId'>) => {
+        return append({
+            id: createClientId(),
+            role: 'user',
+            content: '继续完成上次未完成的对话任务',
+        }, recovery);
+    }, [append]);
 
     const clearHistory = useCallback(async () => {
         if (!workspaceRoot) return;
@@ -948,6 +962,7 @@ export function useAgentSSE() {
         handleSubmit,
         clearHistory,
         append,
+        resume,
         stop
     };
 }

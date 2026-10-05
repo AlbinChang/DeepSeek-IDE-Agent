@@ -40,6 +40,8 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
 
             // 记录用户工作区
             userWorkspaces.set(userId, root);
+            const { LLMRequestJournal } = await import('@/services/LLMRequestJournal.js');
+            LLMRequestJournal.getInstance().trackWorkspace(root);
 
             // 创建必要的目录结构
             const llmDir = path.join(root, '.llm', 'users', userId);

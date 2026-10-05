@@ -86,6 +86,9 @@ release/
 # 忽略用户自定义 LLM 配置目录（包含 API Key）
 .llm/
 
+# 忽略 Agent 请求恢复上下文（可能包含用户指令和工作区内容）
+.llm-request/
+
 # 忽略运行时记忆目录（用户指令与防重复犯错记忆）
 .memory/
 

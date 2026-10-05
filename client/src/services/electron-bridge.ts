@@ -66,6 +66,16 @@ export interface AgentSSEPayload {
     usage?: AgentTokenUsage;
 }
 
+export interface AgentRecoveryInfo {
+    requestIndex: number;
+    userId: string;
+    modelId: string;
+    providerId?: string;
+    agentStage: '主Agent' | '评估Agent';
+    timestamp: number;
+    traceId?: string;
+}
+
 // ── 统一接口（仅 IPC 路径） ──
 export const electronBridge = {
     // 兼容旧代码的 isElectron 字段，始终为 true
@@ -82,6 +92,7 @@ export const electronBridge = {
             reasoningEffort?: 'default' | 'low' | 'high' | 'max';
             provider?: string;
             model?: string;
+            recoveryRequestIndex?: number;
         },
         onEvent: (event: AgentSSEPayload) => void,
         abortSignal?: AbortSignal
@@ -163,6 +174,20 @@ export const electronBridge = {
     /** 清空会话（含 TODO 持久化清理） */
     async clearSession(params: { userId: string; workspaceRoot?: string }): Promise<{ success: boolean; error?: string }> {
         return callIpc('clearSession', [params]);
+    },
+    async getAgentRecovery(params: { userId: string; root: string }): Promise<{
+        success: boolean;
+        recovery: AgentRecoveryInfo | null;
+        error?: string;
+    }> {
+        return callIpc('getAgentRecovery', [params]);
+    },
+    async discardAgentRecovery(params: {
+        userId: string;
+        root: string;
+        requestIndex: number;
+    }): Promise<{ success: boolean; error?: string }> {
+        return callIpc('discardAgentRecovery', [params]);
     },
 
     // ═══ File Operations ═══

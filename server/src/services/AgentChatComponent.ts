@@ -10,8 +10,25 @@ import { MessagePreparationService } from "@/services/MessagePreparationService.
 import { FileIO } from "@/utils/FileIO.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 import { accumulateTokenUsage, type TokenUsage } from "@/utils/TokenUsage.js";
+import {
+    LLMRequestJournal,
+    type LLMRequestRecord,
+} from "@/services/LLMRequestJournal.js";
 
 const getTS = () => getBeijingLogTimePrefix();
+
+function extractSessionHistory(record: LLMRequestRecord, pinnedUserMessage?: string): any[] {
+    const messages = record.payload.messages.filter((message: any) => message?.role !== "system");
+    if (typeof pinnedUserMessage === "string") {
+        for (let index = messages.length - 1; index >= 0; index--) {
+            if (messages[index]?.role === "user" && messages[index]?.content === pinnedUserMessage) {
+                messages.splice(index, 1);
+                break;
+            }
+        }
+    }
+    return messages;
+}
 
 export class AgentChatComponent {
     private static instance: AgentChatComponent;
@@ -29,6 +46,9 @@ export class AgentChatComponent {
         agentService.clearSessionHistory(userId, root);
         if (root) {
             console.log(`${getTS()} [AgentChat] Clearing session history for user: ${userId} in workspace: ${root}`);
+            void LLMRequestJournal.getInstance().discardPendingForUser(root, userId).catch((err) => {
+                console.error(`${getTS()} [AgentChat] Failed to discard pending recovery for user ${userId}:`, err);
+            });
             TodoService.clearAllTodos(root, userId).catch((err) => {
                 console.error(`${getTS()} [AgentChat] Failed to clear todos for user ${userId}:`, err);
             });
@@ -55,6 +75,7 @@ export class AgentChatComponent {
         providerConfig?: ModelProviderConfig,
         workspaceRoot?: string,
         requestId?: string,
+        resumeRequest?: LLMRequestRecord,
     ) {
         // [DAU STATS] 记录日活：每次用户发起对话均计入活跃用户统计
         TelemetryService.recordActiveUser(userId);
@@ -66,7 +87,9 @@ export class AgentChatComponent {
             modelId: modelId || providerConfig?.modelId,
         });
         const finalModelId = resolvedProvider.modelId;
-        const currentTraceId = traceId;
+        const currentTraceId = resumeRequest?.metadata.traceId || traceId;
+        const recoveryContext = resumeRequest?.metadata.recoveryContext;
+        const effectiveUserInstruct = recoveryContext?.userInstruction ?? userInstruct;
 
         const isoKey = agentService.getIsolationKey(userId, root);
         agentService.sessionLastAccess.set(isoKey, Date.now());
@@ -169,7 +192,9 @@ export class AgentChatComponent {
             emit({ type: "stage", content: "Agent 思考中..." });
             
             let storedHistory = agentService.getSessionHistory(userId, root);
-            const userInstructList = Array.isArray(userInstruct) ? userInstruct : [{ role: 'user', content: userInstruct }];
+            const userInstructList = Array.isArray(effectiveUserInstruct)
+                ? effectiveUserInstruct
+                : [{ role: 'user', content: effectiveUserInstruct }];
             const lastUserMsgRecord = [...userInstructList].reverse().find(m => m.role === "user");
             
             if (!lastUserMsgRecord) {
@@ -179,14 +204,16 @@ export class AgentChatComponent {
 
             // 写入长期记忆机制 + 播种缺失的 memory 文件
             const { MemoryService } = await import('./MemoryService.js');
-            await MemoryService.recordUserInstruction(root, lastUserMsgRecord.content);
+            if (!resumeRequest) {
+                await MemoryService.recordUserInstruction(root, lastUserMsgRecord.content);
+            }
             await MemoryService.ensureMemoryFiles(root);
 
             // 如果存在非终态任务，不清理历史，继续推进；仅在全部任务都为终态时才清理。
             const todosAtStart = await TodoService.getTodos(root, userId).catch(() => [] as any[]);
             const hasNonTerminalAtStart = todosAtStart.some(isNonTerminalTodo);
 
-            if (!hasNonTerminalAtStart) {
+            if (!hasNonTerminalAtStart && !resumeRequest) {
                 try { await TodoService.clearAllTodos(root, userId); } catch (err) {}
                 console.log(`${getTS()} [AgentChat] No pending TODOs, clearing session history for user: ${userId}`);
                 emit({ type: "annotation", method: "todo/update", params: { todos: [] } });
@@ -197,8 +224,41 @@ export class AgentChatComponent {
                 emit({ type: "annotation", method: "todo/update", params: { todos: todosAtStart } });
             }
 
-            const historyToOptimize = [...storedHistory];
-            const { messages: optimizedMessages } = await HistoryOptimizerService.getInstance().optimizeHistory(historyToOptimize, userId, root);
+            let optimizedMessages: any[];
+            if (resumeRequest?.metadata.agentStage === "主Agent") {
+                optimizedMessages = extractSessionHistory(
+                    resumeRequest,
+                    recoveryContext?.pinnedUserMessage,
+                );
+            } else if (resumeRequest?.metadata.agentStage === "评估Agent") {
+                const mainAgentRequest = resumeRequest.metadata.traceId
+                    ? await LLMRequestJournal.getInstance().findLatestPendingRequestForTrace(
+                        root,
+                        userId,
+                        resumeRequest.metadata.traceId,
+                        "主Agent",
+                    )
+                    : null;
+                optimizedMessages = mainAgentRequest
+                    ? extractSessionHistory(mainAgentRequest, mainAgentRequest.metadata.recoveryContext?.pinnedUserMessage)
+                    : storedHistory;
+
+                const mainAgentFinalReply = recoveryContext?.mainAgentFinalReply;
+                if (typeof mainAgentFinalReply === "string" && mainAgentFinalReply) {
+                    agentService.updateSessionHistory(
+                        userId,
+                        [
+                            ...optimizedMessages,
+                            lastUserMsgRecord,
+                            { role: "assistant", content: mainAgentFinalReply },
+                        ],
+                        root,
+                    );
+                }
+            } else {
+                const historyToOptimize = [...storedHistory];
+                ({ messages: optimizedMessages } = await HistoryOptimizerService.getInstance().optimizeHistory(historyToOptimize, userId, root));
+            }
             
             const finalLocale = locale || "zh-CN";
             const firstUserIntent = lastUserMsgRecord.content;
@@ -206,7 +266,7 @@ export class AgentChatComponent {
             // 当前置顶（pinned）用户消息：普通轮次为原始用户意图；
             // 进入迭代修复轮后切换为评估报告的修复指令，避免 prepareMessages
             // 重建时把修复指令丢失并重新注入原始意图（导致评估反馈闭环断裂）。
-            let currentPinnedUserMessage = firstUserIntent;
+            let currentPinnedUserMessage = recoveryContext?.pinnedUserMessage || firstUserIntent;
             
             const prepareMessages = async (msgs: any[]) => {
                 const systemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId);
@@ -218,7 +278,9 @@ export class AgentChatComponent {
                 });
             };
 
-            let activeHistory = await prepareMessages(optimizedMessages);
+            let activeHistory = resumeRequest
+                ? [...resumeRequest.payload.messages]
+                : await prepareMessages(optimizedMessages);
             const toolsMetadata = agentService.getSharedToolsMetadata();
 
             const client = AIProviderFactory.getClient(resolvedProvider);
@@ -229,10 +291,128 @@ export class AgentChatComponent {
             let evaluatorRepairConfirmationRetries = 0;
             let mainAgentFinalReply = "";
             let totalUsage: TokenUsage | null = null;
+            let pendingResumeRequest = resumeRequest?.metadata.agentStage === "主Agent"
+                ? resumeRequest
+                : undefined;
+
+            const markTraceCompleted = async () => {
+                try {
+                    await LLMRequestJournal.getInstance().completeTrace(root, userId, currentTraceId);
+                } catch (error) {
+                    console.error(`${getTS()} [AgentChat] Failed to mark trace ${currentTraceId} completed:`, error);
+                    emit({ type: "stage", content: "任务已完成，但恢复状态未能更新；下次启动时可能再次提示该任务。" });
+                }
+            };
+
+            const runEvaluation = async (mainReply: string, initialRequest?: LLMRequestRecord) => {
+                emit({ type: "stage", content: "评估Agent正在核验工作区产出并生成评估报告..." });
+                const result = await EvaluationAgentService.getInstance().runEvaluation({
+                    agentService,
+                    root,
+                    userId,
+                    traceId: currentTraceId,
+                    requestId,
+                    locale: finalLocale,
+                    abortSignal,
+                    emit,
+                    providerConfig: resolvedProvider,
+                    modelId: finalModelId,
+                    thinkingOptions: AIProviderFactory.buildThinkingOptions(resolvedProvider, effectiveReasoningEffort, 'evaluator-agent', root),
+                    userInstruction: String(lastUserMsgRecord?.content || ""),
+                    mainAgentFinalReply: mainReply,
+                    resumeRequest: initialRequest,
+                });
+                totalUsage = accumulateTokenUsage(totalUsage, result.usage);
+                return result;
+            };
+
+            const handleEvaluationResult = async (
+                evaluationResult: Awaited<ReturnType<typeof runEvaluation>>,
+                mainReply: string,
+            ): Promise<"continue" | "done"> => {
+                if (evaluationResult.decision === "continue_main_agent") {
+                    pendingEvaluatorRepairDirective = {
+                        finalReply: evaluationResult.finalReply || "",
+                    };
+                    evaluatorRepairConfirmationRetries = 0;
+                    console.log(`${getTS()} [AgentChat] Evaluator requested main agent iteration for user: ${userId}, resetting previous iteration history to avoid context pollution.`);
+                    try {
+                        await TodoService.clearAllTodos(root, userId);
+                        emit({ type: "annotation", method: "todo/update", params: { todos: [] } });
+                    } catch (todoResetErr) {
+                        console.warn(`${getTS()} [AgentChat] Failed to clear stale TODOs before re-iteration for user: ${userId}`, todoResetErr);
+                    }
+                    const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId);
+                    const evaluatorReport = evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)";
+                    const iterationUserContent = [
+                        "【迭代修复模式 — 评估Agent 已发现问题，请立即在原文件上逐项修复】",
+                        "",
+                        "你已经执行过一轮用户原始需求（见下方「原始需求」），并产出了交付物。",
+                        "评估Agent 已完成审查并发现若干问题。你当前处于迭代修复阶段，不是首次执行。",
+                        "",
+                        "你的唯一任务：解析下方评估报告中的「可直接修复清单」，按 P0 → P1 → P2 → P3 优先级，",
+                        "在原目标文件上逐项执行最小必要修改。每修复一项，更新 TODO 状态。",
+                        "",
+                        "铁律：",
+                        "- 禁止把原始需求当作新任务重新规划、重新执行、重新生成",
+                        "- 禁止新建 V2/V3/修正版/最终版 等平行文件绕开问题",
+                        "- 必须先读取目标文件，再在原文件上局部替换/插入/删除",
+                        "- 评估报告已给出文件路径和修复动作 → 视为已有修复授权，直接修复，不要询问用户",
+                        "- 只有缺少外部素材、账号授权或无法定位目标文件时，才可请求用户介入",
+                        "",
+                        "【原始需求（仅供参考，不要重新执行）】",
+                        firstUserIntent,
+                        "",
+                        "【评估Agent 的评估报告 — 包含可直接修复清单】",
+                        evaluatorReport,
+                    ].join("\n");
+                    currentPinnedUserMessage = iterationUserContent;
+                    activeHistory = [
+                        { role: "system", content: iterSystemPrompt },
+                        { role: "user", content: iterationUserContent },
+                    ];
+                    emit({ type: "stage", content: "评估完成：需要继续迭代，主Agent正在根据评估报告执行下一轮..." });
+                    return "continue";
+                }
+
+                console.log(`${getTS()} [AgentChat] Evaluator returned terminal decision (${evaluationResult.decision}) for user: ${userId}`);
+                const decisionLabel =
+                    evaluationResult.decision === "goal_achieved" ? "已经达成目标" :
+                    evaluationResult.decision === "goal_unachievable" ? "条件不满足、目标无法达成" :
+                    evaluationResult.decision === "need_user_input" ? "需要用户进一步操作或提供信息" :
+                    "需要主Agent继续迭代";
+
+                if (evaluationResult.decision === "goal_achieved") {
+                    emit({ type: "stage", content: "评估Agent核验通过：已达成目标。" });
+                }
+
+                await markTraceCompleted();
+                clearPromptCache();
+                emit({
+                    type: "done",
+                    content: mainReply || `评估已完成：${decisionLabel}。`,
+                    usage: totalUsage,
+                });
+                return "done";
+            };
+
+            if (resumeRequest?.metadata.agentStage === "评估Agent") {
+                const recoveredMainReply = recoveryContext?.mainAgentFinalReply;
+                if (typeof recoveredMainReply !== "string" || !recoveredMainReply) {
+                    throw new Error("恢复评估Agent请求失败：恢复记录缺少主Agent最终回复上下文");
+                }
+                mainAgentFinalReply = recoveredMainReply;
+                const evaluationResult = await runEvaluation(mainAgentFinalReply, resumeRequest);
+                if (await handleEvaluationResult(evaluationResult, mainAgentFinalReply) === "done") {
+                    return;
+                }
+            }
 
             while(true)
             {
                 // 执行 Agent 轮次引擎（AI 流式调用 → 工具执行 → 循环，直到无工具调用为止）
+                const initialResumeRequest = pendingResumeRequest;
+                pendingResumeRequest = undefined;
                 const turnResult = await AgentTurnEngine.runTurns({
                     client,
                     finalModelId,
@@ -251,6 +431,12 @@ export class AgentChatComponent {
                     startTimeStamp,
                     totalSteps,
                     provider: resolvedProvider,
+                    agentStage: "主Agent",
+                    recoveryContext: {
+                        userInstruction: String(lastUserMsgRecord?.content || ""),
+                        pinnedUserMessage: currentPinnedUserMessage,
+                    },
+                    resumeRequest: initialResumeRequest,
                 });
 
                 activeHistory = turnResult.activeHistory;
@@ -278,6 +464,7 @@ export class AgentChatComponent {
                         continue;
                     }
                     console.log(`${getTS()} [AgentChat] Main agent is waiting for user input/decision, exiting loop for user: ${userId}`);
+                    await markTraceCompleted();
                     clearPromptCache();
                     emit({
                         type: "done",
@@ -325,6 +512,7 @@ export class AgentChatComponent {
                         ? "任务已结束（未达成目标）。"
                         : "目标已达成，结束对话。";
                     console.log(`${getTS()} [AgentChat] All TODOs terminal (${todos.length} items), ending chat loop for user: ${userId}`);
+                    await markTraceCompleted();
                     clearPromptCache();
                     emit({ type: "done", content: mainAgentFinalReply || statusText, usage: totalUsage });
                     return;
@@ -421,6 +609,7 @@ export class AgentChatComponent {
                         emit({ type: "stage", content: "评估Agent核验通过：已达成目标。" });
                     }
 
+                    await markTraceCompleted();
                     clearPromptCache();
                     emit({
                         type: "done",

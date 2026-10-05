@@ -35,6 +35,7 @@ import { setupContextWebSocket } from '@/services/ContextWebSocket.js';
 import { setupCompletionWebSocket } from '@/services/CompletionWebSocket.js';
 import { EventDistributor } from '@/services/EventDistributor.js';
 import { AgentService } from '@/services/AgentService.js';
+import { LLMRequestJournal } from '@/services/LLMRequestJournal.js';
 import { CompletionService } from '@/services/CompletionService.js';
 import { TelemetryService } from '@/services/TelemetryService.js';
 import { SettingsService, UserSettings, ModelProviderConfig } from '@/services/SettingsService.js';
@@ -967,6 +968,12 @@ async function bootstrap() {
             
             // 1. 停止接收新请求
             await server.close();
+
+            try {
+                await LLMRequestJournal.getInstance().markNormalShutdown();
+            } catch (error) {
+                server.log.error({ err: error }, 'Failed to persist normal-shutdown recovery markers');
+            }
             
             console.log('[Server] Cleanup complete. Goodbye.');
             process.exit(0);
@@ -981,4 +988,3 @@ async function bootstrap() {
 }
 
 bootstrap();
-

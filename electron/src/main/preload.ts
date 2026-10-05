@@ -20,6 +20,8 @@ export interface ElectronAPI {
     startAgentChat: (params: AgentChatParams) => Promise<string>; // 返回 streamId
     cancelAgentChat: (streamId: string) => void;
     clearSession: (params: { userId: string; workspaceRoot?: string }) => Promise<{ success: boolean; error?: string }>;
+    getAgentRecovery: (params: { userId: string; root: string }) => Promise<{ success: boolean; recovery: AgentRecoveryInfo | null; error?: string }>;
+    discardAgentRecovery: (params: { userId: string; root: string; requestIndex: number }) => Promise<{ success: boolean; error?: string }>;
     onAgentEvent: (callback: (event: AgentEvent) => void) => () => void; // 返回取消订阅函数
 
     // 文件操作（替换 REST /api/files/*）
@@ -92,6 +94,17 @@ interface AgentChatParams {
     reasoningEffort?: 'default' | 'low' | 'high' | 'max';
     provider?: string;
     model?: string;
+    recoveryRequestIndex?: number;
+}
+
+interface AgentRecoveryInfo {
+    requestIndex: number;
+    userId: string;
+    modelId: string;
+    providerId?: string;
+    agentStage: '主Agent' | '评估Agent';
+    timestamp: number;
+    traceId?: string;
 }
 
 interface AgentEvent {
@@ -201,6 +214,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     startAgentChat: (params: AgentChatParams) => ipcRenderer.invoke('agent:chat', params),
     cancelAgentChat: (streamId: string) => ipcRenderer.send('agent:cancel', streamId),
     clearSession: (params: { userId: string; workspaceRoot?: string }) => ipcRenderer.invoke('agent:clear', params),
+    getAgentRecovery: (params: { userId: string; root: string }) => ipcRenderer.invoke('agent:recovery:get', params),
+    discardAgentRecovery: (params: { userId: string; root: string; requestIndex: number }) => ipcRenderer.invoke('agent:recovery:discard', params),
     onAgentEvent: (callback: (event: AgentEvent) => void) => {
         const handler = (_event: IpcRendererEvent, data: AgentEvent) => callback(data);
         ipcRenderer.on('agent:event', handler);

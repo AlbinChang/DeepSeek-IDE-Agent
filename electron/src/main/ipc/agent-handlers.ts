@@ -9,6 +9,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'path';
 import { PROJECT_ROOT, SERVER_SRC, CONFIG_ROOT } from '../index.js';
+import type { LLMRequestJournal, LLMRequestRecord } from '@/services/LLMRequestJournal.js';
 
 // 动态导入 server 模块（tsx 会自动处理 @/ 路径别名）
 // 注意：运行时 tsx 会从 server/tsconfig.json 解析 @/ → ./src/
@@ -44,6 +45,11 @@ async function getAgentChatComponent(): Promise<any> {
     const { AgentChatComponent } = await import('@/services/AgentChatComponent.js');
     agentChatComponentInstance = AgentChatComponent.getInstance();
     return agentChatComponentInstance;
+}
+
+async function getLLMRequestJournal(): Promise<LLMRequestJournal> {
+    const { LLMRequestJournal } = await import('@/services/LLMRequestJournal.js');
+    return LLMRequestJournal.getInstance();
 }
 
 /**
@@ -109,6 +115,45 @@ async function resolveProviderConfig(
 }
 
 export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
+
+    ipcMain.handle('agent:recovery:get', async (_event, params: { userId: string; root: string }) => {
+        try {
+            const journal = await getLLMRequestJournal();
+            const record = await journal.getPendingRecovery(params.root, params.userId);
+            return {
+                success: true,
+                recovery: record
+                    ? {
+                        requestIndex: record.requestIndex,
+                        userId: record.metadata.userId,
+                        modelId: record.metadata.modelId,
+                        providerId: record.metadata.providerId,
+                        agentStage: record.metadata.agentStage,
+                        timestamp: record.metadata.timestamp,
+                        traceId: record.metadata.traceId,
+                    }
+                    : null,
+            };
+        } catch (error: any) {
+            console.error('[AgentIPC] Failed to check agent recovery:', error);
+            return { success: false, recovery: null, error: error?.message || String(error) };
+        }
+    });
+
+    ipcMain.handle('agent:recovery:discard', async (_event, params: {
+        userId: string;
+        root: string;
+        requestIndex: number;
+    }) => {
+        try {
+            const journal = await getLLMRequestJournal();
+            await journal.discardRecovery(params.root, params.userId, params.requestIndex);
+            return { success: true };
+        } catch (error: any) {
+            console.error('[AgentIPC] Failed to discard agent recovery:', error);
+            return { success: false, error: error?.message || String(error) };
+        }
+    });
     
     // ── 启动 Agent 对话 ──
     ipcMain.handle('agent:chat', async (_event, params) => {
@@ -122,6 +167,7 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
             reasoningEffort,
             provider,
             model,
+            recoveryRequestIndex,
         } = params;
 
         console.log(`[AgentIPC] Starting chat: streamId=${streamId}, userId=${userId}, traceId=${traceId}`);
@@ -145,14 +191,38 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                 const agentService = await getAgentService();
                 const agentChatComponent = await getAgentChatComponent();
 
+                let recoveryRequest: LLMRequestRecord | undefined;
+                if (recoveryRequestIndex !== undefined) {
+                    if (!root) {
+                        throw new Error('Cannot resume an Agent request without its workspace root');
+                    }
+                    const journal = await getLLMRequestJournal();
+                    recoveryRequest = await journal.readPendingRequest(root, userId, recoveryRequestIndex);
+                }
+
                 // 从持久化存储读取用户设置，解析实际 API key 与模型配置
-                const resolved = await resolveProviderConfig(userId, root, provider, model);
+                const resolved = await resolveProviderConfig(
+                    userId,
+                    root,
+                    recoveryRequest?.metadata.providerId || provider,
+                    recoveryRequest?.metadata.modelId || model,
+                );
+                if (recoveryRequest?.metadata.providerId && resolved.provider !== recoveryRequest.metadata.providerId) {
+                    throw new Error(
+                        `Cannot resume request: provider "${recoveryRequest.metadata.providerId}" is no longer configured`,
+                    );
+                }
+                const activeTraceId = recoveryRequest?.metadata.traceId || traceId;
+                const recoveredInstruction = recoveryRequest?.metadata.recoveryContext?.userInstruction;
+                const activeUserInstruction = typeof recoveredInstruction === 'string'
+                    ? recoveredInstruction
+                    : userInstruct;
 
                 // 发送初始化事件（使用解析后的 model，与 SSE 路径一致）
                 sendEvent({
                     type: 'init',
-                    traceId,
-                    model: resolved.modelId,
+                    traceId: activeTraceId,
+                    model: recoveryRequest?.metadata.modelId || resolved.modelId,
                     timestamp: Date.now(),
                 });
 
@@ -162,8 +232,8 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                     userId,
                     resolved.provider,
                     resolved.modelId,
-                    userInstruct, // 保持原始类型（string），与 SSE 路径一致
-                    traceId,
+                    activeUserInstruction, // 保持原始类型（string），与 SSE 路径一致
+                    activeTraceId,
                     locale,
                     abortController.signal,
                     (chunk: any) => {
@@ -195,6 +265,8 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                     reasoningEffort,
                     resolved.providerConfig,
                     root,
+                    undefined,
+                    recoveryRequest,
                 );
 
                 // 完成事件兜底（handleChat 在中断/异常路径可能未发送终态事件）

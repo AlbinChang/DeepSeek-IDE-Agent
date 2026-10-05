@@ -14,6 +14,17 @@ interface AgentChatParams {
     reasoningEffort?: 'default' | 'low' | 'high' | 'max';
     provider?: string;
     model?: string;
+    recoveryRequestIndex?: number;
+}
+
+interface AgentRecoveryInfo {
+    requestIndex: number;
+    userId: string;
+    modelId: string;
+    providerId?: string;
+    agentStage: '主Agent' | '评估Agent';
+    timestamp: number;
+    traceId?: string;
 }
 
 interface AgentEvent {
@@ -223,6 +234,8 @@ interface ElectronAPI {
     startAgentChat: (params: AgentChatParams) => Promise<string>;
     cancelAgentChat: (streamId: string) => void;
     clearSession: (params: { userId: string; workspaceRoot?: string }) => Promise<{ success: boolean; error?: string }>;
+    getAgentRecovery: (params: { userId: string; root: string }) => Promise<{ success: boolean; recovery: AgentRecoveryInfo | null; error?: string }>;
+    discardAgentRecovery: (params: { userId: string; root: string; requestIndex: number }) => Promise<{ success: boolean; error?: string }>;
     onAgentEvent: (callback: (event: AgentEvent) => void) => () => void;
 
     // Files

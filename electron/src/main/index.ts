@@ -195,6 +195,27 @@ app.whenReady().then(async () => {
     });
 });
 
+let normalShutdownStarted = false;
+let normalShutdownMarked = false;
+app.on('before-quit', (event) => {
+    if (normalShutdownMarked) return;
+    event.preventDefault();
+    if (normalShutdownStarted) return;
+
+    normalShutdownStarted = true;
+    void (async () => {
+        try {
+            const { LLMRequestJournal } = await import('@/services/LLMRequestJournal.js');
+            await LLMRequestJournal.getInstance().markNormalShutdown();
+        } catch (error) {
+            console.error('[Electron] Failed to persist normal-shutdown recovery markers:', error);
+        } finally {
+            normalShutdownMarked = true;
+            app.quit();
+        }
+    })();
+});
+
 // 所有窗口关闭时退出（macOS 除外）
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {

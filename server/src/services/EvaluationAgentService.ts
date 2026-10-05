@@ -7,6 +7,7 @@ import type { TokenUsage } from "@/utils/TokenUsage.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
 import { FileIO } from "@/utils/FileIO.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
+import type { LLMRequestRecord } from "@/services/LLMRequestJournal.js";
 
 /** 最近一次评估报告落盘路径（工作区相对路径，系统内部上下文补充文件） */
 const EVALUATION_REPORT_RELATIVE_PATH = ".evaluate/evl_result.md";
@@ -34,6 +35,7 @@ export interface EvaluationAgentInput {
     thinkingOptions: any;
     userInstruction: string;
     mainAgentFinalReply: string;
+    resumeRequest?: LLMRequestRecord;
 }
 
 export interface EvaluationAgentOutput {
@@ -76,6 +78,7 @@ export class EvaluationAgentService {
             thinkingOptions,
             userInstruction,
             mainAgentFinalReply,
+            resumeRequest,
         } = input;
 
         const evaluationTask = [
@@ -118,6 +121,7 @@ export class EvaluationAgentService {
         ].join("\n");
 
         const finalLocale = locale || "zh-CN";
+        const pinnedUserMessage = resumeRequest?.metadata.recoveryContext?.pinnedUserMessage || evaluationTask;
         const prepareMessages = async (msgs: any[]) => {
             const systemPrompt = await agentService.buildSystemPrompt(
                 userId,
@@ -128,7 +132,7 @@ export class EvaluationAgentService {
             );
             return MessagePreparationService.buildMessages({
                 systemPrompt,
-                pinnedUserMessage: evaluationTask,
+                pinnedUserMessage,
                 pinnedUserPrefix: "",
                 incomingMessages: msgs,
                 provider: providerConfig,
@@ -137,9 +141,13 @@ export class EvaluationAgentService {
 
         // 与主Agent一致：先走一遍历史压缩入口（评估Agent默认初始为空历史，后续可平滑扩展）
         const historyToOptimize: any[] = [];
-        const { messages: optimizedMessages } = await HistoryOptimizerService.getInstance().optimizeHistory(historyToOptimize, userId, root);
+        const optimizedMessages = resumeRequest
+            ? historyToOptimize
+            : (await HistoryOptimizerService.getInstance().optimizeHistory(historyToOptimize, userId, root)).messages;
 
-        const activeHistory = await prepareMessages(optimizedMessages);
+        const activeHistory = resumeRequest
+            ? resumeRequest.payload.messages
+            : await prepareMessages(optimizedMessages);
         const toolsMetadata = agentService.getSharedToolsMetadata();
 
         const client = AIProviderFactory.getClient(providerConfig);
@@ -171,6 +179,13 @@ export class EvaluationAgentService {
                 /** 评估Agent对话旅程独立存放，不污染主Agent持久化历史 */
                 skipPersist: true,
                 provider: providerConfig,
+                agentStage: "评估Agent",
+                recoveryContext: {
+                    userInstruction,
+                    pinnedUserMessage,
+                    mainAgentFinalReply,
+                },
+                resumeRequest,
             });
 
             turnResultUsage = turnResult.usage;
