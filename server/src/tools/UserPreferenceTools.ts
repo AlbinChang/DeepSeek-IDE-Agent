@@ -85,10 +85,7 @@ export class UserPreferenceTools {
         return [
             {
                 name: 'list_user_preferences',
-                description: [
-                    '读取用户偏好清单（.memory/user_preferences.json），按置信度倒序排列。',
-                    '系统提示词会自动注入高置信度偏好快照，默认不要重复调用，已有快照可直接参考。',
-                ].join(' '),
+                description: '读取已保存的用户偏好，按置信度降序返回。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -106,11 +103,7 @@ export class UserPreferenceTools {
             },
             {
                 name: 'upsert_user_preference',
-                description: [
-                    '⚠️ type 和 content 为必填参数，不可省略！新增或刷新用户偏好。每条偏好必须同时包含 type（偏好类型，如 model/style/language/behavior/timezone/format）和 content（偏好内容描述）。',
-                    '冲突淘汰策略：当新偏好与已有偏好矛盾时，先调用 list_user_preferences 获取冲突项 ID，再通过 conflictIds 参数显式传入需淘汰的旧偏好 ID。',
-                    '每当用户明确表达偏好（如"我不喜欢 emoji"、"用北京时间"、"优先用 DeepSeek"）时，必须立即调用 upsert 记录。',
-                ].join(' '),
+                description: '新增或更新用户偏好。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -123,7 +116,7 @@ export class UserPreferenceTools {
                         },
                         content: {
                             type: 'string',
-                            description: '偏好内容描述，清晰表达用户希望 Agent 遵循的行为或风格。例如：「所有时间使用北京时间（Asia/Shanghai）」「禁止在回复中使用 emoji」',
+                            description: '描述希望 Agent 遵循的偏好，如时间、语言或输出风格。',
                         },
                         source: {
                             type: 'string',
@@ -131,7 +124,7 @@ export class UserPreferenceTools {
                             description: '偏好来源：explicit=用户明确表达，inferred=Agent 从上下文推断。默认 explicit。',
                         },
                         conflictIds: {
-                            description: '与新偏好冲突、需要同步淘汰的旧偏好 ID。可以是单个 ID 字符串或 ID 字符串数组。先用 list_user_preferences 获取冲突项 ID，再一并传入。',
+                            description: '冲突后需淘汰的旧记录 ID。',
                             anyOf: [
                                 { type: 'string' },
                                 { type: 'array', items: { type: 'string' } }
@@ -143,7 +136,7 @@ export class UserPreferenceTools {
             },
             {
                 name: 'delete_user_preference',
-                description: '⚠️ ids 为必填参数，不可省略！删除过期或错误的用户偏好。通过 ids 参数传入一个或多个偏好 ID。',
+                description: '删除指定的用户偏好记录。',
                 parameters: {
                     type: 'object',
                     properties: {

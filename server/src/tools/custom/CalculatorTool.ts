@@ -237,40 +237,13 @@ function executeAndCapture(script: string, sandbox: Record<string, any>, timeout
  */
 export const CalculatorTool: ToolDefinition = {
     name: 'calculate',
-    description: `⚠️ expression 为必填参数，不可省略！JS 脚本执行器。当你需要精确计算、批量数据处理或多步逻辑推导时，用此工具代替脑中推算。
+    description: `精确数学与批量数据计算工具，支持单位/进制转换、字符串和日期运算。简单心算直接完成；文件、网络和终端任务使用对应工具。
 
-【应使用此工具的场景】
-• 精确数值计算 — 大数乘除、浮点运算、百分比、比例、三角函数
-  例: "1024 * 1024 / 20" | "sin(45 deg) * 2" | "sqrt(3^2 + 4^2)"
-• 批量数据处理 — 对数组/列表进行过滤、排序、统计、分组、变换
-  将数据通过 variables 传入，脚本中用 filter/map/reduce/sort 处理
-  例: variables={items:[1,5,10,3,8]} expression="return items.filter(x=>x>5).length"
-• 多步骤逻辑推导 — 条件判断、循环累加、分支决策等无法一步心算的逻辑
-  编写 JS 脚本，用 if/for/while 精确控制流程
-• 单位/进制换算 — 公里↔英里、摄氏度↔华氏度、字节↔KB/MB/GB、二进制↔十进制↔十六进制
-  例: "5 km to mile" | "1024 MB to GB" | "0xFF to number"
-• 字符串模式分析 — 正则匹配计数、子串查找、模式提取
-  例: variables={text:"TODO: fix\nDONE: test\nTODO: refactor"} expression="return (text.match(/TODO/g)||[]).length"
-• 日期时间运算 — 时间差、日期偏移、天数统计
-  例: "return Math.ceil((new Date('2026-06-15') - new Date('2026-05-31')) / 86400000)"
+【脚本】
+可调用 math.evaluate/math.unit；console.log/warn/error 输出收集到 logs。
 
-【不应使用此工具的情况】
-• 简单心算（个位数加减、10*2 等）→ 直接在脑中完成，无需工具调用
-• 文件读写、终端命令 → 使用 read_file / write_file / run_terminal
-• 网络请求、网页操作 → 使用 browser 系列工具
-• 需要持久化结果 → 先用 calculate 算出结果，再用 write_file 写入文件
-
-【两种执行模式（自动检测，无需手动指定）】
-模式一：表达式模式 — 单行纯数学表达式（无 JS 关键字/分号/大括号），使用 mathjs 引擎高精度求值
-模式二：脚本模式 — 含 JS 语法结构或多行代码，在 Node.js vm 安全沙箱中完整执行
-
-【脚本模式使用指南】
-• variables 中注入的变量直接作为脚本顶层变量使用（优先级最高，可覆盖内置 API）
-• 用 return 语句返回计算结果；若无 return，则以最后一个表达式值作为返回值
-• 脚本内可调用 math.evaluate(expr) 进行高精度数学子运算
-• 脚本内可调用 math.unit(value, "unit").to("targetUnit") 进行单位转换
-• 用 console.log(...) 输出调试信息（会收集在返回结果的 logs 字段）
-• 安全约束：沙箱仅含 JS 标准库 + mathjs 桥接；无 require/process/fs/net/setTimeout`,
+【安全】
+沙箱不提供 require/process/fs/net/child_process 等 API。`,
 
     parameters: {
         type: 'object',
@@ -278,16 +251,11 @@ export const CalculatorTool: ToolDefinition = {
             expression: {
                 type: 'string',
                 description:
-                    '待执行的 JS 代码或数学表达式。' +
-                    '单行纯数学 → mathjs 求值（如 "1024*1024/20"、"sin(45 deg)*2"、"5 km to mile"）。' +
-                    'JS 代码 → vm 沙箱执行，用 return 返回结果或将结果表达式放在末尾（如 "return items.filter(x=>x>5).length"、"let s=0; for(const n of nums)s+=n*n; return Math.sqrt(s)"）。',
+                    '单行纯数学表达式由 mathjs 求值；多行或含 JS 语法的内容由 vm 执行。脚本可用 return 或最后一个表达式返回结果。',
             },
             variables: {
                 type: 'object',
-                description:
-                    '注入脚本的变量。键值对会被提升为脚本顶层变量，可直接按变量名引用。' +
-                    '典型用法：将前序工具返回的数据（文件内容解析结果、列表、统计数据等）作为 variables 传入。' +
-                    '例：{ "items":[1,2,3], "threshold":100 } → 脚本中直接用 items、threshold。',
+                description: '脚本变量对象，键值会提升为顶层变量。',
             },
             timeout: {
                 type: 'number',

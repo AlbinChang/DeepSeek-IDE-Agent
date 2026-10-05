@@ -75,7 +75,7 @@ export class NeverMistakeTools {
         return [
             {
                 name: 'list_never_mistake_rules',
-                description: '读取防重复犯错记忆清单（.memory/never_mistake_again.json）。默认不要重复调用，系统提示词已注入最新快照。仅例外场景（如怀疑快照过期）时使用。',
+                description: '读取防重复犯错规则。',
                 parameters: {
                     type: 'object',
                     properties: {},
@@ -84,18 +84,18 @@ export class NeverMistakeTools {
             },
             {
                 name: 'append_never_mistake_rule',
-                description: '⚠️ entries 为必填参数，不可省略！追加或更新防重复犯错规则。每条必须同时包含 shouldNot（不应该做什么）和 shouldDo（应该做什么）。最多保留 20 条，溢出时自动淘汰最旧记录。工具调用自愈时必须使用此工具沉淀失败模式。',
+                description: '追加或更新防重复犯错规则。',
                 parameters: {
                     type: 'object',
                     properties: {
                         entries: {
                             type: 'array',
-                            description: '规则数组。每条必须包含 shouldNot 与 shouldDo。',
+                            description: '非空规则数组。',
                             items: {
                                 type: 'object',
                                 properties: {
-                                    shouldNot: { type: 'string', description: '不应该做什么（禁止行为）。概括失败模式而非引用具体文件路径。' },
-                                    shouldDo: { type: 'string', description: '应该做什么（已验证正确的替代做法）。' }
+                                    shouldNot: { type: 'string', description: '应避免的行为。' },
+                                    shouldDo: { type: 'string', description: '已验证的替代做法。' }
                                 },
                                 required: ['shouldNot', 'shouldDo']
                             }
@@ -106,7 +106,7 @@ export class NeverMistakeTools {
             },
             {
                 name: 'delete_never_mistake_rule',
-                description: '⚠️ ids 为必填参数，不可省略！删除过时或错误的防重复犯错规则。通过 ids 参数传入一个或多个规则 ID。',
+                description: '删除指定规则。',
                 parameters: {
                     type: 'object',
                     properties: {

@@ -421,10 +421,7 @@ export class BrowserMcpAdapter {
      * 构建桥接工具的描述文本
      */
     private buildToolDescription(nativeTool: PlaywrightNativeTool): string {
-        const parts: string[] = [];
-        parts.push(`[Playwright MCP] ${nativeTool.description || nativeTool.name}`);
-        parts.push('(浏览器自动化原生工具，由 Playwright MCP 服务器提供)');
-        return parts.join(' ');
+        return nativeTool.description?.trim() || nativeTool.name;
     }
 
     // ============================================================
@@ -627,19 +624,12 @@ export class BrowserMcpAdapter {
             '### 浏览器自动化工具 (BROWSER AUTOMATION VIA PLAYWRIGHT MCP)',
             `✅ Playwright MCP 已连接，共 ${state.tools.length} 个浏览器自动化工具可用。`,
             '',
-            '**工具命名规则**：所有 Playwright 工具以 `playwright__` 为前缀，后接原生工具名。',
-            '例如：`playwright__browser_navigate`、`playwright__browser_snapshot`、`playwright__browser_evaluate`。',
+            '**工具命名规则**：所有 Playwright 工具以 `playwright__` 为前缀。',
+            '工具名称、参数和用途说明由函数工具定义提供，此处不重复列出。',
             '',
             '**调用方式**：与内置工具完全相同，直接通过工具名调用即可。Playwright MCP 自动管理浏览器会话，无需手动 open/close。',
             '',
-            '**可用工具列表**：',
         ];
-
-        for (const tool of state.tools) {
-            const agentName = buildPlaywrightToolName(tool.name);
-            const desc = tool.description || '(无描述)';
-            lines.push(`- **\`${agentName}\`**: ${desc}`);
-        }
 
         lines.push('');
         lines.push('**使用策略**：');

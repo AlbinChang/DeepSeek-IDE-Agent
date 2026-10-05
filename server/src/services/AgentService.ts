@@ -165,13 +165,13 @@ export class AgentService extends EventEmitter {
         // 注册文件核心工具 (原子化 IO)
         this.toolManager.registerTool({
             name: 'read_file',
-            description: `⚠️ path 为必填参数，不可省略！读取文件内容。采用【行级索引】模式，单次读取上限 ${globalConfig.readFile.maxLines} 行，总内容上限约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB。若文件过大，请配合 startLine/lineCount 分段读取；若单行超过 ${globalConfig.readFile.longLineThreshold} 字符导致截断，请改用 read_file_by_byte。`,
+            description: `按行读取工作区文件。单次上限 ${globalConfig.readFile.maxLines} 行、约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段，超长行截断后改用 read_file_by_byte。`,
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '文件相对路径（必填）' },
+                    path: { type: 'string', description: '工作区相对路径。' },
                     startLine: { type: 'number', description: '起始行号（从 1 开始）。默认为 1。' },
-                    lineCount: { type: 'number', description: `要读取的行数。单次上限 ${globalConfig.readFile.maxLines} 行。` }
+                    lineCount: { type: 'number', description: '要读取的行数。' }
                 },
                 required: ['path']
             },
@@ -203,11 +203,11 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering read_file_by_byte...');
         this.toolManager.registerTool({
             name: 'read_file_by_byte',
-            description: '⚠️ path 为必填参数，不可省略！【特殊情况专用】按字节范围读取文件。仅在 read_file 因为单行超长被截断、或处理二进制/混淆后的单行代码时使用。不支持行号索引。',
+            description: '按字节范围读取；仅用于 read_file 的超长单行截断或二进制/混淆内容，不适用于普通文本读取。',
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '文件相对路径（必填）' },
+                    path: { type: 'string', description: '工作区相对路径。' },
                     offset: { type: 'number', description: '字节偏移量（从 0 开始）' },
                     length: { type: 'number', description: '读取字节长度（单次上限 2.5KB）' }
                 },
@@ -236,12 +236,12 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_write...');
         this.toolManager.registerTool({
             name: 'file_write',
-            description: '创建新文件或全量覆盖已有文件（单文件操作）。需要多文件写入时，通过多次 tool 调用分别传入每个文件即可。仅用于：① 新建文件（文件不存在时）；② 完全替换文件全部内容。单文件局部修改、插入、删除、文本替换必须使用 file_replace 或 file_insert。返回 status，语法错误时附加 syntax 字段。',
+            description: '创建文件或完整覆写现有文件；局部修改用 file_replace/file_insert，多处替换用 file_replace_all。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    content: { type: 'string', description: '文件的完整内容（新建或全量覆盖时使用）' },
+                    content: { type: 'string', description: '要写入的完整文本。' },
                     encoding: { type: 'string', description: '可选：指定写入编码（如 GBK、UTF-8）。仅对新建文件生效；已有文件自动沿用原编码。' }
                 },
                 required: ['path', 'content']
@@ -287,12 +287,12 @@ export class AgentService extends EventEmitter {
         // 补全文件系统工具：listFiles, searchFiles, deletePath
         this.toolManager.registerTool({
             name: 'list_files',
-            description: `⚠️ depth 为必填参数，不可省略！获取目录结构（受控递归）。depth 是递归深度（1-10），必须显式传入，例如 {"depth": 2}。1 表示仅当前目录下一层。path 为可选参数，默认为 "."。返回紧凑树形文本（目录以 / 结尾，文件直接显示路径），上限 1200 项。`,
+            description: '列出工作区目录树（目录以 / 结尾，最多 1200 项）。',
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '目录相对路径，默认为 "."（可选）' },
-                    depth: { type: 'number', description: '必填：递归深度（整数，范围 1-10）。1 表示仅当前目录下一层。' }
+                    path: { type: 'string', description: '目录相对路径；默认为 "."。' },
+                    depth: { type: 'number', description: '递归深度（1-10）。' }
                 },
                 required: ['depth']
             },
@@ -320,7 +320,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering delete_path...');
         this.toolManager.registerTool({
             name: 'delete_path',
-            description: '⚠️ path 为必填参数，不可省略！删除文件或目录。\n\n【⛔ 严禁误用】禁止将 delete_path + file_write 组合作为"修复文件内容错误"的手段。\n修改文件内容（无论是修一行还是重写某段）请使用 file_replace 或 file_insert。\ndelete_path 仅用于真正需要物理删除文件/目录的场景（如清理生成产物、移除不再需要的文件）。',
+            description: '物理删除文件或目录；禁止将其用于内容修复，修改请用 file_replace 或 file_insert。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -340,13 +340,13 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_replace...');
         this.toolManager.registerTool({
             name: 'file_replace',
-            description: '文件精准替换工具。基于 oldText 全文精准匹配后替换为 newText，无需行号，消除 off-by-one 幻觉风险。\n\noldText 必须与文件中原文完全一致（含空白、缩进、换行）。若 oldText 出现在多处，系统返回歧义错误（列出所有行号），需增加上下文使 oldText 唯一。newText 为空字符串 "" 表示删除 oldText。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
+            description: '在文件中精确替换唯一匹配的 oldText；匹配多处时返回歧义错误，newText 为空时删除匹配内容。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    oldText: { type: 'string', description: '要被替换的原文，必须与文件中内容完全一致（含空白、缩进、换行）。若匹配多处会返回歧义错误。' },
-                    newText: { type: 'string', description: '替换后的新文本。传空字符串 "" 即删除 oldText。' }
+                    oldText: { type: 'string', description: '原文片段。' },
+                    newText: { type: 'string', description: '替换文本。' }
                 },
                 required: ['path', 'oldText', 'newText']
             },
@@ -397,13 +397,13 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_insert...');
         this.toolManager.registerTool({
             name: 'file_insert',
-            description: '文件行级插入工具。在指定行号 startLine 前插入 newText。\n\nstartLine=1 在文件开头插入；startLine=N+1 在末尾追加。\n\n需要多文件编辑时，通过多次 tool 调用分别传入每个文件即可。\n\n返回 newTotalLines / contextSnapshot，语法错误时附加 syntax 字段。',
+            description: '在 startLine 指定的行号前插入内容；文件总行数 + 1 表示追加到末尾。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    startLine: { type: 'integer', minimum: 1, description: '插入目标行号（>=1）。在指定行之前插入 newText。' },
-                    newText: { type: 'string', description: '要插入的新文本。' }
+                    startLine: { type: 'integer', minimum: 1, description: '起始行号（从 1 开始）。' },
+                    newText: { type: 'string', description: '要插入的文本。' }
                 },
                 required: ['path', 'startLine', 'newText']
             },
@@ -453,13 +453,13 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_replace_all...');
         this.toolManager.registerTool({
             name: 'file_replace_all',
-            description: '文档关键词全局替换工具。将文件中**所有**出现的 oldText 替换为 newText，无需担心遗漏。\n\n与 file_replace（仅替换首次出现/需要唯一匹配）不同，本工具会替换文件中每一个匹配项，适合：\n- 全局重命名变量/函数/类名\n- 修正文档中的术语拼写\n- 统一格式化标记（如将所有制表符替换为空格）\n- 批量更新引用路径\n\n⚠️ 注意事项：\n- oldText 会作为**纯文本**进行精确匹配（含空白、缩进），不是正则表达式\n- 若未找到任何匹配项，返回错误并提示用户确认\n- 返回替换次数、替换行号列表和操作后上下文快照',
+            description: '将文件中所有字面匹配的 oldText 替换为 newText，适合批量重命名、术语或格式调整。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    oldText: { type: 'string', description: '要被替换的原文（纯文本精确匹配，含空白、缩进）。文件中所有出现该文本的地方都会被替换。' },
-                    newText: { type: 'string', description: '替换后的新文本。传空字符串 "" 即删除所有出现的 oldText。' }
+                    oldText: { type: 'string', description: '待匹配文本。' },
+                    newText: { type: 'string', description: '替换文本；空字符串表示删除匹配项。' }
                 },
                 required: ['path', 'oldText', 'newText']
             },
@@ -512,12 +512,12 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_powershell_command...');
         this.toolManager.registerTool({
             name: 'run_powershell_command',
-            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 PowerShell 中执行命令（阻塞式，等待完成后返回结果）。跨平台：Windows 调用 powershell.exe，Linux/macOS 调用 pwsh。command 直接写 PowerShell 原生命令体，禁止嵌套 shell 启动器。PS 5.1 不支持 &&，用 ; 分隔命令。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。通过本工具启动的进程（含后台任务）可被后续 kill 类命令按 PID 正常终止（taskkill /F /T /PID <pid> 或 Stop-Process -Id <pid> -Force）。\n\n【JSON 传参免转义】命令字符串优先用单引号包裹文本（JSON 中无需转义），路径优先用正斜杠 C:/xxx（避免反斜杠转义），JSON 体用 here-string @\'...\'@ 包裹，多行用 ; 分隔。详细策略见系统提示词 powershell_quoting_contract。完整输出自动持久化到 .command/output.txt，长输出场景下请用 read_file 按需检索完整内容。',
+            description: '在工作区执行 PowerShell 命令。',
             parameters: {
                 type: 'object',
                 properties: {
                     command: { type: 'string', description: 'PowerShell 原生命令体。' },
-                    timeout: { type: 'number', description: '超时(ms)：简单命令 30000，构建/测试 120000~300000，依赖安装 600000' }
+                    timeout: { type: 'number', description: '超时毫秒数。' }
                 },
                 required: ['command', 'timeout']
             },
@@ -532,12 +532,12 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_cmd_command...');
         this.toolManager.registerTool({
             name: 'run_cmd_command',
-            description: '⚠️ command 和 timeout 均为必填参数，不可省略！在 Windows CMD (cmd.exe) 中执行命令（阻塞式，仅限 Windows）。command 直接写 CMD 原生命令体，禁止嵌套 shell 启动器。严禁杀死/释放/占用 Agent 保留端口 3001/3003/5174；用户服务必须改用其他端口。通过本工具启动的进程（含后台任务）可被后续 kill 类命令按 PID 正常终止（taskkill /F /T /PID <pid>）。适合纯文本处理（findstr、dir、type）和简单文件操作。\n\n【JSON 传参提示】CMD 反斜杠路径在 JSON 中须写双反斜杠（C:\\\\path），简单命令优先用 run_powershell_command 享受免转义策略。完整输出自动持久化到 .command/output.txt，长输出场景下请用 read_file 按需检索完整内容。',
+            description: '仅限 Windows，在工作区执行 CMD 命令；适合简单文本和文件操作。',
             parameters: {
                 type: 'object',
                 properties: {
                     command: { type: 'string', description: 'CMD 原生命令体。' },
-                    timeout: { type: 'number', description: '超时(ms)：简单命令 30000，构建/测试 120000~300000，依赖安装 600000' }
+                    timeout: { type: 'number', description: '超时毫秒数。' }
                 },
                 required: ['command', 'timeout']
             },
@@ -1107,6 +1107,8 @@ export class AgentService extends EventEmitter {
             `- run_powershell_command：${envInfo.powershellAvailable ? `✅ 可用（${envInfo.powershellVersion}）` : '❌ 不可用，禁止调用'}。跨平台，Windows 调 powershell.exe，Linux/macOS 调 pwsh。`,
             `- run_cmd_command：${envInfo.cmdAvailable ? `✅ 可用（${envInfo.cmdVersion}）` : '❌ 不可用，禁止调用'}。仅限 Windows，调 cmd.exe。`,
             '- 工具名即执行器。command 直接写原生命令体。',
+            '- PowerShell 5.1 不支持 &&，多个命令用分号连接。',
+            '- timeout 单位为毫秒；简单命令建议 30000，构建/测试 120000~300000，依赖安装 600000。',
             '- Windows 上优先用 run_powershell_command；仅在用户明确要求或命令确实只能在 cmd.exe 下执行时才用 run_cmd_command；Linux/macOS 上仅能用 run_powershell_command。',
             '- **输出持久化**：每次命令执行后，完整输出（stdout+stderr+元数据）自动写入 .command/output.txt。返回给 LLM 的结果可能被截断，长输出场景请用 read_file 读取 .command/output.txt 获取完整内容。',
         ].join('\n');

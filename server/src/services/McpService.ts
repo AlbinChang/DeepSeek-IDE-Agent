@@ -297,7 +297,7 @@ export class McpService {
 
             for (const nativeTool of state.tools) {
                 const agentName = buildMcpAgentToolName(state.config.name, nativeTool.name);
-                const description = this.buildToolDescription(state.config, nativeTool);
+                const description = this.buildToolDescription(nativeTool);
 
                 definitions.push({
                     name: agentName,
@@ -332,7 +332,7 @@ export class McpService {
 
             for (const nativeTool of state.tools) {
                 const agentName = buildMcpAgentToolName(state.config.name, nativeTool.name);
-                const description = this.buildToolDescription(state.config, nativeTool);
+                const description = this.buildToolDescription(nativeTool);
 
                 metadata.push({
                     type: 'function' as const,
@@ -355,14 +355,8 @@ export class McpService {
     /**
      * 构建桥接工具的描述文本
      */
-    private buildToolDescription(config: McpServerConfig, nativeTool: McpNativeTool): string {
-        const parts: string[] = [];
-        parts.push(`[MCP:${config.name}] ${nativeTool.description || nativeTool.name}`);
-        parts.push(`(来自用户配置的 ${config.name} MCP 服务器)`);
-        if (config.description && config.description !== config.name) {
-            parts.push(`服务器描述: ${config.description}`);
-        }
-        return parts.join(' ');
+    private buildToolDescription(nativeTool: McpNativeTool): string {
+        return nativeTool.description?.trim() || nativeTool.name;
     }
 
     // ============================================================
@@ -497,8 +491,9 @@ export class McpService {
             '### 用户配置的 MCP 工具 (USER-CONFIGURED MCP TOOLS)',
             `检测到工作区 \`.mcp/\` 目录下配置了 ${states.length} 个 MCP 服务器（${connected.length} 个已连接，${disconnected.length} 个未连接）。`,
             '',
-            '**工具命名规则**：MCP 工具名格式为 `{服务器名}__{原生工具名}`（双下划线分隔）。例如 `github__search_repositories`。',
+            '**工具命名规则**：MCP 工具名格式为 `{服务器名}__{原生工具名}`（双下划线分隔）。',
             '**调用方式**：与内置工具完全相同，直接通过工具名调用即可，系统会自动路由到对应的 MCP 服务器。',
+            '工具名称、参数和用途说明由函数工具定义提供，此处仅列出连接状态。',
             '',
         ];
 
@@ -508,12 +503,7 @@ export class McpService {
             if (state.config.description) {
                 lines.push(`> ${state.config.description}`);
             }
-            lines.push(`共 ${state.tools.length} 个工具：`);
-            for (const tool of state.tools) {
-                const agentName = buildMcpAgentToolName(state.config.name, tool.name);
-                const desc = tool.description || '(无描述)';
-                lines.push(`- **\`${agentName}\`**: ${desc}`);
-            }
+            lines.push(`已注册 ${state.tools.length} 个工具。`);
             lines.push('');
         }
 
