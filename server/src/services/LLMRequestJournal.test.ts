@@ -117,18 +117,26 @@ describe("LLMRequestJournal", () => {
         expect(recovered?.requestIndex).toBe(0);
     });
 
+    it("restores the next index from request filenames after a crash restart", async () => {
+        await journal.recordRequest(recordOptions({ traceId: "previous-trace" }));
+
+        const restartedJournal = new LLMRequestJournal();
+        expect((await restartedJournal.getPendingRecovery(root, "test-user"))?.requestIndex).toBe(0);
+        expect((await restartedJournal.recordRequest(recordOptions({ traceId: "next-trace" }))).requestIndex).toBe(1);
+    });
+
     it("does not restore requests after a normal shutdown and prevents stale recovery", async () => {
         await journal.recordRequest(recordOptions());
         await journal.markNormalShutdown();
 
-        expect(await journal.getPendingRecovery(root, "test-user")).toBeNull();
+        const restartedJournal = new LLMRequestJournal();
+        expect(await restartedJournal.getPendingRecovery(root, "test-user")).toBeNull();
         await expect(fs.access(path.join(root, ".llm-request", "stop-normal.flag"))).rejects.toMatchObject({
             code: "ENOENT",
         });
-        await expect(journal.readPendingRequest(root, "test-user", 0)).rejects.toThrow("no longer recoverable");
+        await expect(restartedJournal.readPendingRequest(root, "test-user", 0)).rejects.toThrow("no longer recoverable");
 
-        await journal.recordRequest(recordOptions({ traceId: "new-trace" }));
-        expect((await journal.getPendingRecovery(root, "test-user"))?.requestIndex).toBe(1);
+        expect((await restartedJournal.recordRequest(recordOptions({ traceId: "new-trace" }))).requestIndex).toBe(1);
     });
 
     it("discards every pending request belonging to the interrupted trace", async () => {

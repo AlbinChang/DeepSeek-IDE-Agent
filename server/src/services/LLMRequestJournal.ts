@@ -99,6 +99,7 @@ export class LLMRequestJournal {
     private static instance: LLMRequestJournal;
     private readonly workspaceQueues = new Map<string, Promise<void>>();
     private readonly trackedDirectories = new Set<string>();
+    private readonly nextRequestIndices = new Map<string, number>();
 
     public static getInstance(): LLMRequestJournal {
         if (!this.instance) {
@@ -117,8 +118,11 @@ export class LLMRequestJournal {
 
         return this.runExclusive(directory, async () => {
             await fs.mkdir(directory, { recursive: true });
-            const files = await this.listRequestFiles(directory);
-            const requestIndex = files.reduce((max, file) => Math.max(max, file.requestIndex), -1) + 1;
+            const sequenceKey = this.getQueueKey(directory);
+            let requestIndex = this.nextRequestIndices.get(sequenceKey);
+            if (requestIndex === undefined) {
+                requestIndex = await this.restoreNextRequestIndex(directory);
+            }
             const rawPayload = JSON.stringify(options.payload);
             if (!rawPayload) {
                 throw new Error("LLM request payload cannot be serialized to JSON");
@@ -138,6 +142,7 @@ export class LLMRequestJournal {
             };
             const filePath = path.join(directory, `request-${requestIndex}.json`);
             await this.writeRecordAtomically(filePath, metadata, rawPayload);
+            this.nextRequestIndices.set(sequenceKey, requestIndex + 1);
             await this.pruneOldRequests(directory);
 
             return metadata;
@@ -157,6 +162,8 @@ export class LLMRequestJournal {
             } catch (error) {
                 if (!isNodeError(error) || error.code !== "ENOENT") throw error;
             }
+
+            await this.restoreNextRequestIndex(directory);
 
             if (normalShutdown) {
                 await this.updateRequestStatuses(directory, () => true, "completed");
@@ -307,8 +314,24 @@ export class LLMRequestJournal {
         return path.join(path.resolve(root), ".llm-request");
     }
 
+    private async restoreNextRequestIndex(directory: string): Promise<number> {
+        const files = await this.listRequestFiles(directory);
+        const latestIndex = files.reduce((max, file) => Math.max(max, file.requestIndex), -1);
+        const sequenceKey = this.getQueueKey(directory);
+        const nextIndex = Math.max(
+            this.nextRequestIndices.get(sequenceKey) ?? 0,
+            latestIndex + 1,
+        );
+        this.nextRequestIndices.set(sequenceKey, nextIndex);
+        return nextIndex;
+    }
+
+    private getQueueKey(directory: string): string {
+        return process.platform === "win32" ? directory.toLowerCase() : directory;
+    }
+
     private async runExclusive<T>(directory: string, operation: () => Promise<T>): Promise<T> {
-        const key = process.platform === "win32" ? directory.toLowerCase() : directory;
+        const key = this.getQueueKey(directory);
         const previous = this.workspaceQueues.get(key) ?? Promise.resolve();
         const current = previous.then(operation, operation);
         const settled = current.then(() => undefined, () => undefined);
