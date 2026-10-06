@@ -1,5 +1,6 @@
 ﻿import * as fs from 'fs/promises';
 import { PathUtils } from '@/utils/PathUtils.js';
+import { sortFileEntries } from '@/utils/FileOrdering.js';
 import * as path from 'path';
 import iconv from 'iconv-lite';
 import jschardet from 'jschardet';
@@ -400,16 +401,14 @@ export class FileIO {
         const files = await fs.readdir(fullPath, { withFileTypes: true });
         
         // 关键修复：返回规范化的绝对路径以支持后续 IO 操作 (Section 31.0 Absolute Path Enforcement)
-        return files.filter(file => !(file.isDirectory() && FileIO.UI_LIST_IGNORED_DIRS.has(file.name))).map(file => ({
+        const entries = files.filter(file => !(file.isDirectory() && FileIO.UI_LIST_IGNORED_DIRS.has(file.name))).map(file => ({
             name: file.name,
             path: PathUtils.normalizePath(path.join(fullPath, file.name)),
             isDirectory: file.isDirectory(),
             isSymbolicLink: file.isSymbolicLink(),
             size: 0
-        })).sort((a, b) => {
-            if (a.isDirectory === b.isDirectory) return a.name.localeCompare(b.name);
-            return a.isDirectory ? -1 : 1;
-        });
+        }));
+        return sortFileEntries(entries);
     }
 
     /**

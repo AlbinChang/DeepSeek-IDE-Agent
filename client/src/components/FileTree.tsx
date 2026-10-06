@@ -1,5 +1,6 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { sortFileEntries } from '../../../server/src/utils/FileOrdering';
 import { 
   File, Folder, ChevronRight, ChevronDown, 
   Loader2, Lock, FolderPlus, Compass, Copy, Trash2, AlertTriangle, Pencil, Clock, X, FolderOpen, Box, FilePlus
@@ -52,15 +53,8 @@ const shouldSkipAutoRefreshPath = (targetPath: string) => {
   return segments.some(segment => AUTO_REFRESH_SKIP_SEGMENTS.has(segment));
 };
 
-/** 目录在前，文件在后；同组内按名称字母序排列（忽略大小写） */
-const sortFileNodes = (nodes: FileNode[]): FileNode[] => {
-  return [...nodes].sort((a, b) => {
-    if (a.isDirectory !== b.isDirectory) {
-      return a.isDirectory ? -1 : 1;
-    }
-    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-  });
-};
+/** 目录优先；同组按自然名称顺序排列，包含中文章序号。 */
+const sortFileNodes = (nodes: FileNode[]): FileNode[] => sortFileEntries(nodes);
 
 export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) => {
   const { workspaceRoot, setWorkspaceRoot } = useAgentContext();
@@ -1297,4 +1291,3 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     </div>
   );
 };
-

@@ -8,6 +8,7 @@ import { IpcMain } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as zlib from 'node:zlib';
+import { compareFileSystemEntries, sortFileEntries } from '@/utils/FileOrdering.js';
 import { PROJECT_ROOT } from '../index.js';
 
 // ═══════════════════════════════════════════════════════════════
@@ -364,7 +365,14 @@ export function registerFileIpc(ipcMain: IpcMain) {
                 
                 const results: any[] = [];
                 try {
-                    const entries = fs.readdirSync(dir, { withFileTypes: true });
+                    const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((left, right) =>
+                        compareFileSystemEntries(
+                            left.name,
+                            left.isDirectory(),
+                            right.name,
+                            right.isDirectory(),
+                        ),
+                    );
                     
                     // 过滤系统目录
                     const skipDirs = new Set([
@@ -738,7 +746,8 @@ export function registerFileIpc(ipcMain: IpcMain) {
                 });
             }
 
-            return { success: true, files: resultEntries, totalCount: resultEntries.length };
+            const files = sortFileEntries(resultEntries);
+            return { success: true, files, totalCount: files.length };
         } catch (err: any) {
             return { success: false, error: err?.message || String(err) };
         }

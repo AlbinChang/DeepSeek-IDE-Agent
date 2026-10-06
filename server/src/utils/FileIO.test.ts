@@ -69,3 +69,36 @@ describe('FileIO.createPath', () => {
         await expect(FileIO.createPath('../../outside.txt', workspaceRoot, false)).rejects.toThrow(/SECURITY_VIOLATION|escapes workspace/i);
     });
 });
+
+describe('FileIO.listFiles ordering', () => {
+    const tempDirs: string[] = [];
+
+    const createWorkspace = async () => {
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepseek-ide-agent-fileio-sort-'));
+        tempDirs.push(dir);
+        return dir;
+    };
+
+    afterEach(async () => {
+        await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+    });
+
+    it('returns directories first and Chinese chapter files in numeric order', async () => {
+        const workspaceRoot = await createWorkspace();
+        await fs.mkdir(path.join(workspaceRoot, 'docs10'));
+        await fs.mkdir(path.join(workspaceRoot, 'docs2'));
+        await fs.writeFile(path.join(workspaceRoot, '教程-第二章.md'), '', 'utf8');
+        await fs.writeFile(path.join(workspaceRoot, '教程-第一章.md'), '', 'utf8');
+        await fs.writeFile(path.join(workspaceRoot, '教程-第十章.md'), '', 'utf8');
+
+        const entries = await FileIO.listFiles('.', workspaceRoot);
+
+        expect(entries.map(({ name }) => name)).toEqual([
+            'docs2',
+            'docs10',
+            '教程-第一章.md',
+            '教程-第二章.md',
+            '教程-第十章.md',
+        ]);
+    });
+});

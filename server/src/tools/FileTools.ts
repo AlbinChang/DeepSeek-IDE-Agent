@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import simpleGit from 'simple-git';
 import { PathUtils } from '@/utils/PathUtils.js';
 import { FileIO } from '@/utils/FileIO.js';
+import { compareFileSystemEntries } from '@/utils/FileOrdering.js';
 import { config as globalConfig } from '@/config/index.js';
 import { WORKSPACE_SKILL_CONTAINER_DIRECTORIES, isWorkspaceSkillPath } from '@/utils/WorkspaceSkillPaths.js';
 
@@ -127,10 +128,14 @@ export class FileTools {
                 return;
             }
 
-            entries.sort((a, b) => {
-                if (a.isDirectory() === b.isDirectory()) return a.name.localeCompare(b.name);
-                return a.isDirectory() ? -1 : 1;
-            });
+            entries.sort((left, right) =>
+                compareFileSystemEntries(
+                    left.name,
+                    left.isDirectory(),
+                    right.name,
+                    right.isDirectory(),
+                ),
+            );
 
             for (const entry of entries) {
                 if (truncated) break;
@@ -192,10 +197,14 @@ export class FileTools {
                 const entries = await fs.readdir(currentPath, { withFileTypes: true });
                 const lines: string[] = [];
 
-                entries.sort((left, right) => {
-                    if (left.isDirectory() === right.isDirectory()) return left.name.localeCompare(right.name);
-                    return left.isDirectory() ? -1 : 1;
-                });
+                entries.sort((left, right) =>
+                    compareFileSystemEntries(
+                        left.name,
+                        left.isDirectory(),
+                        right.name,
+                        right.isDirectory(),
+                    ),
+                );
                 
                 // 过滤掉一些依赖库目录，减少不必要的 IO 和数据处理
                 const ignoreList = ['node_modules', 'dist', '__pycache__'];
