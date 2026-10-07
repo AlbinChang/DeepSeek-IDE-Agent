@@ -780,20 +780,22 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         mainModel = monaco.editor.createModel(initialText, languageId, mainUri);
       }
 
-      // 2. 获取或创建 originalModel 与 modifiedModel（用于 diff）
-      let originalModel = monaco.editor.getModel(originalUri);
-      if (!originalModel) {
-        originalModel = monaco.editor.createModel(originalContent, languageId, originalUri);
-      } else if (originalModel.getValue() !== originalContent) {
-        originalModel.setValue(originalContent);
-      }
+      // 差异模型会复制整份文件内容，仅在 diff 模式创建，避免普通预览额外占用内存。
+      let originalModel = viewMode === 'diff' ? monaco.editor.getModel(originalUri) : null;
+      let modifiedModel = viewMode === 'diff' ? monaco.editor.getModel(modifiedUri) : null;
+      if (viewMode === 'diff') {
+        if (!originalModel) {
+          originalModel = monaco.editor.createModel(originalContent, languageId, originalUri);
+        } else if (originalModel.getValue() !== originalContent) {
+          originalModel.setValue(originalContent);
+        }
 
-      let modifiedModel = monaco.editor.getModel(modifiedUri);
-      const modContent = mainModel.getValue();
-      if (!modifiedModel) {
-        modifiedModel = monaco.editor.createModel(modContent, languageId, modifiedUri);
-      } else if (modifiedModel.getValue() !== modContent) {
-        modifiedModel.setValue(modContent);
+        const modContent = mainModel.getValue();
+        if (!modifiedModel) {
+          modifiedModel = monaco.editor.createModel(modContent, languageId, modifiedUri);
+        } else if (modifiedModel.getValue() !== modContent) {
+          modifiedModel.setValue(modContent);
+        }
       }
 
       // 3. 方案十三：帧对齐绑定 + 绝对应对隔离
@@ -812,11 +814,15 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         }
 
         try {
-          if (viewMode === 'editor' && editorRef.current && mainModel) {
-            // 仅在显式模式切换时解绑，以减少 wordHighlighter 的 dispose 压力
-            if (viewMode !== lastModeRef.current && diffEditorRef.current) {
-               diffEditorRef.current.setModel(null);
+          if (viewMode !== 'diff') {
+            if (diffEditorRef.current?.getModel()) {
+              diffEditorRef.current.setModel(null);
             }
+            monaco.editor.getModel(originalUri)?.dispose();
+            monaco.editor.getModel(modifiedUri)?.dispose();
+          }
+
+          if (viewMode === 'editor' && editorRef.current && mainModel) {
             if (editorRef.current.getModel() !== mainModel) {
               editorRef.current.setModel(mainModel);
             }
@@ -1808,5 +1814,3 @@ const CsvTableView: React.FC<CsvTableViewProps> = ({ csvData, fileName }) => {
     </div>
   );
 };
-
-

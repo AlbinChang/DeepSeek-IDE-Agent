@@ -9,6 +9,45 @@ import { resolveMarkdownLinkCandidates } from '@/utils/markdownLinks';
 
 const Mermaid = lazy(() => import('@/components/Mermaid').then((mod) => ({ default: mod.Mermaid })));
 
+const previewVisibilityTargets = new Map<Element, () => void>();
+let previewVisibilityObserver: IntersectionObserver | null = null;
+
+function observePreviewTarget(target: Element, onVisible: () => void): () => void {
+  if (typeof IntersectionObserver === 'undefined') return () => {};
+
+  if (!previewVisibilityObserver) {
+    previewVisibilityObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+
+        const reveal = previewVisibilityTargets.get(entry.target);
+        if (!reveal) continue;
+
+        previewVisibilityTargets.delete(entry.target);
+        previewVisibilityObserver?.unobserve(entry.target);
+        reveal();
+      }
+
+      if (previewVisibilityTargets.size === 0) {
+        previewVisibilityObserver?.disconnect();
+        previewVisibilityObserver = null;
+      }
+    }, { rootMargin: '700px 0px' });
+  }
+
+  previewVisibilityTargets.set(target, onVisible);
+  previewVisibilityObserver.observe(target);
+
+  return () => {
+    previewVisibilityTargets.delete(target);
+    previewVisibilityObserver?.unobserve(target);
+    if (previewVisibilityTargets.size === 0) {
+      previewVisibilityObserver?.disconnect();
+      previewVisibilityObserver = null;
+    }
+  };
+}
+
 interface MarkdownPreviewProps {
   content: string;
   /** 当前 Markdown 文件的路径（用于解析相对路径图片） */
@@ -16,6 +55,93 @@ interface MarkdownPreviewProps {
   /** 工作区根目录（用于解析相对路径图片） */
   workspaceRoot?: string | null;
 }
+
+const PreviewMermaid: React.FC<{ chart: string }> = ({ chart }) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [isNearViewport, setIsNearViewport] = useState(
+    () => typeof IntersectionObserver === 'undefined'
+  );
+
+  useEffect(() => {
+    if (isNearViewport) return;
+    const target = containerRef.current;
+    if (!target || typeof IntersectionObserver === 'undefined') return;
+    return observePreviewTarget(target, () => setIsNearViewport(true));
+  }, [isNearViewport]);
+
+  return (
+    <div ref={containerRef}>
+      {isNearViewport ? (
+        <Suspense fallback={<div className="my-4 p-4 border border-white/10 bg-black/30 text-[9px] text-white/50 font-mono">Loading Mermaid...</div>}>
+          <Mermaid chart={chart} />
+        </Suspense>
+      ) : (
+        <div className="my-6 flex min-h-[120px] items-center justify-center border border-white/5 bg-[#050505] text-[9px] text-white/40 font-mono">
+          Mermaid 图表滚动到附近时加载
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MarkdownDocument = React.memo(({ content, filePath, workspaceRoot }: MarkdownPreviewProps) => (
+  <ReactMarkdown
+    remarkPlugins={[remarkGfm]}
+    rehypePlugins={[rehypeRaw]}
+    components={{
+      code({ inline, className, children, ...props }: any) {
+        const match = /language-(\w+)/.exec(className || '');
+        const language = match ? match[1] : '';
+
+        if (!inline && language === 'mermaid') {
+          return <PreviewMermaid chart={String(children).replace(/\n$/, '')} />;
+        }
+
+        return !inline && language ? (
+          <LazySyntaxHighlighter
+            language={language}
+            PreTag="div"
+            className="rounded-sm border border-white/5 !bg-[#0f0f0f] !m-0 !mb-6 !p-4"
+            deferUntilVisible
+            {...props}
+          >
+            {String(children).replace(/\n$/, '')}
+          </LazySyntaxHighlighter>
+        ) : (
+          <code className="bg-white/10 px-1.5 py-0.5 rounded-sm text-[0.85em] font-mono text-white/90" {...props}>
+            {children}
+          </code>
+        );
+      },
+      h1: ({ children }) => <h1 className="text-xl font-black text-white border-b border-white/10 pb-3 mt-10 mb-6 uppercase tracking-[0.2em]">{children}</h1>,
+      h2: ({ children }) => <h2 className="text-lg font-bold text-white/90 border-b border-white/5 pb-2 mt-8 mb-4 tracking-wider">{children}</h2>,
+      h3: ({ children }) => <h3 className="text-md font-bold text-white/80 mt-6 mb-3 tracking-wide">{children}</h3>,
+      table: ({ children }) => (
+        <div className="overflow-x-auto mb-8 border border-white/10 rounded-sm">
+          <table className="min-w-full border-collapse text-xs">
+            {children}
+          </table>
+        </div>
+      ),
+      th: ({ children }) => <th className="border-b border-white/10 px-4 py-3 bg-white/5 font-bold text-left text-white/60 uppercase tracking-tighter">{children}</th>,
+      td: ({ children }) => <td className="border-b border-white/5 px-4 py-3 text-white/80 font-mono italic">{children}</td>,
+      a: ({ href, children }) => (
+        <MarkdownLink href={href} filePath={filePath} workspaceRoot={workspaceRoot}>
+          {children}
+        </MarkdownLink>
+      ),
+      img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} filePath={filePath} workspaceRoot={workspaceRoot} />,
+      blockquote: ({ children }) => (
+        <blockquote className="border-l border-white/30 pl-6 py-2 my-6 bg-white/[0.02] text-white/50 italic font-serif">
+          {children}
+        </blockquote>
+      ),
+      li: ({ children }) => <li className="mb-2 text-white/80 list-disc ml-4">{children}</li>
+    }}
+  >
+    {content}
+  </ReactMarkdown>
+));
 
 const MARKDOWN_PREVIEW_CHAR_LIMIT = 200_000;
 
@@ -50,17 +176,53 @@ function clearHighlights() {
   }
 }
 
-/**
- * 遍历并计算容器内所有匹配文本的 Range 对象（不修改任何真实 DOM 节点）
- */
+/** 限制创建并交给浏览器绘制的 Range 数量；完整匹配位置以紧凑索引保留。 */
+const FIND_HIGHLIGHT_PAINT_LIMIT = 5000;
+
+interface SearchMatchIndex {
+  textNodes: Text[];
+  positions: Uint32Array;
+  count: number;
+  paintedRanges: Range[];
+}
+
+const EMPTY_SEARCH_MATCH_INDEX: SearchMatchIndex = {
+  textNodes: [],
+  positions: new Uint32Array(0),
+  count: 0,
+  paintedRanges: [],
+};
+
+function createSearchMatchRange(matches: SearchMatchIndex, index: number): Range | undefined {
+  if (index < 0 || index >= matches.count) return undefined;
+
+  const position = index * 3;
+  const textNode = matches.textNodes[matches.positions[position]];
+  if (!textNode) return undefined;
+
+  const start = matches.positions[position + 1];
+  const end = matches.positions[position + 2];
+  if (start >= end || end > textNode.length) return undefined;
+
+  const range = document.createRange();
+  range.setStart(textNode, start);
+  range.setEnd(textNode, end);
+  return range;
+}
+
+function getSearchMatchRange(matches: SearchMatchIndex, index: number): Range | undefined {
+  if (index < matches.paintedRanges.length) return matches.paintedRanges[index];
+  return createSearchMatchRange(matches, index);
+}
+
 function findMatchRanges(
   container: HTMLElement | null,
   query: string,
   options: { caseSensitive: boolean; wholeWord: boolean; isRegex: boolean }
-): { ranges: Range[]; error: string | null } {
+): { matches: SearchMatchIndex; error: string | null } {
   if (!container || !query) {
     clearHighlights();
-    return { ranges: [], error: null };
+    return { matches: EMPTY_SEARCH_MATCH_INDEX, error: null };
   }
 
   let regex: RegExp;
@@ -75,11 +237,26 @@ function findMatchRanges(
     }
   } catch (err: any) {
     clearHighlights();
-    return { ranges: [], error: err?.message || '无效的正则表达式' };
+    return { matches: EMPTY_SEARCH_MATCH_INDEX, error: err?.message || '无效的正则表达式' };
   }
 
-  // 收集所有内容区文本节点（排除 find widget、style、script 等）
+  // 匹配偏移使用紧凑整数存储，避免为每一个结果长期保留一个 Range 对象。
   const textNodes: Text[] = [];
+  let positions = new Uint32Array(3 * 256);
+  let matchCount = 0;
+  const appendMatch = (nodeIndex: number, start: number, end: number) => {
+    const position = matchCount * 3;
+    if (position + 2 >= positions.length) {
+      const nextPositions = new Uint32Array(Math.max(positions.length * 2, 3 * 256));
+      nextPositions.set(positions);
+      positions = nextPositions;
+    }
+    positions[position] = nodeIndex;
+    positions[position + 1] = start;
+    positions[position + 2] = end;
+    matchCount += 1;
+  };
+
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const parent = node.parentElement;
@@ -100,18 +277,16 @@ function findMatchRanges(
 
   let currentTextNode = walker.nextNode();
   while (currentTextNode) {
-    textNodes.push(currentTextNode as Text);
-    currentTextNode = walker.nextNode();
-  }
-
-  const ranges: Range[] = [];
-
-  for (const textNode of textNodes) {
+    const textNode = currentTextNode as Text;
     const text = textNode.nodeValue;
-    if (!text) continue;
+    if (!text) {
+      currentTextNode = walker.nextNode();
+      continue;
+    }
 
     regex.lastIndex = 0;
     let match: RegExpExecArray | null;
+    let nodeIndex = -1;
 
     while ((match = regex.exec(text)) !== null) {
       const matchText = match[0];
@@ -122,24 +297,32 @@ function findMatchRanges(
         continue;
       }
 
-      try {
-        const range = new Range();
-        range.setStart(textNode, match.index);
-        range.setEnd(textNode, match.index + matchText.length);
-        ranges.push(range);
-      } catch {
-        // 忽略无效 range
+      if (nodeIndex < 0) {
+        nodeIndex = textNodes.push(textNode) - 1;
       }
+      appendMatch(nodeIndex, match.index, match.index + matchText.length);
     }
+
+    currentTextNode = walker.nextNode();
   }
 
-  return { ranges, error: null };
-}
+  if (matchCount === 0) {
+    return { matches: EMPTY_SEARCH_MATCH_INDEX, error: null };
+  }
 
-// 单次注册给渲染层的最大高亮数量：
-// 正则搜索（如 "."）可能产出数十万 Range，直接展开 `new Highlight(...ranges)`
-// 会触发调用栈溢出/参数上限异常导致高亮注册整体失败（表现为高亮凭空消失）。
-const FIND_HIGHLIGHT_PAINT_LIMIT = 5000;
+  const matches: SearchMatchIndex = {
+    textNodes,
+    positions,
+    count: matchCount,
+    paintedRanges: [],
+  };
+  const paintCount = Math.min(matchCount, FIND_HIGHLIGHT_PAINT_LIMIT);
+  for (let index = 0; index < paintCount; index += 1) {
+    const range = createSearchMatchRange(matches, index);
+    if (range) matches.paintedRanges[index] = range;
+  }
+  return { matches, error: null };
+}
 
 /**
  * 判断 Range 是否仍挂接在文档中。
@@ -155,25 +338,28 @@ function isRangeConnected(range: Range | undefined): boolean {
   }
 }
 
+function getRangeScrollTarget(range: Range): HTMLElement | null {
+  const parent = range.startContainer.parentElement;
+  return parent?.closest<HTMLElement>('.markdown-body > *') || parent;
+}
+
 /**
  * 注册 / 更新 CSS.highlights 集合（限制绘制数量，并保证当前项永远可见）
  */
-function updateHighlights(ranges: Range[], activeIndex: number) {
+function updateHighlights(matches: SearchMatchIndex, activeIndex: number) {
   if (typeof CSS === 'undefined' || !('highlights' in CSS) || typeof (globalThis as any).Highlight === 'undefined') {
     return;
   }
 
   try {
     const HighlightConstructor = (globalThis as any).Highlight;
-    let paint: Range[];
-    if (ranges.length > FIND_HIGHLIGHT_PAINT_LIMIT) {
-      paint = ranges.slice(0, FIND_HIGHLIGHT_PAINT_LIMIT);
-      // 当前激活项即使超出绘制上限也需可见，保证用户始终能看到定位结果
-      if (activeIndex >= 0 && activeIndex < ranges.length) {
-        paint.push(ranges[activeIndex]);
-      }
-    } else {
-      paint = ranges;
+    const paint = matches.paintedRanges.filter((range): range is Range => Boolean(range));
+    const currentRange = activeIndex >= 0 && activeIndex < matches.count
+      ? getSearchMatchRange(matches, activeIndex)
+      : undefined;
+
+    if (activeIndex >= FIND_HIGHLIGHT_PAINT_LIMIT && currentRange) {
+      paint.push(currentRange);
     }
 
     if (paint.length > 0) {
@@ -183,8 +369,8 @@ function updateHighlights(ranges: Range[], activeIndex: number) {
       (CSS as any).highlights.delete('md-search-match');
     }
 
-    if (activeIndex >= 0 && activeIndex < ranges.length && isRangeConnected(ranges[activeIndex])) {
-      const currentHighlight = new HighlightConstructor(ranges[activeIndex]);
+    if (currentRange && isRangeConnected(currentRange)) {
+      const currentHighlight = new HighlightConstructor(currentRange);
       (CSS as any).highlights.set('md-search-current', currentHighlight);
     } else {
       (CSS as any).highlights.delete('md-search-current');
@@ -203,10 +389,10 @@ function isRangeInViewport(range: Range | undefined, scrollContainer: HTMLElemen
     const rangeRect = range.getBoundingClientRect();
     const containerRect = scrollContainer.getBoundingClientRect();
     if (rangeRect.height === 0 && rangeRect.width === 0) {
-      const parent = range.startContainer.parentElement;
-      if (!parent) return false;
-      const pRect = parent.getBoundingClientRect();
-      return pRect.bottom >= containerRect.top + 40 && pRect.top <= containerRect.bottom - 40;
+      const target = getRangeScrollTarget(range);
+      if (!target) return false;
+      const targetRect = target.getBoundingClientRect();
+      return targetRect.bottom >= containerRect.top + 40 && targetRect.top <= containerRect.bottom - 40;
     }
     return rangeRect.bottom >= containerRect.top + 40 && rangeRect.top <= containerRect.bottom - 40;
   } catch {
@@ -220,7 +406,8 @@ function isRangeInViewport(range: Range | undefined, scrollContainer: HTMLElemen
 function scrollToMatch(
   range: Range | undefined,
   scrollContainer: HTMLElement | null,
-  smooth: boolean = true
+  smooth: boolean = true,
+  retryCount: number = 0
 ) {
   if (!range || !scrollContainer) return;
   // Range 失活（节点已被 React 替换脱离文档）时 rect 全为 0，
@@ -239,15 +426,21 @@ function scrollToMatch(
         behavior: smooth ? 'smooth' : 'auto',
       });
     } else {
-      const el = range.startContainer.parentElement;
-      if (el) {
-        const elRect = el.getBoundingClientRect();
-        const absoluteTop = scrollContainer.scrollTop + (elRect.top - containerRect.top);
-        const targetScrollTop = Math.max(0, absoluteTop - containerRect.height / 2 + elRect.height / 2);
-        scrollContainer.scrollTo({
-          top: targetScrollTop,
-          behavior: smooth ? 'smooth' : 'auto',
-        });
+      const target = getRangeScrollTarget(range);
+      if (!target) return;
+
+      target.scrollIntoView({
+        block: 'center',
+        behavior: smooth ? 'smooth' : 'auto',
+      });
+
+      if (retryCount === 0) {
+        const retry = () => scrollToMatch(range, scrollContainer, false, 1);
+        if (smooth) {
+          window.setTimeout(retry, 250);
+        } else {
+          requestAnimationFrame(() => requestAnimationFrame(retry));
+        }
       }
     }
   } catch (err) {
@@ -279,7 +472,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
   // ── 文本查找状态管理 (Ctrl+F) ──
   const contentContainerRef = useRef<HTMLDivElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
-  const rangesRef = useRef<Range[]>([]);
+  const matchesRef = useRef<SearchMatchIndex>(EMPTY_SEARCH_MATCH_INDEX);
   const currentIndexRef = useRef<number>(-1);
 
   // 供 MutationObserver / 全局键盘监听等异步回调安全读取的最新状态快照
@@ -339,14 +532,19 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
 
   // 计算「当前视口最接近」的匹配项索引。
   // 对海量匹配（如正则 "."）做有上限的扫描，避免逐项 getBoundingClientRect 造成打字卡顿。
-  const bestViewportIndex = useCallback((ranges: Range[], scrollContainer: HTMLElement | null): number => {
-    if (!scrollContainer || ranges.length === 0) return 0;
+  const bestViewportIndex = useCallback((matches: SearchMatchIndex, scrollContainer: HTMLElement | null): number => {
+    if (!scrollContainer || matches.count === 0) return 0;
     const containerTop = scrollContainer.getBoundingClientRect().top;
-    const scanLimit = Math.min(ranges.length, 400);
+    const scanLimit = Math.min(matches.count, 400);
     for (let i = 0; i < scanLimit; i++) {
       try {
-        const rRect = ranges[i].getBoundingClientRect();
-        if (rRect.top >= containerTop - 10) return i;
+        const range = getSearchMatchRange(matches, i);
+        if (!range) continue;
+        const rRect = range.getBoundingClientRect();
+        const matchTop = rRect.height > 0 || rRect.width > 0
+          ? rRect.top
+          : getRangeScrollTarget(range)?.getBoundingClientRect().top;
+        if (matchTop !== undefined && matchTop >= containerTop - 10) return i;
       } catch {
         // ignore
       }
@@ -362,7 +560,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
     const query = queryRef.current.trim();
     if (!container || !query) {
       clearHighlights();
-      rangesRef.current = [];
+      matchesRef.current = EMPTY_SEARCH_MATCH_INDEX;
       currentIndexRef.current = -1;
       setTotalMatches(0);
       setCurrentIndex(-1);
@@ -370,102 +568,103 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
       return;
     }
 
-    const { ranges, error } = findMatchRanges(container, query, {
+    const { matches, error } = findMatchRanges(container, query, {
       caseSensitive: caseRef.current,
       wholeWord: wholeWordRef.current,
       isRegex: regexRef.current,
     });
-    rangesRef.current = ranges;
+    matchesRef.current = matches;
     setFindError(error);
-    setTotalMatches(ranges.length);
+    setTotalMatches(matches.count);
 
-    if (error || ranges.length === 0) {
+    if (error || matches.count === 0) {
       currentIndexRef.current = -1;
       setCurrentIndex(-1);
-      updateHighlights([], -1);
+      updateHighlights(EMPTY_SEARCH_MATCH_INDEX, -1);
       return;
     }
 
     let idx = currentIndexRef.current;
-    if (!preserveIndex || idx < 0 || idx >= ranges.length) {
-      idx = bestViewportIndex(ranges, scrollContainerRef.current);
+    if (!preserveIndex || idx < 0 || idx >= matches.count) {
+      idx = bestViewportIndex(matches, scrollContainerRef.current);
     }
     currentIndexRef.current = idx;
     setCurrentIndex(idx);
-    updateHighlights(ranges, idx);
+    updateHighlights(matches, idx);
 
-    if (shouldScroll && !isRangeInViewport(ranges[idx], scrollContainerRef.current)) {
-      scrollToMatch(ranges[idx], scrollContainerRef.current, false);
+    const currentRange = getSearchMatchRange(matches, idx);
+    if (shouldScroll && !isRangeInViewport(currentRange, scrollContainerRef.current)) {
+      scrollToMatch(currentRange, scrollContainerRef.current, false);
     }
   }, [bestViewportIndex]);
 
-  // 校验缓存 Range 是否仍挂接在文档中：预览内容由 React 异步渲染
-  // （图片懒加载 / Mermaid / 代码高亮 Suspense / ReactMarkdown 重挂载），
-  // 文本节点被替换后旧 Range 失活（高亮消失、rect 归零），必须同步重算。
-  const ensureFreshRanges = useCallback((): Range[] => {
-    const ranges = rangesRef.current;
-    if (ranges.length > 0) {
-      const head = ranges[0];
-      const tail = ranges[ranges.length - 1];
-      if (head.startContainer.isConnected && tail.endContainer.isConnected) {
-        return ranges;
+  // 校验索引首尾文本节点仍挂接在文档中；异步图片、Mermaid 或代码高亮替换 DOM 后需重算。
+  const ensureFreshMatches = useCallback((): SearchMatchIndex => {
+    const matches = matchesRef.current;
+    if (matches.count > 0) {
+      const firstTextNode = matches.textNodes[0];
+      const lastTextNode = matches.textNodes[matches.textNodes.length - 1];
+      if (firstTextNode?.isConnected && lastTextNode?.isConnected) {
+        return matches;
       }
     }
 
     const container = contentContainerRef.current;
     const query = queryRef.current.trim();
-    if (!container || !query) return [];
+    if (!container || !query) return EMPTY_SEARCH_MATCH_INDEX;
 
     const result = findMatchRanges(container, query, {
       caseSensitive: caseRef.current,
       wholeWord: wholeWordRef.current,
       isRegex: regexRef.current,
     });
-    rangesRef.current = result.ranges;
+    matchesRef.current = result.matches;
     setFindError(result.error);
-    setTotalMatches(result.ranges.length);
-    if (result.error || result.ranges.length === 0) {
+    setTotalMatches(result.matches.count);
+    if (result.error || result.matches.count === 0) {
       currentIndexRef.current = -1;
       setCurrentIndex(-1);
-      updateHighlights([], -1);
-      return [];
+      updateHighlights(EMPTY_SEARCH_MATCH_INDEX, -1);
+      return EMPTY_SEARCH_MATCH_INDEX;
     }
-    return result.ranges;
+    return result.matches;
   }, []);
 
   // 导航至下一个匹配项 (Enter / ArrowDown / F3 / 下一步按钮)
   const goToNextMatch = useCallback(() => {
-    const ranges = ensureFreshRanges();
-    if (ranges.length === 0) return;
+    const matches = ensureFreshMatches();
+    if (matches.count === 0) return;
     const cur = currentIndexRef.current;
-    const next = cur < 0 ? 0 : (cur + 1) % ranges.length;
+    const next = cur < 0 ? 0 : (cur + 1) % matches.count;
     currentIndexRef.current = next;
     setCurrentIndex(next);
-    updateHighlights(ranges, next);
-    if (isRangeConnected(ranges[next])) {
-      scrollToMatch(ranges[next], scrollContainerRef.current, true);
+    updateHighlights(matches, next);
+    const nextRange = getSearchMatchRange(matches, next);
+    if (isRangeConnected(nextRange)) {
+      scrollToMatch(nextRange, scrollContainerRef.current, true);
     }
-  }, [ensureFreshRanges]);
+  }, [ensureFreshMatches]);
 
   // 导航至上一个匹配项 (Shift+Enter / ArrowUp / Shift+F3 / 上一步按钮)
   const goToPrevMatch = useCallback(() => {
-    const ranges = ensureFreshRanges();
-    if (ranges.length === 0) return;
+    const matches = ensureFreshMatches();
+    if (matches.count === 0) return;
     const cur = currentIndexRef.current;
-    const prev = cur <= 0 ? ranges.length - 1 : cur - 1;
+    const prev = cur <= 0 ? matches.count - 1 : cur - 1;
     currentIndexRef.current = prev;
     setCurrentIndex(prev);
-    updateHighlights(ranges, prev);
-    if (isRangeConnected(ranges[prev])) {
-      scrollToMatch(ranges[prev], scrollContainerRef.current, true);
+    updateHighlights(matches, prev);
+    const prevRange = getSearchMatchRange(matches, prev);
+    if (isRangeConnected(prevRange)) {
+      scrollToMatch(prevRange, scrollContainerRef.current, true);
     }
-  }, [ensureFreshRanges]);
+  }, [ensureFreshMatches]);
 
   // 关闭查找栏并清理所有高亮
   const closeFind = useCallback(() => {
     setIsFindOpen(false);
     clearHighlights();
-    rangesRef.current = [];
+    matchesRef.current = EMPTY_SEARCH_MATCH_INDEX;
     currentIndexRef.current = -1;
     setTotalMatches(0);
     setCurrentIndex(-1);
@@ -488,7 +687,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
   useEffect(() => {
     if (!isFindOpen) {
       clearHighlights();
-      rangesRef.current = [];
+      matchesRef.current = EMPTY_SEARCH_MATCH_INDEX;
       currentIndexRef.current = -1;
       return;
     }
@@ -910,74 +1109,7 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
         className="h-full w-full overflow-auto px-8 pb-8 pt-px font-sans scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent"
       >
         <div ref={contentContainerRef} className="markdown-body max-w-4xl mx-auto">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeRaw]}
-            components={{
-              // 覆盖代码块渲染逻辑 (黑白化处理)
-              code({ node, inline, className, children, ...props }: any) {
-                const match = /language-(\w+)/.exec(className || '');
-                const language = match ? match[1] : '';
-
-                if (!inline && language === 'mermaid') {
-                  return (
-                    <Suspense fallback={<div className="my-4 p-4 border border-white/10 bg-black/30 text-[9px] text-white/50 font-mono">Loading Mermaid...</div>}>
-                      <Mermaid chart={String(children).replace(/\n$/, '')} />
-                    </Suspense>
-                  );
-                }
-
-                return !inline && language ? (
-                  <LazySyntaxHighlighter
-                    language={language}
-                    PreTag="div"
-                    className="rounded-sm border border-white/5 !bg-[#0f0f0f] !m-0 !mb-6 !p-4"
-                    {...props}
-                  >
-                    {String(children).replace(/\n$/, '')}
-                  </LazySyntaxHighlighter>
-                ) : (
-                  <code className="bg-white/10 px-1.5 py-0.5 rounded-sm text-[0.85em] font-mono text-white/90" {...props}>
-                    {children}
-                  </code>
-                );
-              },
-              // 黑白简约风格标题
-              h1: ({ children }) => <h1 className="text-xl font-black text-white border-b border-white/10 pb-3 mt-10 mb-6 uppercase tracking-[0.2em]">{children}</h1>,
-              h2: ({ children }) => <h2 className="text-lg font-bold text-white/90 border-b border-white/5 pb-2 mt-8 mb-4 tracking-wider">{children}</h2>,
-              h3: ({ children }) => <h3 className="text-md font-bold text-white/80 mt-6 mb-3 tracking-wide">{children}</h3>,
-              // 极简表格
-              table: ({ children }) => (
-                <div className="overflow-x-auto mb-8 border border-white/10 rounded-sm">
-                  <table className="min-w-full border-collapse text-xs">
-                    {children}
-                  </table>
-                </div>
-              ),
-              th: ({ children }) => <th className="border-b border-white/10 px-4 py-3 bg-white/5 font-bold text-left text-white/60 uppercase tracking-tighter">{children}</th>,
-              td: ({ children }) => <td className="border-b border-white/5 px-4 py-3 text-white/80 font-mono italic">{children}</td>,
-              // 链接（区分外部 URL / 工作区相对链接 / 锚点）
-              // 2026.08 修复：preview 中点击工作区内的 .md / 文件链接不再新开窗口，
-              // 而是解析为工作区相对路径，并通过 ui:file:select 在当前窗口的编辑器中打开。
-              a: ({ href, children }) => (
-                <MarkdownLink href={href} filePath={filePath} workspaceRoot={workspaceRoot}>
-                  {children}
-                </MarkdownLink>
-              ),
-              // 图片渲染（支持外部URL、本地相对路径、加载失败回退）
-              img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} filePath={filePath} workspaceRoot={workspaceRoot} />,
-              // 极简引用块
-              blockquote: ({ children }) => (
-                <blockquote className="border-l border-white/30 pl-6 py-2 my-6 bg-white/[0.02] text-white/50 italic font-serif">
-                  {children}
-                </blockquote>
-              ),
-              // 列表
-              li: ({ children }) => <li className="mb-2 text-white/80 list-disc ml-4">{children}</li>
-            }}
-          >
-            {previewContent}
-          </ReactMarkdown>
+          <MarkdownDocument content={previewContent} filePath={filePath} workspaceRoot={workspaceRoot} />
         </div>
       </div>
 
@@ -991,6 +1123,11 @@ export const MarkdownPreview: React.FC<MarkdownPreviewProps> = ({ content, fileP
         
         .markdown-body p {
           margin-bottom: 20px;
+        }
+
+        .markdown-body > * {
+          content-visibility: auto;
+          contain-intrinsic-size: auto 120px;
         }
 
         .markdown-body strong {
@@ -1108,34 +1245,30 @@ interface MarkdownImageProps {
 }
 
 const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, filePath, workspaceRoot }) => {
+  const rawSrc = String(src || '').trim();
+  const isExternal = /^https?:\/\//i.test(rawSrc);
+  const isDataUri = rawSrc.startsWith('data:');
+  const isLocalRelative = Boolean(rawSrc) && !isExternal && !isDataUri;
   const [error, setError] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [resolvedSrc, setResolvedSrc] = useState<string | null>(null);
-  const [resolving, setResolving] = useState(false);
+  const [isNearViewport, setIsNearViewport] = useState(
+    () => !isLocalRelative || !workspaceRoot || typeof IntersectionObserver === 'undefined'
+  );
+  const imageContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const rawSrc = String(src || '').trim();
-  if (!rawSrc) {
-    return <ImagePlaceholder reason="无图片来源" />;
-  }
-
-  // 外部 HTTP(S) 图片：正常加载
-  const isExternal = /^https?:\/\//i.test(rawSrc);
-  // Data URI：直接显示
-  const isDataUri = rawSrc.startsWith('data:');
-
-  // 本地相对路径：尝试通过 Electron IPC 读取文件并转为 data URI
-  const isLocalRelative = !isExternal && !isDataUri;
+  useEffect(() => {
+    if (!isLocalRelative || isNearViewport) return;
+    const target = imageContainerRef.current;
+    if (!target || typeof IntersectionObserver === 'undefined') return;
+    return observePreviewTarget(target, () => setIsNearViewport(true));
+  }, [isLocalRelative, isNearViewport]);
 
   // 本地相对路径解析 effect
   useEffect(() => {
-    if (!isLocalRelative) return;
-    if (!workspaceRoot) {
-      setError(true);
-      return;
-    }
+    if (!isLocalRelative || !isNearViewport || !workspaceRoot) return;
 
     let cancelled = false;
-    setResolving(true);
 
     const resolveAndLoad = async () => {
       // 候选路径：标准 Markdown（MD 目录相对）优先，工作区根相对兜底，
@@ -1158,7 +1291,6 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, filePath, works
           if (result?.success && result.base64) {
             const mime = result.mimeType || guessMimeFromExt(candidate);
             setResolvedSrc(`data:${mime};base64,${result.base64}`);
-            setResolving(false);
             return;
           }
           // 该候选不存在/读取失败：继续尝试下一个候选
@@ -1172,21 +1304,33 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, filePath, works
 
     resolveAndLoad();
     return () => { cancelled = true; };
-  }, [isLocalRelative, rawSrc, filePath, workspaceRoot]);
+  }, [isLocalRelative, isNearViewport, rawSrc, filePath, workspaceRoot]);
 
-  // 正在解析本地文件
-  if (resolving) {
+  if (!rawSrc) {
+    return <ImagePlaceholder reason="无图片来源" />;
+  }
+
+  if (isLocalRelative && !isNearViewport) {
     return (
-      <div className="my-4 flex items-center gap-2 rounded-sm border border-white/5 bg-white/[0.02] px-4 py-3">
-        <div className="h-3 w-3 animate-pulse rounded-full bg-white/10" />
-        <span className="text-[8pt] text-white/30">读取本地图片: {rawSrc}</span>
+      <div ref={imageContainerRef} className="my-4 flex min-h-[56px] items-center gap-2 rounded-sm border border-white/5 bg-white/[0.02] px-4 py-3">
+        <div className="h-3 w-3 rounded-full bg-white/10" />
+        <span className="text-[8pt] text-white/30">图片滚动到附近时加载: {rawSrc}</span>
       </div>
     );
   }
 
   // 本地图片解析失败
-  if (isLocalRelative && error) {
+  if (isLocalRelative && (!workspaceRoot || error)) {
     return <ImagePlaceholder reason={`图片未找到: ${alt || rawSrc}`} />;
+  }
+
+  if (isLocalRelative && !resolvedSrc) {
+    return (
+      <div ref={imageContainerRef} className="my-4 flex items-center gap-2 rounded-sm border border-white/5 bg-white/[0.02] px-4 py-3">
+        <div className="h-3 w-3 animate-pulse rounded-full bg-white/10" />
+        <span className="text-[8pt] text-white/30">读取本地图片: {rawSrc}</span>
+      </div>
+    );
   }
 
   // 最终使用的 src
@@ -1198,7 +1342,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, filePath, works
   }
 
   return (
-    <span className="my-4 block">
+    <span ref={imageContainerRef} className="my-4 block">
       {!loaded && (
         <div className="mb-2 flex items-center gap-2 rounded-sm border border-white/5 bg-white/[0.02] px-4 py-3">
           <div className="h-3 w-3 animate-pulse rounded-full bg-white/10" />
@@ -1218,6 +1362,8 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, filePath, works
       <img
         src={finalSrc}
         alt={alt || ''}
+        loading={isExternal ? 'lazy' : 'eager'}
+        decoding="async"
         onLoad={() => setLoaded(true)}
         onError={() => setError(true)}
         referrerPolicy="no-referrer"

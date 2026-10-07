@@ -1,4 +1,4 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 
 interface LazySyntaxHighlighterProps {
   language: string;
@@ -7,9 +7,46 @@ interface LazySyntaxHighlighterProps {
   PreTag?: string;
   codeTagProps?: Record<string, unknown>;
   customStyle?: React.CSSProperties;
+  deferUntilVisible?: boolean;
 }
 
 const HIGHLIGHT_CHAR_LIMIT = 40_000;
+
+const deferredSyntaxTargets = new Map<Element, () => void>();
+let deferredSyntaxObserver: IntersectionObserver | null = null;
+
+function observeSyntaxTarget(target: Element, onVisible: () => void): () => void {
+  if (typeof IntersectionObserver === 'undefined') {
+    return () => {};
+  }
+
+  if (!deferredSyntaxObserver) {
+    deferredSyntaxObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+
+        const reveal = deferredSyntaxTargets.get(entry.target);
+        if (!reveal) continue;
+
+        deferredSyntaxTargets.delete(entry.target);
+        deferredSyntaxObserver?.unobserve(entry.target);
+        reveal();
+      }
+    }, { rootMargin: '700px 0px' });
+  }
+
+  deferredSyntaxTargets.set(target, onVisible);
+  deferredSyntaxObserver.observe(target);
+
+  return () => {
+    deferredSyntaxTargets.delete(target);
+    deferredSyntaxObserver?.unobserve(target);
+    if (deferredSyntaxTargets.size === 0) {
+      deferredSyntaxObserver?.disconnect();
+      deferredSyntaxObserver = null;
+    }
+  };
+}
 
 const buildCodePreview = (value: string) => {
   if (value.length <= HIGHLIGHT_CHAR_LIMIT) return value;
@@ -64,13 +101,35 @@ export const LazySyntaxHighlighter: React.FC<LazySyntaxHighlighterProps> = ({
   children,
   className,
   customStyle,
+  deferUntilVisible = false,
   ...props
 }) => {
   const code = String(children || '');
+  const shouldDeferHighlight = deferUntilVisible && code.length <= HIGHLIGHT_CHAR_LIMIT;
+  const [isNearViewport, setIsNearViewport] = useState(
+    !deferUntilVisible || typeof IntersectionObserver === 'undefined'
+  );
+  const deferredCodeRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    if (!shouldDeferHighlight || isNearViewport) return;
+    const target = deferredCodeRef.current;
+    if (!target) return;
+    return observeSyntaxTarget(target, () => setIsNearViewport(true));
+  }, [shouldDeferHighlight, isNearViewport]);
+
   if (code.length > HIGHLIGHT_CHAR_LIMIT) {
     return (
       <pre className={className} style={customStyle}>
         <code>{buildCodePreview(code)}</code>
+      </pre>
+    );
+  }
+
+  if (shouldDeferHighlight && !isNearViewport) {
+    return (
+      <pre ref={deferredCodeRef} className={className} style={customStyle}>
+        <code>{code}</code>
       </pre>
     );
   }
