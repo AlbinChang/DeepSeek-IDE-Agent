@@ -73,7 +73,7 @@ pnpm run electron:dev
 
 主 Agent 与评估 Agent 在每次发送模型请求前，会将完整请求体异步写入当前工作区的 `.llm-request/`：
 
-- 文件名为 `request-0.json`、`request-1.json` 等递增序号；目录只保留最近 50 个请求。
+- 文件名为 `request-0.json`、`request-1.json` 等递增序号；目录只保留最近 100 个请求。
 - 文件首行为元数据（用户 ID、模型 ID、Agent 阶段、时间戳、CRC-32 校验值）；其余内容是可重放的原始 JSON 请求体。
 - 正常退出时会写入 `stop-normal.flag`。下次打开工作区时会识别并移除此标记，不恢复正常结束的会话。
 - 异常退出后，应用会从最新请求开始校验 CRC-32；找到有效的未完成请求时，会询问是否继续或放弃。继续会重放该请求，并接回对应 Agent 阶段的执行流程。
@@ -202,8 +202,15 @@ web-ide-agent/
 │       │   ├── AgentTurnEngine.ts     # AI 流式调用 & 工具执行
 │       │   └── AgentChatComponent.ts  # 对话循环
 │       └── config/
-│           ├── main-agent.json        # 主 Agent 提示词
-│           └── evaluator-agent.json   # 评估 Agent 提示词
+│           ├── main-agent.json        # 主 Agent 提示词（仅常驻核心契约）
+│           ├── evaluator-agent.json   # 评估 Agent 提示词
+│           └── skills/                # 内置专项技能（按需加载）
+│               ├── ppt-design/SKILL.md
+│               ├── svg-diagram/SKILL.md
+│               ├── code-review/SKILL.md
+│               ├── doc-writing/SKILL.md
+│               ├── md-to-pdf/SKILL.md
+│               └── web-research/SKILL.md
 │
 ├── electron/                     # Electron 桌面应用
 │   ├── package.json              # Electron 33 + electron-builder

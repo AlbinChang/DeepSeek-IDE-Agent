@@ -184,6 +184,17 @@ pnpm run electron:dev
 | 📋 文件列表 | 受控递归目录结构获取 |
 | 🔀 Git 版本控制 | 查看状态、历史、差异、分支 |
 | 🔌 MCP 工具 | 用户自定义 MCP 服务器工具动态注入 |
+| 🧩 专项技能 | `read_skill` 按需加载内置技能（PPT 设计、SVG 图表、代码检视、文档写作、Markdown→PDF、联网检索） |
+
+### 4.2.1 系统提示词与专项技能
+
+系统提示词按「静态前缀 → 低频区 → 动态区」组装，并遵循「长规范下沉、按需加载」原则：
+
+- **常驻部分**只保留角色、核心契约、工作区元信息、工具策略与技能索引；
+- **专业任务规范**（PPT/幻灯片、SVG/图表、代码检视、文档写作、Markdown→PDF、联网检索）以 `SKILL.md` 形式内置在 `server/src/config/skills/`，命中用户指令关键词时由服务端自动装配，未命中时由模型调用 `read_skill("<name>")` 按需拉取；
+- 同一内容不再在 `main-agent.json`、`shared-contracts.json` 与各服务内重复注入，避免提示词膨胀。
+
+新增内置技能：在 `server/src/config/skills/<name>/SKILL.md` 写入 YAML frontmatter（`name` / `description` / `triggers`）与正文即可，无需改代码。
 
 ### 4.3 编辑器特性
 
@@ -254,6 +265,7 @@ web-ide-agent/
 │   └── src/
 │       ├── services/             # AgentService、AgentTurnEngine、SyntaxCheckService 等
 │       ├── config/               # Agent 提示词 & 模型配置
+│       │   └── skills/           # 内置专项技能（PPT/SVG/代码检视/文档/PDF/联网检索），按需加载
 │       ├── tools/                # 内置工具集（FileTools、SystemTools、TodoTools 等）
 │       └── utils/                # 辅助工具（ApiRetryUtils、PathUtils、ReasoningUtils 等）
 │

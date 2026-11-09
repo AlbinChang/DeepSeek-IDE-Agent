@@ -136,10 +136,12 @@ export const config = {
         historyLimit: parsePositiveInt(process.env.AGENT_GIT_HISTORY_LIMIT, 50, 1),
     },
 
-    // 工程级规范配置
+    // 工程级规范配置（按顺序探测，命中首个存在主文件的目录）
     rules: {
-        maxMainRuleLength: 10000, 
-        folderName: '.rules',
-        mainFileName: 'rule.md'
+        maxMainRuleLength: 10000,
+        sources: [
+            { directory: '.rules', mainFileName: 'rule.md', discoverSiblingRules: false },
+            { directory: '.lingma/rules', mainFileName: 'project_rule.md', discoverSiblingRules: true },
+        ]
     }
 };

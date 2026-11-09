@@ -40,36 +40,36 @@ describe("LLMRequestJournal", () => {
         expect(calculateCrc32(boundaryText)).toBe(calculateCrc32(Buffer.from(boundaryText, "utf8")));
     });
 
-    it("numbers requests from zero, stores CRC metadata, and keeps only the latest 50", async () => {
+    it("numbers requests from zero, stores CRC metadata, and keeps only the latest 100", async () => {
         const records = await Promise.all(
-            Array.from({ length: 52 }, (_, index) => journal.recordRequest(recordOptions({
+            Array.from({ length: 102 }, (_, index) => journal.recordRequest(recordOptions({
                 traceId: `trace-${index}`,
                 timestamp: index,
             }))),
         );
 
         expect(records.map((record) => record.requestIndex)).toEqual(
-            Array.from({ length: 52 }, (_, index) => index),
+            Array.from({ length: 102 }, (_, index) => index),
         );
 
         const directory = path.join(root, ".llm-request");
         const requestFiles = (await fs.readdir(directory))
             .filter((file) => /^request-\d+\.json$/.test(file))
             .sort((left, right) => Number(left.match(/\d+/)?.[0]) - Number(right.match(/\d+/)?.[0]));
-        expect(requestFiles).toHaveLength(50);
+        expect(requestFiles).toHaveLength(100);
         expect(requestFiles[0]).toBe("request-2.json");
-        expect(requestFiles[49]).toBe("request-51.json");
+        expect(requestFiles[99]).toBe("request-101.json");
 
-        const content = await fs.readFile(path.join(directory, "request-51.json"), "utf8");
+        const content = await fs.readFile(path.join(directory, "request-101.json"), "utf8");
         const separator = content.indexOf("\n");
         const metadata = JSON.parse(content.slice(0, separator));
         const rawPayload = content.slice(separator + 1);
         expect(metadata).toMatchObject({
-            requestIndex: 51,
+            requestIndex: 101,
             userId: "test-user",
             modelId: "test-model",
             agentStage: "主Agent",
-            timestamp: 51,
+            timestamp: 101,
         });
         expect(metadata.crc32).toBe(calculateCrc32(rawPayload));
         expect(JSON.parse(rawPayload)).toEqual(recordOptions().payload);

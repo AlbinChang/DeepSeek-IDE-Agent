@@ -7,6 +7,7 @@
 
 import type { IPromptSection, PromptBuildContext, PromptPriority } from '@/types/prompt.js';
 import { SkillService } from '@/services/SkillService.js';
+import { buildBuiltinSkillIndex, buildAutoLoadedSkills } from '@/services/BuiltinSkillService.js';
 import { RuleService } from '@/services/RuleService.js';
 import { MemoryService } from '@/services/MemoryService.js';
 import { BrowserMcpAdapter } from '@/services/BrowserMcpAdapter.js';
@@ -103,7 +104,7 @@ export class WorkspaceProfileSection extends BasePromptSection {
         const { envInfo, workspaceRoot: root, userId, projectVersions, projectSourceEncoding } = ctx;
         const lines: (string | null)[] = [
             `- **工作目录（唯一作业边界）**: ${root}`,
-            `  ⚠️ 【工作区隔离绝对铁律】：当前任务的唯一作业边界为上述工作目录。用户在指令中提及的 .env、配置文件、源代码、依赖等 100% 严格限定在上述工作目录内部（如 \`${root}/.env\`）。严禁跨出此目录去探索、读取、修改或引用 DeepSeek IDE / Agent 宿主自身的工程目录（如 IDE 自身源码、IDE 启动用 .env、DEEPSEEK_API_KEY 等）！`,
+            '  ⚠️ 所有文件操作与配置读取都限定在该目录内；越界访问 DeepSeek IDE / Agent 自身工程或启动配置属于 P0 违规（见 workspace_host_isolation_contract）。',
             `- **用户标识**: ${userId}`,
             `- **操作系统**: ${envInfo.os} (${envInfo.arch})`,
             `- **Node.js**: ${envInfo.nodeVersion}`,
@@ -159,33 +160,41 @@ function goConstraint(ver: string | null | undefined): string | null {
 // ============================================================
 
 /**
- * 工作区 Skills 索引
+ * 工作区 Skills 索引（内置专项技能 + 工作区技能）
  * priority: low-churn
+ *
+ * 只注入「名称 + 一句话用途」，完整规范由 `read_skill` 按需拉取。
  */
 export class SkillsIndexSection extends BasePromptSection {
     readonly id = 'skills-index';
     readonly priority: PromptPriority = 'low-churn';
 
     async build(ctx: PromptBuildContext): Promise<string> {
+        const parts: string[] = [];
+
+        try {
+            const builtinIndex = await buildBuiltinSkillIndex();
+            if (builtinIndex) parts.push(builtinIndex);
+        } catch { /* 内置技能缺失不影响主流程 */ }
+
         try {
             const skills = await SkillService.getInstance().getSkills(ctx.workspaceRoot);
-            if (!skills || skills.length === 0) return '';
+            if (skills && skills.length > 0) {
+                parts.push([
+                    '### 工作区专项技能 (WORKSPACE SKILLS INDEX)',
+                    `扫描路径：${WORKSPACE_SKILL_DIRECTORIES.join('、')}。命中场景时用 \`read_skill("<name>")\` 加载，或直接 \`read_file\` 读取入口文件：`,
+                    ...skills.map(s => `- **${s.name}**: ${s.description} (路径: ${s.skillFilePath})`),
+                    '**核心指令**：Skill 包含特定领域的 SOP，严禁在未加载的情况下凭空猜测；复杂多步骤工作流请用 `append_todo` 拆解追踪，历史裁剪后遗忘时重新加载。',
+                ].join('\n'));
+            }
+        } catch { /* 工作区无技能目录属正常情况 */ }
 
-            return [
-                '### 工作区专项技能 (WORKSPACE SKILLS INDEX)',
-                `检测到当前工作空间提供以下专项技能（扫描路径：${WORKSPACE_SKILL_DIRECTORIES.join('、')}）。`,
-                '当用户请求涉及以下领域时，请**务必**先调用 `read_file` 读取对应 Skill 入口文件。',
-                ...skills.map(s => `- **${s.name}**: ${s.description} (路径: ${s.skillFilePath})`),
-                '**核心指令**：Skill 包含特定领域的 SOP，严禁凭空猜测。由于历史可能被裁剪，请随时用 `read_file` 重新查阅。',
-            ].join('\n');
-        } catch {
-            return '';
-        }
+        return parts.join('\n\n');
     }
 }
 
 /**
- * 工程级规范 (.rules/)
+ * 工程级规范 (.rules/rule.md 或 .lingma/rules/project_rule.md)
  * priority: low-churn
  */
 export class ProjectRulesSection extends BasePromptSection {
@@ -201,13 +210,13 @@ export class ProjectRulesSection extends BasePromptSection {
             const parts = [
                 '### 工程级规范约束 (PROJECT RULES & CONSTRAINTS)',
                 '以下规范必须严格遵守：',
-                `#### [核心主规范] rule.md\n\n\`\`\`markdown\n${result.mainRule}\n\`\`\``,
+                `#### [核心主规范] ${result.mainFileName}\n\n\`\`\`markdown\n${result.mainRule}\n\`\`\``,
             ];
 
             if (result.referencedRules.length > 0) {
                 parts.push('#### [子规范按需加载]');
                 for (const sub of result.referencedRules) {
-                    parts.push(`- **${sub.name}** (使用 \`read_file\` 读取 \`.rules/${sub.name}\`)`);
+                    parts.push(`- **${sub.name}** (使用 \`read_file\` 读取 \`${result.ruleDirectory}/${sub.name}\`)`);
                 }
             }
 
@@ -288,45 +297,12 @@ export class ShellPolicySection extends BasePromptSection {
 
         const quotingContract = psAvailable ? [
             '',
-            '#### PowerShell JSON 传参免转义策略（powershell_quoting_contract）',
-            '核心原则：**优先用 PowerShell 语法特性避免 JSON 转义，而非死记转义规则。**',
-            '',
-            '**策略 1 — 字符串参数用单引号（最重要！）**',
-            '  ✅ Write-Host \'Hello World\'          # 单引号在 JSON 字符串中无需转义',
-            '  ❌ Write-Host "Hello World"          # 双引号需写成 \\"Hello World\\"',
-            '  ✅ Select-String -Pattern \'error\'   # 正则/模式匹配用单引号',
-            '  ✅ curl -d \'{"key":"val"}\' url       # JSON 体用单引号包裹，内层双引号无需转义',
-            '  ⚠️ 单引号字符串内变量不展开：$var 保持字面值，需要变量展开时用双引号（此时必须转义）',
-            '',
-            '**策略 2 — Windows 路径用正斜杠**',
-            '  ✅ Get-ChildItem C:/Users/zhang        # 正斜杠在 JSON 中无需转义',
-            '  ❌ Get-ChildItem C:\\Users\\zhang       # 反斜杠需写成 C:\\\\Users\\\\zhang',
-            '  ⚠️ 部分 cmd 原生命令（dir、type）不接受正斜杠 → 改用 run_cmd_command 或写双反斜杠',
-            '',
-            '**策略 3 — 多行命令用分号**',
-            '  ✅ pnpm install; pnpm run build        # 分号分隔（PS 5.1 不支持 &&）',
-            '  ✅ "pnpm install`npnpm run build"      # 反引号 n 表示换行（PS 特有，JSON 中须转义反引号为 ``）',
-            '  ❌ pnpm install\\npnpm run build        # \\n 在 JSON 中需写成 \\\\n（极易出错）',
-            '',
-            '**策略 4 — JSON 内嵌 JSON 用 here-string**',
-            '  ✅ curl -Method POST -Body (@\'',
-            '       {"key": "value"}',
-            '       \'@) https://api.example.com',
-            '     # here-string @\'...\'@ 内双引号无需转义',
-            '',
-            '**策略 5 — 必须用双引号时的自检清单**',
-            '  调用前逐字通读 command 参数值，确认：',
-            '  ☐ 每个 " 已写为 \\"',
-            '  ☐ 每个 \\ 已写为 \\\\（路径特别注意）',
-            '  ☐ 换行写为 `n（PowerShell 用反引号，不是 \\n）',
-            '  ☐ $ 在JSON中无须转义，仅PS双引号字符串内需用 `$ 转义变量',
-            '  ☐ 反引号 ` 在 JSON 中无须转义（非 JSON 特殊字符）',
-            '',
-            '**常见错误速查**',
-            '  ❌ "command":"echo "hello""         → 内层引号未转义，JSON 解析失败',
-            '  ❌ "command":"dir C:\\Users"         → 单反斜杠，\\U 被当作转义序列',
-            '  ✅ "command":"echo \'hello\'"         → 单引号免转义',
-            '  ✅ "command":"dir C:/Users"          → 正斜杠免转义',
+            '#### PowerShell JSON 传参免转义（powershell_quoting_contract）',
+            '- 文本参数用单引号：Write-Host \'Hello World\'（JSON 中无需转义）；需要变量展开时才用双引号，此时双引号须写成 \\"，反斜杠须写成 \\\\。',
+            '- 路径用正斜杠：Get-ChildItem C:/Users/x；仅 cmd 原生命令（dir、type）不接受正斜杠，改用 run_cmd_command。',
+            '- 多行命令用分号连接：pnpm install; pnpm run build（PS 5.1 不支持 &&）；换行用反引号 n。',
+            '- 内嵌 JSON 用单引号包裹：curl -d \'{"k":"v"}\' url；复杂场景用 here-string @\'...\'@。',
+            '- `$` 与反引号在 JSON 中无需转义；调用前逐字通读 command 值确认引号与反斜杠数量。',
         ].join('\n') : '';
 
         return [
@@ -374,10 +350,10 @@ export class TempFilePolicySection extends BasePromptSection {
     async build(_ctx: PromptBuildContext): Promise<string> {
         return [
             '### 临时文件治理策略 (TEMP FILES SSOT POLICY)',
-            '- 临时产物（调试脚本、构建中转、格式转换中间产物、一次性抓取缓存等用完即弃的内容）必须放在 `.temp/` 下，禁止散落业务目录。',
-            '- 最终交付文件禁止写入 `.temp/`。',
-            '- **【参考资料不入临时目录】下载的技术文章、参考文档、白皮书、API 规范、研究论文等具有持久参考价值的材料，严禁视为临时文件存入 `.temp/`。这些是项目知识资产，应统一存入 `docs/references/` 下按主题归档。**',
-            '- `.temp/` 由用户自行清理，不要主动要求清理。',
+            '- 临时产物（调试脚本、构建中转、格式转换中间产物、一次性抓取缓存等用完即弃内容）只能写入工作区 `.temp/`，禁止散落到 `src/`、`test/`、`docs/` 或工作区根目录。',
+            '- 最终交付文件禁止放 `.temp/`：用户指定路径时按用户指定，未指定时写入合适的业务目录并在回复中说明。',
+            '- `.temp/` 由用户自行清理，不要把清理临时文件列为任务、TODO 或交付门禁。',
+            '- 技术文章、参考文档、白皮书、API 规范、研究论文等有长期参考价值的材料不是临时文件，必须存入 `docs/references/<主题>/`（无 docs 结构时主动创建），禁止混入 `.temp/`。',
         ].join('\n');
     }
 }
@@ -632,6 +608,24 @@ export class CodeDesignFlowSection extends BasePromptSection {
             '- 流程图过于笼统（如"用户→系统→数据库"三个框）',
             '- 在多轮迭代中遗忘更新流程图（方案变更必须同步更新流程图）',
         ].join('\n');
+    }
+}
+
+/**
+ * 按用户指令自动装配的技能正文
+ * priority: dynamic —— 随指令变化，必须放在动态区避免污染静态前缀
+ */
+export class AutoLoadedSkillsSection extends BasePromptSection {
+    readonly id = 'auto-loaded-skills';
+    readonly priority: PromptPriority = 'dynamic';
+
+    async build(ctx: PromptBuildContext): Promise<string> {
+        if (!ctx.userInstruction) return '';
+        try {
+            return await buildAutoLoadedSkills(ctx.userInstruction);
+        } catch {
+            return '';
+        }
     }
 }
 

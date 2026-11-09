@@ -160,4 +160,19 @@ export class SkillService {
             this.skillCache.clear();
         }
     }
+
+    /** 按名称（忽略大小写）查找工作区技能 */
+    public async findSkill(workspaceRoot: string, name: string): Promise<AgentSkill | undefined> {
+        const normalized = name.trim().toLowerCase();
+        if (!normalized) return undefined;
+        const skills = await this.getSkills(workspaceRoot);
+        return skills.find((skill) => skill.name.toLowerCase() === normalized);
+    }
+
+    /** 读取工作区技能正文（剥离 YAML frontmatter） */
+    public async readSkillBody(workspaceRoot: string, skill: AgentSkill): Promise<string> {
+        const absolutePath = path.join(workspaceRoot, ...skill.skillFilePath.split('/'));
+        const raw = await fs.readFile(absolutePath, 'utf8');
+        return raw.replace(/^(?:\uFEFF)?\s*---\r?\n[\s\S]+?\r?\n---\r?\n?/, '').trim();
+    }
 }

@@ -30,6 +30,7 @@ import {
     IntentAlignmentSection,
     TodoPolicySection,
     CodeDesignFlowSection,
+    AutoLoadedSkillsSection,
     SharedContractsSection,
 } from '@/services/PromptSections.js';
 
@@ -70,6 +71,7 @@ export function createStandardBuilder(agentConfig: any): SystemPromptBuilder {
     builder.register(new UserPreferenceSection());
     builder.register(new IntentAlignmentSection());
     builder.register(new TodoPolicySection());
+    builder.register(new AutoLoadedSkillsSection());
 
     return builder;
 }

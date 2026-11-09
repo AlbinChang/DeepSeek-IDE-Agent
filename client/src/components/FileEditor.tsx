@@ -1,4 +1,4 @@
-﻿import React, { useRef, useEffect, useState, useMemo, lazy, Suspense } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useMemo, lazy, Suspense } from 'react';
 import { Editor, DiffEditor, loader } from '@monaco-editor/react';
 import type { OnMount } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
@@ -104,6 +104,10 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const [editorReady, setEditorReady] = useState(false);
   const activeFileRef = useRef(activeFile);
+  useLayoutEffect(() => {
+    // 在被动 effect 启动前更新路径，避免旧文件的异步读取在切换后通过过期检查。
+    activeFileRef.current = activeFile;
+  }, [activeFile]);
   const [prevActiveFile, setPrevActiveFile] = useState(activeFile);
   const [fileContent, setFileContent] = useState<string>(() => {
     if (!activeFile) return '';
@@ -262,7 +266,8 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   };
 
   const handleSaveFile = async () => {
-    if (!activeFile || isLocked || isJarEntry || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || viewMode === 'table' || isPdf || isImage || isSaving) return;
+    const filePath = activeFile;
+    if (!filePath || isLocked || isJarEntry || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || viewMode === 'table' || isPdf || isImage || isSaving) return;
 
     const contentToSave = getCurrentEditorContent();
     if (contentToSave === savedContent) {
@@ -280,7 +285,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     try {
       // Electron IPC 直写文件系统（零网络开销）
       const result = await electronBridge.writeFile({
-        filePath: activeFile,
+        filePath,
         content: contentToSave,
         encoding: fileEncoding,
         root: effectiveRoot,
@@ -288,11 +293,13 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
       if (!result.success) throw new Error(result.error || 'File write failed');
 
       if (!isMountedRef.current) return;
-      fileSavedContentCache.set(activeFile, contentToSave);
-      fileContentCache.set(activeFile, contentToSave);
-      setSavedContent(contentToSave);
-      setFileContent(contentToSave);
-      setIsDirty(false);
+      fileSavedContentCache.set(filePath, contentToSave);
+      fileContentCache.set(filePath, contentToSave);
+      if (activeFileRef.current === filePath) {
+        setSavedContent(contentToSave);
+        setFileContent(contentToSave);
+        setIsDirty(false);
+      }
     } catch (err: any) {
       console.error('[Editor] Save failed:', err?.response?.data || err?.message || err);
     } finally {
@@ -498,7 +505,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
     if (abortControllerRef.current) abortControllerRef.current.abort();
 
     if (isPdf || isImage) {
-      activeFileRef.current = activeFile;
       setFileContent('');
       setSavedContent('');
       setOriginalContent('');
@@ -516,8 +522,6 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         editorViewStateCache.set(curModelPath, state);
       }
     }
-    activeFileRef.current = activeFile;
-
     const mainUri = getFixedUri(activeFile, 'file');
     const existingModel = monaco.editor.getModel(mainUri);
     const cachedContent = existingModel ? existingModel.getValue() : fileContentCache.get(activeFile);

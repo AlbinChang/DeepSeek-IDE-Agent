@@ -20,7 +20,8 @@ export class FileTools {
     ]);
     private static readonly DIRECTORY_TREE_VISIBLE_DOT_DIR_NAMES = new Set([
         ...WORKSPACE_SKILL_CONTAINER_DIRECTORIES,
-        '.rules'
+        '.rules',
+        '.lingma'
     ]);
 
     private static isAgentSystemDirPath(relativePath: string): boolean {
@@ -32,7 +33,9 @@ export class FileTools {
 
     private static isDirectoryTreeImportantPath(relativePath: string): boolean {
         const normalized = relativePath.replace(/\\/g, '/').replace(/^\.\//, '');
-        return normalized === '.rules' || normalized.startsWith('.rules/') || isWorkspaceSkillPath(normalized);
+        return normalized === '.rules' || normalized.startsWith('.rules/')
+            || normalized === '.lingma/rules' || normalized.startsWith('.lingma/rules/')
+            || isWorkspaceSkillPath(normalized);
     }
 
     /**

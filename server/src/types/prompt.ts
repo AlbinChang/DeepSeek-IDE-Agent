@@ -33,6 +33,8 @@ export interface PromptBuildContext {
     localTimeZone: string;
     /** Agent 配置文件名（如 main-agent.json） */
     agentConfigFile: string;
+    /** 本轮用户指令（用于按需装配专项技能；缺省则不自动加载） */
+    userInstruction?: string;
 }
 
 /**

@@ -97,7 +97,7 @@ export class EvaluationAgentService {
             "   - 若主Agent明确声明“没有创建、修改、删除任何文件”，且用户目标不要求落盘产物，则不要把文件系统扫描作为主要验收路径，应主要核验最终回复本身的事实、逻辑、完整性与风险说明。",
             "   - 若用户目标要求文件产出但主Agent声明无文件变更，或最终回复缺失/含糊文件变更清单，必须判定为问题并要求主Agent补充或修正最终回复。",
             "2. 结合工作区真实产出进行核验（可调用工具，必要时规划TODO任务并执行）",
-            "   - 你与主Agent共享同一套工具能力（含 browser_open / browser_list_sessions / browser_close_all / browser_mcp_list_tools / browser_mcp_call 等浏览器工具）",
+            "   - 你与主Agent共享同一套工具能力（含 playwright__browser_* 浏览器工具与 read_skill 技能加载工具）",
             "   - 必须核验临时文件治理是否合规：临时产物是否统一位于工作目录 `.temp/` 下。",
             "   - 若存在临时文件落在 `.temp/` 之外且用户未明确要求该位置，必须判定为问题，并给出迁移建议。",
             "3. 形成结构化评估报告：目标、文件变更清单解析、证据、差距、风险、后续动作",
@@ -129,6 +129,7 @@ export class EvaluationAgentService {
                 "evaluator-agent.json",
                 root,
                 requestId,
+                userInstruction,
             );
             return MessagePreparationService.buildMessages({
                 systemPrompt,

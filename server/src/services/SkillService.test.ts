@@ -80,4 +80,16 @@ describe('SkillService', () => {
         expect(skills).toHaveLength(1);
         expect(skills[0].skillFilePath).toBe('.github/skills/lowercase-entry/skill.md');
     });
+
+    it('finds a workspace skill by name and returns its body without frontmatter', async () => {
+        const workspaceRoot = await createWorkspace();
+        await writeSkill(workspaceRoot, '.github/skills/api-conventions/SKILL.md', 'api-conventions', 'REST API conventions');
+
+        const found = await SkillService.getInstance().findSkill(workspaceRoot, 'API-Conventions');
+        expect(found?.name).toBe('api-conventions');
+
+        const body = await SkillService.getInstance().readSkillBody(workspaceRoot, found!);
+        expect(body).toBe('# api-conventions');
+        expect(await SkillService.getInstance().findSkill(workspaceRoot, 'missing')).toBeUndefined();
+    });
 });

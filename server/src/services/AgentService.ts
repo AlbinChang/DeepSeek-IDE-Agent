@@ -1,6 +1,7 @@
 ﻿import { LiveContextStore } from '@/services/LiveContextStore.js';
 import { ToolManager } from '@/services/ToolManager.js';
 import { SkillService } from '@/services/SkillService.js';
+import { BuiltinSkillService, buildAutoLoadedSkills, buildBuiltinSkillIndex } from '@/services/BuiltinSkillService.js';
 import { RuleService } from '@/services/RuleService.js';
 import { TodoTools } from '@/tools/TodoTools.js';
 import { NeverMistakeTools } from '@/tools/NeverMistakeTools.js';
@@ -160,6 +161,44 @@ export class AgentService extends EventEmitter {
                 }
             });
         }
+
+        console.log('[AgentService] Registering read_skill...');
+        // 专项技能按需加载（内置技能 + 工作区技能）：系统提示词只放索引，正文由模型按需拉取
+        this.toolManager.registerTool({
+            name: 'read_skill',
+            description: '按名称加载专项技能完整规范（见系统提示词技能索引）。',
+            parameters: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string', description: '技能名称，如 ppt-design。' }
+                },
+                required: ['name']
+            },
+            execute: async (params, context) => {
+                const root = this.resolveWorkspaceRootFromContext(context);
+                const name = typeof params?.name === 'string' ? params.name.trim() : '';
+                if (!name) throw new Error('The "name" parameter is missing or invalid.');
+
+                const builtin = await BuiltinSkillService.getInstance().getSkill(name);
+                if (builtin) {
+                    return `[skill] ${builtin.name} (builtin)\n\n${builtin.content}`;
+                }
+
+                if (root) {
+                    const workspaceSkill = await SkillService.getInstance().findSkill(root, name);
+                    if (workspaceSkill) {
+                        const content = await SkillService.getInstance().readSkillBody(root, workspaceSkill);
+                        return `[skill] ${workspaceSkill.name} (workspace: ${workspaceSkill.skillFilePath})\n\n${content}`;
+                    }
+                }
+
+                const available = [
+                    ...(await BuiltinSkillService.getInstance().listSkills()).map((skill) => skill.name),
+                    ...(root ? (await SkillService.getInstance().getSkills(root)).map((skill) => skill.name) : []),
+                ];
+                throw new Error(`技能 "${name}" 不存在。可用技能：${available.join(', ') || '(无)'}`);
+            }
+        });
 
         console.log('[AgentService] Registering read_file...');
         // 注册文件核心工具 (原子化 IO)
@@ -744,6 +783,7 @@ export class AgentService extends EventEmitter {
         agentConfigFile: string = 'main-agent.json',
         workspaceRoot?: string,
         requestId?: string,
+        userInstruction?: string,
     ): Promise<string> {
         // 缓存命中逻辑复用
         if (requestId) {
@@ -780,6 +820,7 @@ export class AgentService extends EventEmitter {
             localDate: formatBeijingDate(),
             localTimeZone: BEIJING_TIME_ZONE,
             agentConfigFile,
+            userInstruction,
         };
 
         // 使用插件架构构建提示词
@@ -862,6 +903,10 @@ export class AgentService extends EventEmitter {
      * - 同一 request 同一 Agent 的多次调用命中缓存直接返回
      * - 仅当主 Agent 完成任务 或 评估 Agent 判定目标达成后，调用方按 requestId 前缀批量清除
      * - 最多缓存 10 条，超出时 FIFO 淘汰最早的条目
+     *
+     * 提示词按「静态前缀 → 低频区 → 动态区」组装：
+     * - 专业任务长规范（PPT/SVG/代码检视/文档/PDF/联网检索）不常驻，只注入技能索引；
+     * - 传入 userInstruction 时按关键词自动装配命中的技能正文，其余场景由模型调用 read_skill 拉取。
      */
     public async buildSystemPrompt(
         userId: string,
@@ -869,6 +914,7 @@ export class AgentService extends EventEmitter {
         agentConfigFile: string = 'main-agent.json',
         workspaceRoot?: string,
         requestId?: string,
+        userInstruction?: string,
     ): Promise<string> {
         // 【缓存命中】同一对话同一 Agent 内复用已构建的系统提示词
         if (requestId) {
@@ -1096,10 +1142,10 @@ export class AgentService extends EventEmitter {
 
         const tempFilePolicyPrompt = [
             '### 临时文件治理策略 (TEMP FILES SSOT POLICY)',
-            '- 所有“临时性质”的产物（调试脚本、一次性日志、抓取中间文件、临时报告、缓存中转文件）必须放在工作目录 `.temp/` 下。',
-            '- 禁止将临时文件写入项目业务目录（如 `src/`、`test/`、`docs/`、`scripts/` 等）或工作目录根下散落。',
-            '- 在创建任何临时文件前，优先规划 `.temp/<task-scope>/...` 的目录结构，并保持可清理性。',
-            '- 最终交付文件禁止写入 `.temp/`；若用户指定路径，写入用户指定的非 `.temp/` 位置；若用户未指定路径，写入合适的工作区业务目录（非 `.temp/`）并在回复中说明。'
+            '- 临时产物（调试脚本、构建中转、格式转换中间产物、一次性抓取缓存等用完即弃内容）只能写入工作区 `.temp/`，禁止散落到 `src/`、`test/`、`docs/` 或工作区根目录。',
+            '- 最终交付文件禁止放 `.temp/`：用户指定路径时按用户指定，未指定时写入合适的业务目录并在回复中说明。',
+            '- `.temp/` 由用户自行清理，不要把清理临时文件列为任务、TODO 或交付门禁。',
+            '- 技术文章、参考文档、白皮书、API 规范、研究论文等有长期参考价值的材料不是临时文件，必须存入 `docs/references/<主题>/`（无 docs 结构时主动创建），禁止混入 `.temp/`。'
         ].join('\n');
 
         const terminalShellPrompt = [
@@ -1163,26 +1209,42 @@ export class AgentService extends EventEmitter {
         const tips = config.important_tips?.map((t: string) => `- ${t}`).join('\n') || "";
         const batchRules = config.batch_rules?.map((r: string) => `- ${r}`).join('\n') || "";
 
-        // 动态加载 Agent Skills (对齐 Skill 规范)
+        // 技能索引（内置专项技能随 Agent 分发 + 工作区专项技能）
+        // 只注入「名称 + 一句话用途」，完整规范由 read_skill 按需拉取，避免系统提示词常驻长文本。
         let skillPrompt = "";
         try {
+            const skillParts: string[] = [];
+            const builtinIndex = await buildBuiltinSkillIndex();
+            if (builtinIndex) skillParts.push(builtinIndex);
+
             const skills = await SkillService.getInstance().getSkills(root!);
             if (skills && skills.length > 0) {
-                skillPrompt = [
+                skillParts.push([
                     '### 工作区专项技能 (WORKSPACE SKILLS INDEX)',
-                    `检测到当前工作空间提供以下专项技能（扫描路径：${WORKSPACE_SKILL_DIRECTORIES.join('、')}）。当用户请求涉及以下领域时，请**务必**先调用 \`read_file\` 工具读取对应 Skill 的入口文件以获取详细的操作指南和约束条件：`,
+                    `扫描路径：${WORKSPACE_SKILL_DIRECTORIES.join('、')}。命中场景时用 \`read_skill("<name>")\` 加载，或直接 \`read_file\` 读取入口文件：`,
                     ...skills.map(s => `- **${s.name}**: ${s.description} (路径: ${s.skillFilePath})`),
-                    '**核心指令**：Skill 包含特定领域的 SOP 和 Expert Knowledge，严禁在未读取其入口文件的情况下凭空猜测其工作方式。如果该技能涵盖多步骤的复杂工作流、指令或要求，你应**优先使用 `append_todo` 新增 TODO 任务来追踪这些步骤要求以防遗忘**。由于长任务历史可能被裁剪，一旦你发现忘了内容，**请务必多次并且随时使用 `read_file` 重新查阅上文列出的 Skill 入口路径（如 `.claude/skills/xxx/SKILL.md`、`.github/skills/xxx/SKILL.md` 或 `.skills/xxx/SKILL.md`）并更新你的 TODO**。'
-                ].join('\n');
+                    '**核心指令**：Skill 包含特定领域的 SOP 和 Expert Knowledge，严禁在未加载的情况下凭空猜测；复杂多步骤工作流请用 `append_todo` 拆解追踪。历史被裁剪后若遗忘技能内容，随时重新加载。'
+                ].join('\n'));
             }
+            skillPrompt = skillParts.join('\n\n');
         } catch (skillErr) {
             console.warn('[AgentService] Failed to inject skills into prompt:', skillErr);
+        }
+
+        // 按用户指令按需装配技能正文：命中关键词才注入，未命中不占用任何 token
+        let autoLoadedSkillPrompt = "";
+        if (userInstruction) {
+            try {
+                autoLoadedSkillPrompt = await buildAutoLoadedSkills(userInstruction);
+            } catch (skillErr) {
+                console.warn('[AgentService] Failed to auto-load skills into prompt:', skillErr);
+            }
         }
         
         // 仅保留“意图维持准则”框架，不在 system prompt 中注入具体用户指令。
         // 具体用户意图由 MessagePreparationService.buildMessages 置顶注入，避免双重注入造成 token 浪费与语义重复。
 
-        // 动态加载工程级规范 (.rules/rule.md)
+        // 动态加载工程级规范 (.rules/rule.md 或 .lingma/rules/project_rule.md)
         let projectRulePrompt = "";
         try {
             const ruleResult = await RuleService.getInstance().loadWorkspaceRules(root!);
@@ -1190,17 +1252,17 @@ export class AgentService extends EventEmitter {
                 const parts = [
                     '### 工程级规范约束 (PROJECT RULES & CONSTRAINTS)',
                     '检测到当前工程特定的约束规范。你接下来的所有行为必须**严格遵守**这些规范：',
-                    `#### [核心主规范] rule.md\n\n\`\`\`markdown\n${ruleResult.mainRule}\n\`\`\``
+                    `#### [核心主规范] ${ruleResult.mainFileName}\n\n\`\`\`markdown\n${ruleResult.mainRule}\n\`\`\``
                 ];
                 
                 if (ruleResult.referencedRules.length > 0) {
                     parts.push('#### [子规范按需加载]');
                     for (const sub of ruleResult.referencedRules) {
-                        parts.push(`- **${sub.name}** (使用 \`read_file\` 读取 \`.rules/${sub.name}\`)`);
+                        parts.push(`- **${sub.name}** (使用 \`read_file\` 读取 \`${ruleResult.ruleDirectory}/${sub.name}\`)`);
                     }
                 }
 
-                parts.push('**核心指令**：由于复杂长任务中对话历史会裁剪，当你发现需要某个规范的具体细则时，**一定要随时使用 `read_file` 重新加载上文对应的子规范内容 (.rules/*.md)**。如果遇到非常复杂的规范、多步骤或工作流，**请优先使用 `append_todo` 工具将其拆分添加为 TODO 任务进行追踪防止丢失细节**。不要试图凭借猜测编写可能会违背规则的代码！');
+                parts.push(`**核心指令**：由于复杂长任务中对话历史会裁剪，当你发现需要某个规范的具体细则时，**一定要随时使用 \`read_file\` 重新加载上文对应的子规范内容 (${ruleResult.ruleDirectory}/*.md)**。如果遇到非常复杂的规范、多步骤或工作流，**请优先使用 \`append_todo\` 工具将其拆分添加为 TODO 任务进行追踪防止丢失细节**。不要试图凭借猜测编写可能会违背规则的代码！`);
 
                 if (ruleResult.error) {
                     parts.push(`> **系统警报**: ${ruleResult.error}`);
@@ -1272,7 +1334,7 @@ export class AgentService extends EventEmitter {
             '### 静态环境与项目元信息 (Static Workspace Profile)',
             [
                 `- **工作目录（唯一作业边界）**: ${root}`,
-                `  ⚠️ 【工作区隔离绝对铁律】：当前任务的唯一作业边界为上述工作目录。用户在指令中提及的 .env、配置文件、源代码、依赖等 100% 严格限定在上述工作目录内部（如 \`${root}/.env\`）。严禁跨出此目录去探索、读取、修改或引用 DeepSeek IDE / Agent 宿主自身的工程目录（如 IDE 自身源码、IDE 启动用 .env、DEEPSEEK_API_KEY 等）！`,
+                '  ⚠️ 所有文件操作与配置读取都限定在该目录内；越界访问 DeepSeek IDE / Agent 自身工程或启动配置属于 P0 违规（见 workspace_host_isolation_contract）。',
                 `- **用户标识**: ${userId}`,
                 `- **操作系统**: ${envInfo.os} (${envInfo.arch})`,
                 `- **Node.js**: ${envInfo.nodeVersion}`,
@@ -1325,6 +1387,9 @@ export class AgentService extends EventEmitter {
 
             // 7. 用户偏好记忆（置信度衰减，高置信优先）
             userPreferencePrompt,
+
+            // 7.5 按用户指令自动装配的技能正文（仅命中时存在，放在动态区避免污染静态前缀缓存）
+            autoLoadedSkillPrompt,
 
             // 8. 当前意图（最关键，放最后让模型最近期看到）
             intentBlock,

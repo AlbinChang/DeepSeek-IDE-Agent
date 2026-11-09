@@ -269,7 +269,7 @@ export class AgentChatComponent {
             let currentPinnedUserMessage = recoveryContext?.pinnedUserMessage || firstUserIntent;
             
             const prepareMessages = async (msgs: any[]) => {
-                const systemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId);
+                const systemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId, currentPinnedUserMessage);
                 return MessagePreparationService.buildMessages({
                     systemPrompt,
                     pinnedUserMessage: currentPinnedUserMessage,
@@ -342,7 +342,7 @@ export class AgentChatComponent {
                     } catch (todoResetErr) {
                         console.warn(`${getTS()} [AgentChat] Failed to clear stale TODOs before re-iteration for user: ${userId}`, todoResetErr);
                     }
-                    const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId);
+                    const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId, currentPinnedUserMessage);
                     const evaluatorReport = evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)";
                     const iterationUserContent = [
                         "【迭代修复模式 — 评估Agent 已发现问题，请立即在原文件上逐项修复】",
@@ -559,7 +559,7 @@ export class AgentChatComponent {
                         //
                         // 新方案：不使用 prepareMessages（避免注入原始用户意图），而是构建专用的修复 user 消息，
                         // 将评估报告的修复要求作为本轮 user 指令，让模型以最高优先级执行修复。
-                        const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId);
+                        const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId, currentPinnedUserMessage);
                         const evaluatorReport = evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)";
                         const iterationUserContent = [
                             "【迭代修复模式 — 评估Agent 已发现问题，请立即在原文件上逐项修复】",

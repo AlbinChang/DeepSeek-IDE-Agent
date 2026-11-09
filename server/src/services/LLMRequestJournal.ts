@@ -47,7 +47,7 @@ interface StoredLLMRequestRecord extends LLMRequestRecord {
     rawPayload: string;
 }
 
-const MAX_REQUEST_FILES = 50;
+const MAX_REQUEST_FILES = 100;
 const REQUEST_FILE_PATTERN = /^request-(\d+)\.json$/;
 const VALID_STAGES = new Set<AgentStage>(["主Agent", "评估Agent"]);
 const VALID_STATUSES = new Set<LLMRequestStatus>(["pending", "completed", "discarded"]);
