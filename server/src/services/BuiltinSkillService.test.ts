@@ -9,6 +9,7 @@ import {
 const EXPECTED_SKILLS = [
     'code-review',
     'doc-writing',
+    'jar-analysis',
     'md-to-pdf',
     'ppt-design',
     'svg-diagram',
@@ -61,6 +62,10 @@ describe('BuiltinSkillService', () => {
         const unrelated = await BuiltinSkillService.getInstance()
             .matchSkills('把这段文字翻译成英文');
         expect(unrelated).toEqual([]);
+
+        const jarTask = await BuiltinSkillService.getInstance()
+            .matchSkills('帮我解压这个 jar 包，看看里面的登录逻辑是怎么实现的');
+        expect(jarTask[0]?.name).toBe('jar-analysis');
     });
 
     it('auto-loads matched skill bodies and stays empty for unrelated instructions', async () => {

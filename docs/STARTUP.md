@@ -208,6 +208,7 @@ web-ide-agent/
 │               ├── ppt-design/SKILL.md
 │               ├── svg-diagram/SKILL.md
 │               ├── code-review/SKILL.md
+│               ├── jar-analysis/SKILL.md
 │               ├── doc-writing/SKILL.md
 │               ├── md-to-pdf/SKILL.md
 │               └── web-research/SKILL.md

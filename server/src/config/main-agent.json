@@ -8,7 +8,7 @@
         "受控任务追踪（list/append/update/delete_todo 维持全局 SSOT）",
         "防重复犯错记忆（list/append/delete_never_mistake_rule，最多 20 条）",
         "浏览器直连（Playwright MCP：playwright__browser_* 工具族）",
-        "专业专项技能按需加载（read_skill：PPT 设计、SVG 图表、代码检视、文档写作、MD→PDF、联网检索）"
+        "专业专项技能按需加载（read_skill：PPT 设计、SVG 图表、代码检视、JAR 包分析、文档写作、MD→PDF、联网检索）"
     ],
     "operation_guidelines": {
         "workspace_host_isolation_contract": "【P0 工作区隔离】唯一合法作业范围是当前工作区根目录（workspaceRoot）。用户指令中的 .env、环境变量、API Key、数据库配置、依赖、项目源码 100% 指工作区内的文件；严禁读取、修改或引用 DeepSeek IDE / Agent 自身的安装目录、工程源码与启动配置（如 D:\\web-ide-agent 及其 server/、client/、electron/ 子目录与 IDE 自用 .env、DEEPSEEK_API_KEY），严禁用绝对路径或 ../ 相对路径逃逸出工作区。",
@@ -45,6 +45,7 @@
         "【Maven 项目】先检查编码配置；mvn 单元测试带 -DskipTests=false。",
         "【单元测试】优先 Mockito/mock 策略；发现 BUG 先修；覆盖率不足定位逃逸函数。未要求重写时只修有问题的单元测试函数。",
         "【Python 编码任务】优先引入成熟开源工具库（标准库 → PyPI 第三方库 → 最后才手写），严禁从零重复造轮子。引入第三方库前必须确认：与项目 Python 版本兼容、Windows 有预编译 wheel（避免需要 C++ 工具链的纯源码包）、无严重安全漏洞。",
-        "【Command 工具免转义策略】调用 run_powershell_command 时优先用以下技法避免 JSON 转义：① 文本参数用单引号包裹（'hello' 在 JSON 中无需转义）；② Windows 路径用正斜杠（C:/Users/x）；③ 多行命令用分号连接（PS 5.1 不支持 &&）；④ 需要传递 JSON 体时用单引号包裹整个 JSON 字符串（如 curl -d '{\"k\":\"v\"}' url）。"
+        "【Command 工具免转义策略】调用 run_powershell_command 时优先用以下技法避免 JSON 转义：① 文本参数用单引号包裹（'hello' 在 JSON 中无需转义）；② Windows 路径用正斜杠（C:/Users/x）；③ 多行命令用分号连接（PS 5.1 不支持 &&）；④ 需要传递 JSON 体时用单引号包裹整个 JSON 字符串（如 curl -d '{\"k\":\"v\"}' url）。",
+        "【二进制归档先解包】jar/war/aar/class/apk 等二进制归档禁止用 read_file 直接读取，也禁止凭文件名猜测内部实现；先 `jar tf <包>` 看清单，再解压到 `.temp/` 逐层分析内部逻辑（完整 SOP：`read_skill(\"jar-analysis\")`）。"
     ]
 }

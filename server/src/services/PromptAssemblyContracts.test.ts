@@ -68,6 +68,19 @@ describe('system prompt assembly contracts', () => {
         expect(review).toContain('问题清单');
     });
 
+    it('routes java archive inspection to the jar skill instead of reading binaries', async () => {
+        const jar = await readSource('config/skills/jar-analysis/SKILL.md');
+        expect(jar).toContain('jar tf');
+        expect(jar).toContain('jar xf');
+        expect(jar).toContain('MANIFEST.MF');
+        expect(jar).toContain('javap');
+
+        const config = await readJson('config/main-agent.json');
+        const tips = config.important_tips as string[];
+        expect(tips.some((tip) => tip.includes('jar-analysis'))).toBe(true);
+        expect(tips.some((tip) => tip.includes('read_file 直接读取'))).toBe(true);
+    });
+
     it('registers a concise read_skill tool for on-demand retrieval', async () => {
         const source = await readSource('services/AgentService.ts');
         const toolIndex = source.indexOf("name: 'read_skill'");
