@@ -25,6 +25,8 @@ import {
 import type {
     WorkerToMainMessage,
     WorkflowWorkerHandle,
+    WorkflowWorkerPermitMessage,
+    WorkflowWorkerPermitReleaseMessage,
     WorkflowWorkerSpawner,
     WorkflowWorkerResultMessage,
 } from '@/workflow/workerProtocol.js';
@@ -37,6 +39,7 @@ export interface ProcessWorkerWorkflowEngineOptions {
     maxConcurrentRunsPerWorkflow?: number;
     maxRunDurationMs?: number;
     maxStoredRuns?: number;
+    agentConcurrencyPerProvider?: number;
     heartbeatIntervalMs?: number;
     heartbeatTimeoutMs?: number;
     workerReadyTimeoutMs?: number;
@@ -80,8 +83,15 @@ interface ActiveRun {
     ready: boolean;
     readyResolver?: (ok: boolean) => void;
     initError?: string;
+    heldPermits: Map<string, string>;
     durationTimer?: ReturnType<typeof setTimeout>;
     cancelTimer?: ReturnType<typeof setTimeout>;
+}
+
+interface PermitWaiter {
+    active: ActiveRun;
+    requestId: string;
+    key: string;
 }
 
 function concurrencyKeyFor(request: WorkflowRunRequest, workflowName: string): string {
@@ -111,6 +121,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
     private readonly maxConcurrentRunsPerWorkflow: number;
     private readonly maxRunDurationMs: number;
     private readonly maxStoredRuns: number;
+    private readonly agentConcurrencyPerProvider: number;
     private readonly heartbeatIntervalMs: number;
     private readonly heartbeatTimeoutMs: number;
     private readonly workerReadyTimeoutMs: number;
@@ -122,6 +133,8 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
     private readonly active = new Map<string, ActiveRun>();
     private readonly sessions = new Map<string, WorkflowRunSession>();
     private readonly reconciledRoots = new Set<string>();
+    private readonly permitActive = new Map<string, number>();
+    private readonly permitWaiters = new Map<string, PermitWaiter[]>();
     private readonly monitorTimer: ReturnType<typeof setInterval>;
     private workerSeq = 0;
     private closed = false;
@@ -139,6 +152,10 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         );
         this.maxRunDurationMs = Math.max(1000, options.maxRunDurationMs ?? globalConfig.workflow.maxRunDurationMs);
         this.maxStoredRuns = Math.max(1, options.maxStoredRuns ?? globalConfig.workflow.maxStoredRuns);
+        this.agentConcurrencyPerProvider = Math.max(
+            1,
+            options.agentConcurrencyPerProvider ?? globalConfig.workflow.agentConcurrencyPerProvider,
+        );
         this.heartbeatIntervalMs = Math.max(500, options.heartbeatIntervalMs ?? globalConfig.workflow.heartbeatIntervalMs);
         this.heartbeatTimeoutMs = Math.max(1000, options.heartbeatTimeoutMs ?? globalConfig.workflow.heartbeatTimeoutMs);
         this.workerReadyTimeoutMs = Math.max(1000, options.workerReadyTimeoutMs ?? globalConfig.workflow.workerReadyTimeoutMs);
@@ -598,6 +615,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             terminating: false,
             finalized: false,
             ready: false,
+            heldPermits: new Map(),
         };
         this.active.set(snapshot.runId, active);
         this.sessions.set(snapshot.runId, session);
@@ -803,12 +821,103 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                     },
                 });
                 return;
+            case 'run.permit':
+                this.handlePermitRequest(active, message);
+                return;
+            case 'run.permit.release':
+                this.handlePermitRelease(active, message);
+                return;
             case 'run.result':
                 await this.handleResult(active, message);
                 return;
             default:
                 return;
         }
+    }
+
+    private handlePermitRequest(active: ActiveRun, message: WorkflowWorkerPermitMessage): void {
+        if (active.finalized || !active.handle) return;
+        if (active.heldPermits.has(message.requestId)) return;
+        const key = `${(message.provider || 'default').toLowerCase()}:${message.model || 'default'}`;
+        const current = this.permitActive.get(key) || 0;
+        if (current < this.agentConcurrencyPerProvider) {
+            this.permitActive.set(key, current + 1);
+            active.heldPermits.set(message.requestId, key);
+            this.grantPermit(active, message.requestId);
+            return;
+        }
+        const waiters = this.permitWaiters.get(key) || [];
+        waiters.push({ active, requestId: message.requestId, key });
+        this.permitWaiters.set(key, waiters);
+    }
+
+    private handlePermitRelease(active: ActiveRun, message: WorkflowWorkerPermitReleaseMessage): void {
+        const key = active.heldPermits.get(message.requestId);
+        if (key) {
+            active.heldPermits.delete(message.requestId);
+            const remaining = Math.max(0, (this.permitActive.get(key) || 0) - 1);
+            if (remaining > 0) this.permitActive.set(key, remaining);
+            else this.permitActive.delete(key);
+            this.grantPermitWaiters(key);
+            return;
+        }
+        for (const [waiterKey, waiters] of this.permitWaiters) {
+            const index = waiters.findIndex((waiter) => waiter.requestId === message.requestId);
+            if (index >= 0) {
+                waiters.splice(index, 1);
+                if (waiters.length === 0) this.permitWaiters.delete(waiterKey);
+                return;
+            }
+        }
+    }
+
+    private grantPermitWaiters(key: string): void {
+        const waiters = this.permitWaiters.get(key);
+        if (!waiters) return;
+        while ((this.permitActive.get(key) || 0) < this.agentConcurrencyPerProvider) {
+            const waiter = waiters.shift();
+            if (!waiter) break;
+            if (waiter.active.finalized || !this.active.has(waiter.active.runId)) continue;
+            if (waiter.active.heldPermits.has(waiter.requestId)) continue;
+            this.permitActive.set(key, (this.permitActive.get(key) || 0) + 1);
+            waiter.active.heldPermits.set(waiter.requestId, key);
+            this.grantPermit(waiter.active, waiter.requestId);
+        }
+        if (waiters.length === 0) this.permitWaiters.delete(key);
+    }
+
+    private grantPermit(active: ActiveRun, requestId: string): void {
+        try {
+            active.handle?.postMessage({ type: 'run.permit.granted', requestId });
+        } catch {
+            const key = active.heldPermits.get(requestId);
+            if (key) {
+                active.heldPermits.delete(requestId);
+                const remaining = Math.max(0, (this.permitActive.get(key) || 0) - 1);
+                if (remaining > 0) this.permitActive.set(key, remaining);
+                else this.permitActive.delete(key);
+                this.grantPermitWaiters(key);
+            }
+        }
+    }
+
+    private releaseRunPermits(active: ActiveRun): void {
+        const counts = new Map<string, number>();
+        for (const [requestId, key] of active.heldPermits) {
+            active.heldPermits.delete(requestId);
+            counts.set(key, (counts.get(key) || 0) + 1);
+        }
+        for (const [key, count] of counts) {
+            const remaining = Math.max(0, (this.permitActive.get(key) || 0) - count);
+            if (remaining > 0) this.permitActive.set(key, remaining);
+            else this.permitActive.delete(key);
+        }
+        for (const [key, waiters] of this.permitWaiters) {
+            const remaining = waiters.filter((waiter) => waiter.active !== active);
+            if (remaining.length > 0) this.permitWaiters.set(key, remaining);
+            else this.permitWaiters.delete(key);
+        }
+        for (const key of counts.keys()) this.grantPermitWaiters(key);
     }
 
     private async handleResult(active: ActiveRun, message: WorkflowWorkerResultMessage): Promise<void> {
@@ -1005,6 +1114,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         if (active.finalized) return;
         active.finalized = true;
         this.clearTimers(active);
+        this.releaseRunPermits(active);
         active.offMessage?.();
         active.offExit?.();
         if (!active.resultReceived) {

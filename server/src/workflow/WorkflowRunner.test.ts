@@ -106,7 +106,12 @@ describe('WorkflowRunner', () => {
     });
 
     afterEach(async () => {
-        await rm(root, { recursive: true, force: true });
+        await rm(root, {
+            recursive: true,
+            force: true,
+            maxRetries: 5,
+            retryDelay: 50,
+        });
     });
 
     it('runs sequential set + agent steps and resolves expressions lazily', async () => {

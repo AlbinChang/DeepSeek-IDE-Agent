@@ -16,6 +16,7 @@ import { WorkflowRegistry } from '@/workflow/WorkflowRegistry.js';
 import { WorkflowRunner } from '@/workflow/WorkflowRunner.js';
 import { WorkflowRunSession } from '@/workflow/WorkflowRunSession.js';
 import { WorkflowRunStore, sanitizeForStore } from '@/workflow/WorkflowRunStore.js';
+import { ProviderConcurrencyLimiter } from '@/workflow/providerLimiter.js';
 import {
     DefaultWorkflowStepExecutor,
     type WorkflowStepExecutor,
@@ -43,6 +44,7 @@ export interface InProcessWorkflowEngineOptions {
     maxConcurrentRunsPerWorkflow?: number;
     maxRunDurationMs?: number;
     maxStoredRuns?: number;
+    agentConcurrencyPerProvider?: number;
 }
 
 interface QueuedRun {
@@ -79,6 +81,7 @@ function concurrencyKeyFor(request: WorkflowRunRequest, workflowName: string): s
 export class InProcessWorkflowEngine implements WorkflowEngine {
     private eventBus: WorkflowEventBus = NULL_WORKFLOW_EVENT_BUS;
     private readonly executor: WorkflowStepExecutor;
+    private readonly limiter: ProviderConcurrencyLimiter;
     private readonly maxWorkers: number;
     private readonly maxQueueSize: number;
     private readonly maxConcurrentRunsPerWorkflow: number;
@@ -92,8 +95,15 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
     private closed = false;
 
     constructor(options: InProcessWorkflowEngineOptions = {}) {
+        this.limiter = new ProviderConcurrencyLimiter(
+            Math.max(1, options.agentConcurrencyPerProvider ?? globalConfig.workflow.agentConcurrencyPerProvider),
+        );
         this.executor = options.executor || new DefaultWorkflowStepExecutor({
             agentService: options.agentService,
+            acquirePermit: (kind, provider, model, signal) => this.limiter.acquire(
+                `${(provider || 'default').toLowerCase()}:${model || 'default'}`,
+                signal,
+            ),
         });
         this.maxWorkers = Math.max(1, options.maxWorkers ?? globalConfig.workflow.maxWorkers);
         this.maxQueueSize = Math.max(1, options.maxQueueSize ?? globalConfig.workflow.maxQueueSize);
@@ -419,6 +429,7 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
             item.controller.abort(new WorkflowCancelledError('引擎关闭'));
         }
         await Promise.allSettled(activations.map((item) => item.promise));
+        this.limiter.shutdown('引擎关闭');
     }
 
     /** 首次访问某个工作区时，把上次进程遗留的 running 标记为 interrupted，并重新入队 queued。 */

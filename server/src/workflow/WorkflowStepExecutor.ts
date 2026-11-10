@@ -97,6 +97,13 @@ export interface DefaultWorkflowStepExecutorOptions {
     httpAllowPrivate?: boolean;
     httpMaxResponseBytes?: number;
     httpTimeoutMs?: number;
+    /** 全局限流：agent/evaluator 步骤执行前申请许可；返回释放函数 */
+    acquirePermit?: (
+        kind: 'agent' | 'evaluator',
+        provider: string | undefined,
+        model: string | undefined,
+        signal: AbortSignal,
+    ) => Promise<() => void>;
 }
 
 function mergeUsage(current: WorkflowUsage | undefined, next: TokenUsage | null | undefined): WorkflowUsage | undefined {
@@ -164,6 +171,7 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
     private readonly httpAllowPrivate: boolean;
     private readonly httpMaxResponseBytes: number;
     private readonly httpTimeoutMs: number;
+    private readonly acquirePermit?: DefaultWorkflowStepExecutorOptions['acquirePermit'];
 
     constructor(options: DefaultWorkflowStepExecutorOptions = {}) {
         this.agentService = options.agentService || null;
@@ -173,6 +181,7 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
         this.httpAllowPrivate = options.httpAllowPrivate ?? globalConfig.workflow.httpAllowPrivate;
         this.httpMaxResponseBytes = options.httpMaxResponseBytes ?? globalConfig.workflow.httpMaxResponseBytes;
         this.httpTimeoutMs = options.httpTimeoutMs ?? globalConfig.workflow.httpTimeoutMs;
+        this.acquirePermit = options.acquirePermit;
     }
 
     private getAgentService(): AgentService {
@@ -241,73 +250,80 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
 
         let usage: WorkflowUsage | undefined;
         const maxTurns = positiveInteger(withConfig.maxTurns) ?? globalConfig.workflow.agentStepMaxTurns;
+        const releasePermit = this.acquirePermit
+            ? await this.acquirePermit('agent', resolved.provider, resolved.modelId, ctx.abortSignal)
+            : undefined;
 
-        const turnResult = await AgentTurnEngine.runTurns({
-            client,
-            finalModelId: modelId,
-            activeHistory: messages,
-            toolsMetadata,
-            thinkingOptions,
-            agentService,
-            root: ctx.root,
-            userId: ctx.userId,
-            currentTraceId: ctx.traceId,
-            optimizedMessages: [],
-            lastUserMsgRecord: userMessage,
-            prepareMessages: async (history) => history,
-            abortSignal: ctx.abortSignal,
-            emit: (chunk) => {
-                if (chunk?.type === 'stage' && typeof chunk.content === 'string' && chunk.content.trim()) {
-                    void ctx.log(chunk.content);
+        try {
+            const turnResult = await AgentTurnEngine.runTurns({
+                client,
+                finalModelId: modelId,
+                activeHistory: messages,
+                toolsMetadata,
+                thinkingOptions,
+                agentService,
+                root: ctx.root,
+                userId: ctx.userId,
+                currentTraceId: ctx.traceId,
+                optimizedMessages: [],
+                lastUserMsgRecord: userMessage,
+                prepareMessages: async (history) => history,
+                abortSignal: ctx.abortSignal,
+                emit: (chunk) => {
+                    if (chunk?.type === 'stage' && typeof chunk.content === 'string' && chunk.content.trim()) {
+                        void ctx.log(chunk.content);
+                    }
+                },
+                startTimeStamp: Date.now(),
+                totalSteps: 0,
+                provider: resolved.providerConfig,
+                skipPersist: true,
+                skipJournal: true,
+                skipTelemetry: true,
+                telemetrySink: (turnUsage) => {
+                    usage = mergeUsage(usage, turnUsage);
+                },
+                agentStage: '工作流步骤',
+                allowedToolNames,
+                maxTurns,
+                runId: ctx.runId,
+                stepPath: ctx.stepPath,
+            });
+
+            let output: unknown = turnResult.finalAssistantContent;
+            const outputSchema = extractOutputSchema(definition);
+            if (outputSchema) {
+                let candidate = output;
+                if (typeof candidate === 'string') {
+                    const trimmed = candidate.trim();
+                    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+                    const jsonText = fenced ? fenced[1] : trimmed;
+                    try {
+                        candidate = JSON.parse(jsonText);
+                    } catch {
+                        // 保留字符串，让 schema 报类型错误
+                    }
                 }
-            },
-            startTimeStamp: Date.now(),
-            totalSteps: 0,
-            provider: resolved.providerConfig,
-            skipPersist: true,
-            skipJournal: true,
-            skipTelemetry: true,
-            telemetrySink: (turnUsage) => {
-                usage = mergeUsage(usage, turnUsage);
-            },
-            agentStage: '工作流步骤',
-            allowedToolNames,
-            maxTurns,
-            runId: ctx.runId,
-            stepPath: ctx.stepPath,
-        });
-
-        let output: unknown = turnResult.finalAssistantContent;
-        const outputSchema = extractOutputSchema(definition);
-        if (outputSchema) {
-            let candidate = output;
-            if (typeof candidate === 'string') {
-                const trimmed = candidate.trim();
-                const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-                const jsonText = fenced ? fenced[1] : trimmed;
-                try {
-                    candidate = JSON.parse(jsonText);
-                } catch {
-                    // 保留字符串，让 schema 报类型错误
+                const issues = validateJsonSchema(candidate, outputSchema);
+                if (issues.length > 0) {
+                    throw new WorkflowError(
+                        `agent 步骤输出不满足 output.schema: ${issues.map((issue) => `${issue.path} ${issue.message}`).join('; ')}`,
+                        'step',
+                        ctx.stepPath,
+                        issues,
+                    );
                 }
+                output = candidate;
             }
-            const issues = validateJsonSchema(candidate, outputSchema);
-            if (issues.length > 0) {
-                throw new WorkflowError(
-                    `agent 步骤输出不满足 output.schema: ${issues.map((issue) => `${issue.path} ${issue.message}`).join('; ')}`,
-                    'step',
-                    ctx.stepPath,
-                    issues,
-                );
+
+            if (output === undefined || output === null || (typeof output === 'string' && !output.trim())) {
+                throw new WorkflowError('agent 步骤未返回有效输出', 'step', ctx.stepPath);
             }
-            output = candidate;
-        }
 
-        if (output === undefined || output === null || (typeof output === 'string' && !output.trim())) {
-            throw new WorkflowError('agent 步骤未返回有效输出', 'step', ctx.stepPath);
+            return { output, usage };
+        } finally {
+            releasePermit?.();
         }
-
-        return { output, usage };
     }
 
     private async executeTool(
@@ -456,47 +472,54 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
             (withConfig.reasoningEffort as any) || ctx.reasoningEffort,
         );
         const thinkingOptions = AIProviderFactory.buildThinkingOptions(resolved.providerConfig, effort);
+        const releasePermit = this.acquirePermit
+            ? await this.acquirePermit('evaluator', resolved.provider, resolved.modelId, ctx.abortSignal)
+            : undefined;
 
-        const result = await EvaluationAgentService.getInstance().runEvaluation({
-            agentService: this.getAgentService(),
-            root: ctx.root,
-            userId: ctx.userId,
-            traceId: ctx.traceId,
-            locale: ctx.locale,
-            abortSignal: ctx.abortSignal,
-            emit: (chunk) => {
-                if (chunk?.type === 'stage' && typeof chunk.content === 'string' && chunk.content.trim()) {
-                    void ctx.log(chunk.content);
-                }
-            },
-            providerConfig: resolved.providerConfig,
-            modelId: resolved.modelId,
-            thinkingOptions,
-            userInstruction: instruction,
-            mainAgentFinalReply: targetText,
-            persistReport: false,
-            allowedToolNames,
-            skipJournal: true,
-            skipTelemetry: true,
-            maxTurns: globalConfig.workflow.agentStepMaxTurns,
-        });
+        try {
+            const result = await EvaluationAgentService.getInstance().runEvaluation({
+                agentService: this.getAgentService(),
+                root: ctx.root,
+                userId: ctx.userId,
+                traceId: ctx.traceId,
+                locale: ctx.locale,
+                abortSignal: ctx.abortSignal,
+                emit: (chunk) => {
+                    if (chunk?.type === 'stage' && typeof chunk.content === 'string' && chunk.content.trim()) {
+                        void ctx.log(chunk.content);
+                    }
+                },
+                providerConfig: resolved.providerConfig,
+                modelId: resolved.modelId,
+                thinkingOptions,
+                userInstruction: instruction,
+                mainAgentFinalReply: targetText,
+                persistReport: false,
+                allowedToolNames,
+                skipJournal: true,
+                skipTelemetry: true,
+                maxTurns: globalConfig.workflow.agentStepMaxTurns,
+            });
 
-        if (withConfig.requirePass === true && result.decision !== 'goal_achieved') {
-            throw new WorkflowError(
-                `evaluator 未通过: ${result.decision}`,
-                'step',
-                ctx.stepPath,
-                { report: result.reportContent },
-            );
+            if (withConfig.requirePass === true && result.decision !== 'goal_achieved') {
+                throw new WorkflowError(
+                    `evaluator 未通过: ${result.decision}`,
+                    'step',
+                    ctx.stepPath,
+                    { report: result.reportContent },
+                );
+            }
+
+            return {
+                output: {
+                    decision: result.decision,
+                    report: result.reportContent,
+                },
+                usage: result.usage || undefined,
+            };
+        } finally {
+            releasePermit?.();
         }
-
-        return {
-            output: {
-                decision: result.decision,
-                report: result.reportContent,
-            },
-            usage: result.usage || undefined,
-        };
     }
 
     private async executeApproval(

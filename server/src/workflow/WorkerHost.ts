@@ -2,6 +2,7 @@ import { config as globalConfig } from '@/config/index.js';
 import {
     WorkflowApprovalPause,
     WorkflowCancelledError,
+    WorkflowError,
     WorkflowTimeoutError,
 } from '@/workflow/errors.js';
 import { buildCheckpoint } from '@/workflow/engineUtils.js';
@@ -34,6 +35,11 @@ interface RunningWorkflow {
     heartbeatTimer?: ReturnType<typeof setInterval>;
 }
 
+interface PendingPermit {
+    resolve: () => void;
+    reject: (error: unknown) => void;
+}
+
 /**
  * Worker 侧运行时：只执行 WorkflowRunner，不启动 Fastify/UI。
  * 通过注入 send/executor 可在测试中直接驱动。
@@ -45,10 +51,14 @@ export class WorkflowWorkerHost {
     private readonly pid: number;
     private running: RunningWorkflow | null = null;
     private initialized = false;
+    private permitSeq = 0;
+    private readonly pendingPermits = new Map<string, PendingPermit>();
 
     constructor(options: WorkflowWorkerHostOptions) {
         this.send = options.send;
-        this.executor = options.executor || new DefaultWorkflowStepExecutor();
+        this.executor = options.executor || new DefaultWorkflowStepExecutor({
+            acquirePermit: (kind, provider, model, signal) => this.acquirePermit(kind, provider, model, signal),
+        });
         this.workerId = options.workerId;
         this.pid = options.pid ?? process.pid;
     }
@@ -85,6 +95,11 @@ export class WorkflowWorkerHost {
                 return;
             case 'run.ack':
                 return;
+            case 'run.permit.granted': {
+                const pending = this.pendingPermits.get(message.requestId);
+                if (pending) pending.resolve();
+                return;
+            }
             case 'ping':
                 this.send({ type: 'pong', seq: message.seq });
                 return;
@@ -217,8 +232,102 @@ export class WorkflowWorkerHost {
             }
         } finally {
             if (running.heartbeatTimer) clearInterval(running.heartbeatTimer);
+            this.cancelPendingPermits('Workflow run finished');
             if (this.running === running) this.running = null;
         }
+    }
+
+    private acquirePermit(
+        kind: 'agent' | 'evaluator',
+        provider: string | undefined,
+        model: string | undefined,
+        signal: AbortSignal,
+    ): Promise<() => void> {
+        const running = this.running;
+        if (!running) {
+            return Promise.reject(new WorkflowCancelledError('Workflow worker is not running'));
+        }
+        if (signal.aborted) {
+            return Promise.reject(this.abortReason(signal));
+        }
+
+        const requestId = `permit-${++this.permitSeq}`;
+        return new Promise<() => void>((resolve, reject) => {
+            let settled = false;
+            let released = false;
+            const cleanup = () => {
+                signal.removeEventListener('abort', onAbort);
+                this.pendingPermits.delete(requestId);
+            };
+            const onAbort = () => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                try {
+                    this.send({ type: 'run.permit.release', runId: running.runId, requestId });
+                } catch {
+                    // Worker 可能已经与主进程断开
+                }
+                reject(this.abortReason(signal));
+            };
+
+            this.pendingPermits.set(requestId, {
+                resolve: () => {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    resolve(() => {
+                        if (released) return;
+                        released = true;
+                        try {
+                            this.send({ type: 'run.permit.release', runId: running.runId, requestId });
+                        } catch {
+                            // Worker 可能已经退出
+                        }
+                    });
+                },
+                reject: (error) => {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    reject(error);
+                },
+            });
+
+            signal.addEventListener('abort', onAbort, { once: true });
+            if (signal.aborted) {
+                onAbort();
+                return;
+            }
+            try {
+                this.send({
+                    type: 'run.permit',
+                    runId: running.runId,
+                    requestId,
+                    kind,
+                    provider,
+                    model,
+                });
+            } catch (error) {
+                const pending = this.pendingPermits.get(requestId);
+                pending?.reject(error);
+            }
+        });
+    }
+
+    private abortReason(signal: AbortSignal): unknown {
+        return signal.reason instanceof WorkflowError
+            ? signal.reason
+            : new WorkflowCancelledError(
+                signal.reason instanceof Error ? signal.reason.message : 'Workflow cancelled',
+            );
+    }
+
+    private cancelPendingPermits(reason: string): void {
+        for (const pending of Array.from(this.pendingPermits.values())) {
+            pending.reject(new WorkflowCancelledError(reason));
+        }
+        this.pendingPermits.clear();
     }
 
     private cancelRun(runId: string, reason?: string): void {
@@ -228,6 +337,7 @@ export class WorkflowWorkerHost {
 
     public dispose(): void {
         this.cancelRun(this.running?.runId || '', 'Workflow worker disposed');
+        this.cancelPendingPermits('Workflow worker disposed');
     }
 
     /** 仅供测试/诊断：Worker 当前是否有 run。 */

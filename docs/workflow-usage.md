@@ -26,6 +26,7 @@
 - Worker 心跳默认 5s；30s 无心跳、异常退出或主进程关闭 → run 标记 `interrupted`。
 - 每个顶层步骤完成后写入 checkpoint；`resume_workflow` 对 `interrupted`（无需 decision）与 `waiting_approval`（需要 approve/reject）都可用。
 - 审批暂停后 Worker 退出释放槽位，恢复时启动新 Worker 从 checkpoint 继续。
+- Agent/evaluator 步骤按 `provider:model` 做跨 Worker 并发限制（默认 2），避免多 Worker 同时打爆模型 API。
 - 同一 workflow 默认串行（`WORKFLOW_MAX_CONCURRENT_RUNS_PER_WORKFLOW=1`）；可用 `concurrencyGroup` 让不同 workflow 共享串行组。
 - standalone server 没有 Electron `utilityProcess`，继续使用进程内引擎；行为与 Worker 模式一致（队列/审批/取消/checkpoint）。
 
@@ -357,6 +358,7 @@ do:
 | `WORKFLOW_MAX_STEP_OUTPUT_CHARS` | `65536` | 单步骤输出持久化上限 |
 | `WORKFLOW_DEFAULT_STEP_TIMEOUT_MS` | `600000` | 默认步骤超时 |
 | `WORKFLOW_AGENT_STEP_MAX_TURNS` | `12` | Agent 步骤默认轮次 |
+| `WORKFLOW_AGENT_CONCURRENCY_PER_PROVIDER` | `2` | 同一 provider:model 的 agent/evaluator 并发上限（Worker 模式跨进程生效） |
 | `WORKFLOW_HTTP_ALLOW_PRIVATE` | `false` | 是否允许 HTTP 步骤访问私网/localhost |
 | `WORKFLOW_HTTP_MAX_RESPONSE_BYTES` | `1048576` | HTTP 响应体上限 |
 | `WORKFLOW_HTTP_TIMEOUT_MS` | `60000` | HTTP 请求超时 |

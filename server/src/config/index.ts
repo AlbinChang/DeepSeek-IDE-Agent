@@ -190,6 +190,8 @@ export const config = {
         maxStepOutputChars: parsePositiveInt(process.env.WORKFLOW_MAX_STEP_OUTPUT_CHARS, 64 * 1024, 1024),
         defaultStepTimeoutMs: parsePositiveInt(process.env.WORKFLOW_DEFAULT_STEP_TIMEOUT_MS, 10 * 60 * 1000, 1000),
         agentStepMaxTurns: parsePositiveInt(process.env.WORKFLOW_AGENT_STEP_MAX_TURNS, 12, 1),
+        // 全局限流：同一 provider:model 同时执行的 agent/evaluator 步骤上限
+        agentConcurrencyPerProvider: parsePositiveInt(process.env.WORKFLOW_AGENT_CONCURRENCY_PER_PROVIDER, 2, 1),
         // HTTP 步骤：默认禁止内网地址，限制响应大小与超时
         httpAllowPrivate: parseBoolean(process.env.WORKFLOW_HTTP_ALLOW_PRIVATE, false),
         httpMaxResponseBytes: parsePositiveInt(process.env.WORKFLOW_HTTP_MAX_RESPONSE_BYTES, 1024 * 1024, 1024),

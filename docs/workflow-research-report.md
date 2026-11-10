@@ -1842,7 +1842,8 @@ flowchart TD
 | 步骤执行器 | `server/src/workflow/WorkflowStepExecutor.ts`：`agent`（AgentTurnEngine + 工具白名单 + `output.schema`）、`tool`、`run.shell`（ProcessSafetyGuard）、`evaluator`（`persistReport:false` + 只读白名单）、`approval` |
 | 运行存储 | `server/src/workflow/WorkflowRunStore.ts` / `WorkflowRunSession.ts`：`.workflow/.runs/<runId>/run.json`、`events.jsonl`、原子写、脱敏、保留最近 N 次 |
 | 执行引擎 | `server/src/workflow/InProcessWorkflowEngine.ts`：队列、`maxWorkers` 并发、同 workflow 串行、取消、审批恢复、重启 reconcile、多 run 并行；standalone server 使用 |
-| 进程 Worker 引擎 | `server/src/workflow/ProcessWorkerWorkflowEngine.ts`：主进程调度、worker-per-run、队列/准入、心跳/取消/崩溃恢复、主进程单写者；`utilityProcess` 通过可注入 `WorkflowWorkerSpawner` 端口接入 |
+| 进程 Worker 引擎 | `server/src/workflow/ProcessWorkerWorkflowEngine.ts`：主进程调度、worker-per-run、队列/准入、心跳/取消/崩溃恢复、主进程单写者；`utilityProcess` 通过可注入 `WorkflowWorkerSpawner` 端口接入；跨 Worker provider permit 限流 |
+| 限流 | `run.permit` / `run.permit.granted` / `run.permit.release` 协议 + `ProviderConcurrencyLimiter`；按 `provider:model` 限制 agent/evaluator 并发（默认 2） |
 | Worker 协议/运行时 | `server/src/workflow/workerProtocol.ts` + `WorkerHost.ts` + `RemoteWorkflowRunSession.ts`：`worker.init`/`run.start`/`run.event`/`run.step`/`run.checkpoint`/`run.result`/`run.cancel`/heartbeat；Worker 内只跑 `WorkflowRunner` |
 | Electron Worker 适配 | `electron/src/workers/workflowWorker.ts`、`electron/src/main/workflow/utility-process-spawner.ts`：`utilityProcess.fork`、`serviceName`、`stdio:pipe`、堆上限、stdout/stderr 排空、`taskkill /T /F`、`app.getAppMetrics()` |
 | Worker 构建/打包 | `electron/scripts/build-workflow-worker.mjs`（CJS 单文件 + `import.meta.url` 兼容 banner）、`build:workflow-worker`、dev 自动构建、`extraResources: dist/workers → resources/workers` |
@@ -1861,6 +1862,7 @@ flowchart TD
 - 子工作流步骤预算/wall-clock 与父 run 共享；崩溃恢复以父 run 顶层 checkpoint 为准，恢复时整个子工作流重新执行。
 - HTTP 步骤已启用（`call: http` / `run.http`），默认阻止私网/localhost，限制重定向/响应大小/超时；DNS rebinding 仍是已知窗口。
 - `run.script` / `run.container` / `emit` / `listen` 仍未启用。
+- Agent/evaluator 步骤已按 `provider:model` 做跨 Worker 的步骤级并发限制（默认 2）；不是 token bucket，单步内部的 API 重试仍由 `ApiRetryUtils` 退避。
 - `run.shell.environment` 已支持；shell 取消通过 `AbortSignal` 传播（POSIX 进程树清理弱于 Windows）。
 - Phase 1.5 采用 **worker-per-run 冷启动**，不做热池；`maxRunsPerWorker`/`maxWorkerRestarts` 暂未启用（保留给热池）。
 - Worker 只通过 `WorkflowRunChannel` 抽象上报状态；主进程独占写 `run.json`/`events.jsonl`，避免多进程写冲突。
@@ -1870,7 +1872,7 @@ flowchart TD
 **验证**：
 
 - server `tsc --noEmit` 通过；
-- 36 个测试文件 / 326 个用例全绿（新增表达式、RunStore、Runner、InProcessEngine、ProcessWorkerEngine、WorkerHost、workerProtocol、HTTP 步骤、StepExecutor、WorkflowTools、Registry 契约测试）；
+- 37 个测试文件 / 330 个用例全绿（新增表达式、RunStore、Runner、InProcessEngine、ProcessWorkerEngine、WorkerHost、workerProtocol、HTTP 步骤、ProviderLimiter、StepExecutor、WorkflowTools、Registry 契约测试）；
 - Electron 运行时冒烟：
   - `workflow:run`（`set` 流程）→ `workflow:getRun` → 审批流程 `waiting_approval` → `workflow:resume` → `succeeded`，run.json/events.jsonl 持久化正确；
   - 真实 `utilityProcess` Worker 执行 `set` 流程成功，事件含 `step.output`/`run.completed`；
@@ -1878,7 +1880,7 @@ flowchart TD
   - 审批 run 在真实 Worker 中暂停并写出 checkpoint。
 - Electron main/preload/worker 构建通过。
 
-**下一步**：Phase 2 剩余项：嵌套审批、全局限流、热池/Worker 健康回收、REST/SSE 与客户端运行面板。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
+**下一步**：Phase 2 剩余项：嵌套审批、Worker 热池/健康回收、provider token bucket、REST/SSE 与客户端运行面板。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
 
 ---
 

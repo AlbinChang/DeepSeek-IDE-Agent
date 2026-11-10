@@ -64,12 +64,33 @@ export interface WorkflowWorkerPingMessage {
     seq: number;
 }
 
+export interface WorkflowWorkerPermitMessage {
+    type: 'run.permit';
+    runId: string;
+    requestId: string;
+    kind: 'agent' | 'evaluator';
+    provider?: string;
+    model?: string;
+}
+
+export interface WorkflowWorkerPermitReleaseMessage {
+    type: 'run.permit.release';
+    runId: string;
+    requestId: string;
+}
+
+export interface WorkflowWorkerPermitGrantedMessage {
+    type: 'run.permit.granted';
+    requestId: string;
+}
+
 export type MainToWorkerMessage =
     | WorkflowWorkerInitMessage
     | WorkflowWorkerRunStartMessage
     | WorkflowWorkerCancelMessage
     | WorkflowWorkerAckMessage
-    | WorkflowWorkerPingMessage;
+    | WorkflowWorkerPingMessage
+    | WorkflowWorkerPermitGrantedMessage;
 
 export interface WorkflowWorkerReadyMessage {
     type: 'worker.ready';
@@ -160,6 +181,8 @@ export type WorkerToMainMessage =
     | WorkflowWorkerCheckpointMessage
     | WorkflowWorkerResultMessage
     | WorkflowWorkerHeartbeatMessage
+    | WorkflowWorkerPermitMessage
+    | WorkflowWorkerPermitReleaseMessage
     | WorkflowWorkerLogMessage
     | WorkflowWorkerPongMessage;
 
@@ -212,6 +235,7 @@ export function isMainToWorkerMessage(value: unknown): value is MainToWorkerMess
     }
     if (type === 'run.cancel') return typeof (value as WorkflowWorkerCancelMessage).runId === 'string';
     if (type === 'run.ack') return typeof (value as WorkflowWorkerAckMessage).runId === 'string';
+    if (type === 'run.permit.granted') return typeof (value as WorkflowWorkerPermitGrantedMessage).requestId === 'string';
     if (type === 'ping') return Number.isFinite((value as WorkflowWorkerPingMessage).seq);
     return false;
 }
@@ -243,5 +267,15 @@ export function isWorkerToMainMessage(value: unknown): value is WorkerToMainMess
         return typeof message.runId === 'string' && RESULT_STATUSES.has(message.status);
     }
     if (type === 'run.heartbeat') return typeof (value as WorkflowWorkerHeartbeatMessage).runId === 'string';
+    if (type === 'run.permit') {
+        const message = value as WorkflowWorkerPermitMessage;
+        return typeof message.runId === 'string'
+            && typeof message.requestId === 'string'
+            && (message.kind === 'agent' || message.kind === 'evaluator');
+    }
+    if (type === 'run.permit.release') {
+        const message = value as WorkflowWorkerPermitReleaseMessage;
+        return typeof message.runId === 'string' && typeof message.requestId === 'string';
+    }
     return false;
 }

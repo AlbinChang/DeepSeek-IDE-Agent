@@ -204,6 +204,19 @@ afterEach(async () => {
     })));
 });
 
+async function waitForGrant(handle: FakeWorkerHandle, requestId: string, timeoutMs = 2000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (handle.messages.some((message) => (
+            message.type === 'run.permit.granted' && message.requestId === requestId
+        ))) {
+            return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`Timed out waiting for permit ${requestId}`);
+}
+
 describe('ProcessWorkerWorkflowEngine', () => {
     it('runs a workflow through a worker and persists events', async () => {
         const root = await createRoot();
@@ -463,6 +476,116 @@ describe('ProcessWorkerWorkflowEngine', () => {
             expect(first.run?.status).toBe('succeeded');
             expect(second.run?.status).toBe('succeeded');
             expect(spawner.maxConcurrent).toBe(1);
+        } finally {
+            await engine.shutdown();
+        }
+    });
+
+    it('limits agent permits per provider across workers', async () => {
+        const root = await createRoot();
+        roots.push(root);
+        await writeWorkflow(root, 'permit-a', 'document:\n  name: permit-a\ndo:\n  - a:\n      set:\n        value: 1\n');
+        await writeWorkflow(root, 'permit-b', 'document:\n  name: permit-b\ndo:\n  - b:\n      set:\n        value: 2\n');
+
+        const spawner = new FakeSpawner();
+        let permitActive = 0;
+        let maxPermitActive = 0;
+        spawner.defaultBehavior = (handle, message) => {
+            const requestId = `permit-${message.config.runId}`;
+            handle.emit({
+                type: 'run.permit',
+                runId: message.config.runId,
+                requestId,
+                kind: 'agent',
+                provider: 'test-provider',
+                model: 'test-model',
+            });
+            void waitForGrant(handle, requestId).then(() => {
+                permitActive++;
+                maxPermitActive = Math.max(maxPermitActive, permitActive);
+                setTimeout(() => {
+                    permitActive--;
+                    handle.emit({ type: 'run.permit.release', runId: message.config.runId, requestId });
+                    spawner.emitSuccess(handle, message, { done: true }, message.steps[0]?.path || '/do/0/step');
+                }, 30);
+            });
+        };
+        const engine = new ProcessWorkerWorkflowEngine({
+            spawner,
+            maxWorkers: 2,
+            agentConcurrencyPerProvider: 1,
+        });
+        try {
+            const [first, second] = await Promise.all([
+                engine.startRun({ userId: 'u1', root, name: 'permit-a', wait: true, timeoutSeconds: 5 }),
+                engine.startRun({ userId: 'u1', root, name: 'permit-b', wait: true, timeoutSeconds: 5 }),
+            ]);
+            expect(first.run?.status).toBe('succeeded');
+            expect(second.run?.status).toBe('succeeded');
+            expect(maxPermitActive).toBe(1);
+        } finally {
+            await engine.shutdown();
+        }
+    });
+
+    it('releases permits when a worker crashes', async () => {
+        const root = await createRoot();
+        roots.push(root);
+        await writeWorkflow(root, 'permit-crash', 'document:\n  name: permit-crash\ndo:\n  - a:\n      set:\n        value: 1\n');
+        await writeWorkflow(root, 'permit-after', 'document:\n  name: permit-after\ndo:\n  - b:\n      set:\n        value: 2\n');
+
+        const spawner = new FakeSpawner();
+        spawner.enqueue((handle, message) => {
+            const requestId = `permit-${message.config.runId}`;
+            handle.emit({
+                type: 'run.permit',
+                runId: message.config.runId,
+                requestId,
+                kind: 'agent',
+                provider: 'crash-provider',
+                model: 'm',
+            });
+            void waitForGrant(handle, requestId).then(() => handle.exit(1));
+        });
+        spawner.enqueue((handle, message) => {
+            const requestId = `permit-${message.config.runId}`;
+            handle.emit({
+                type: 'run.permit',
+                runId: message.config.runId,
+                requestId,
+                kind: 'agent',
+                provider: 'crash-provider',
+                model: 'm',
+            });
+            void waitForGrant(handle, requestId).then(() => {
+                handle.emit({ type: 'run.permit.release', runId: message.config.runId, requestId });
+                spawner.emitSuccess(handle, message, { done: true }, message.steps[0]?.path || '/do/0/step');
+            });
+        });
+
+        const engine = new ProcessWorkerWorkflowEngine({
+            spawner,
+            maxWorkers: 2,
+            agentConcurrencyPerProvider: 1,
+        });
+        try {
+            const crashed = await engine.startRun({
+                userId: 'u1',
+                root,
+                name: 'permit-crash',
+                wait: true,
+                timeoutSeconds: 5,
+            });
+            expect(crashed.run?.status).toBe('interrupted');
+
+            const next = await engine.startRun({
+                userId: 'u1',
+                root,
+                name: 'permit-after',
+                wait: true,
+                timeoutSeconds: 5,
+            });
+            expect(next.run?.status).toBe('succeeded');
         } finally {
             await engine.shutdown();
         }
