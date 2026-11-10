@@ -1,11 +1,41 @@
 import { ToolLogger } from '@/utils/ToolLogger.js';
 import { AgentService } from "@/services/AgentService.js";
 
+export interface ToolExecutionContext {
+    userId?: string;
+    traceId?: string;
+    workspaceRoot?: string;
+    /** 调用方取消信号；长耗时工具应主动检查并尽快退出 */
+    abortSignal?: AbortSignal;
+    /** 工具进度/事件回传（workflow/worker 场景由调度器注入） */
+    emit?: (event: any) => void;
+    /** workflow 运行标识 */
+    runId?: string;
+    /** workflow 步骤路径，如 "steps[2].doImplement" */
+    stepPath?: string;
+    /** 执行该工具的 worker 标识 */
+    workerId?: string;
+    /** 仅允许执行的工具白名单；未列出时抛错 */
+    allowedToolNames?: ReadonlySet<string>;
+    /** 兼容现有工具自定义的上下文字段 */
+    [key: string]: any;
+}
+
+export interface ToolMetadata {
+    type: 'function';
+    function: {
+        name: string;
+        description: string;
+        parameters: any;
+        strict?: boolean;
+    };
+}
+
 export interface ToolDefinition {
     name: string;
     description: string;
     parameters: any;
-    execute: (params: any, context?: any) => Promise<any>;
+    execute: (params: any, context?: ToolExecutionContext) => Promise<any>;
 }
 
 export class ToolManager {
@@ -212,7 +242,13 @@ export class ToolManager {
         return base ? `${base}.${key}` : key;
     }
 
-    async executeTool(userId: string, toolName: string, args: any, traceId: string, executionContext: any = {}): Promise<any> {
+    async executeTool(
+        userId: string,
+        toolName: string,
+        args: any,
+        traceId: string,
+        executionContext: ToolExecutionContext = {},
+    ): Promise<any> {
         let resolvedToolName = toolName;
         let resolvedArgs = args;
         let tool = this.getTool(resolvedToolName);
@@ -231,9 +267,14 @@ export class ToolManager {
             throw new Error(`Tool not found: ${toolName}`);
         }
 
+        // 白名单必须在执行前校验：仅过滤 toolsMetadata 无法阻止模型自行输出未列出的工具名。
+        if (executionContext.allowedToolNames && !executionContext.allowedToolNames.has(resolvedToolName)) {
+            throw new Error(`Tool "${resolvedToolName}" is not allowed in this run`);
+        }
+
         // 集中式类型矫正：根据工具 Schema 自动修正 LLM 的类型偏差
         const safeArgs = this.coerceParams(resolvedArgs, tool.parameters);
-    this.validateParams(safeArgs, tool.parameters, resolvedToolName);
+        this.validateParams(safeArgs, tool.parameters, resolvedToolName);
 
         const workspaceRoot = executionContext?.workspaceRoot || AgentService.getInstance().getWorkspaceRoot(userId);
         

@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
-export type AgentStage = "主Agent" | "评估Agent";
+export type AgentStage = "主Agent" | "评估Agent" | "工作流步骤";
 export type LLMRequestStatus = "pending" | "completed" | "discarded";
 
 export interface LLMRequestRecoveryContext {
@@ -49,7 +49,7 @@ interface StoredLLMRequestRecord extends LLMRequestRecord {
 
 const MAX_REQUEST_FILES = 100;
 const REQUEST_FILE_PATTERN = /^request-(\d+)\.json$/;
-const VALID_STAGES = new Set<AgentStage>(["主Agent", "评估Agent"]);
+const VALID_STAGES = new Set<AgentStage>(["主Agent", "评估Agent", "工作流步骤"]);
 const VALID_STATUSES = new Set<LLMRequestStatus>(["pending", "completed", "discarded"]);
 const CRC_CHUNK_SIZE = 64 * 1024;
 const crc32Table = new Uint32Array(256);

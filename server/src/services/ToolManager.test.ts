@@ -89,6 +89,28 @@ describe('ToolManager argument validation', () => {
         );
     });
 
+    it('rejects tools outside the allowed tool name set', async () => {
+        const manager = createManager();
+        await expect(manager.executeTool(
+            'user',
+            'file_write',
+            { path: 'report.md', content: 'hello' },
+            'trace',
+            { allowedToolNames: new Set(['file_replace']) },
+        )).rejects.toThrow('Tool "file_write" is not allowed in this run');
+    });
+
+    it('allows tools inside the allowed tool name set', async () => {
+        const manager = createManager();
+        await expect(manager.executeTool(
+            'user',
+            'file_write',
+            { path: 'report.md', content: 'hello' },
+            'trace',
+            { allowedToolNames: new Set(['file_write']) },
+        )).resolves.toEqual({ status: 'success' });
+    });
+
     it('rejects browser_mcp_call when args is missing', async () => {
         await expect(createManager().executeTool('user', 'browser_mcp_call', {
             toolName: 'browser_snapshot'

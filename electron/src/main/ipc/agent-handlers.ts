@@ -6,8 +6,6 @@
  */
 import { IpcMain, BrowserWindow } from 'electron';
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
-import * as path from 'path';
 import { PROJECT_ROOT, SERVER_SRC, CONFIG_ROOT } from '../index.js';
 import type { LLMRequestJournal, LLMRequestRecord } from '@/services/LLMRequestJournal.js';
 
@@ -54,14 +52,7 @@ async function getLLMRequestJournal(): Promise<LLMRequestJournal> {
 
 /**
  * 从持久化存储读取用户设置，解析出实际使用的 provider 配置（含 apiKey）。
- *
- * 读取优先级（由高到低）：
- *   1. <workspaceRoot>/.llm/users/<userId>/settings.json  （工作区配置）
- *   2. <PROJECT_ROOT>/.llm/users/<userId>/settings.json    （Electron 全局配置）
- *   3. <PROJECT_ROOT>/.electron-store/settings.json        （settings:sync 总是写入这里）
- *   4. SettingsService.getDefaultSettings()                 （环境变量兜底）
- *
- * 所有路径均绕过 SettingsService 内存缓存，直接读盘，确保更新后的 key 立即生效。
+ * 具体路径优先级与读盘逻辑集中在 ProviderConfigResolver，供主进程/Worker/测试共用。
  */
 async function resolveProviderConfig(
     userId: string,
@@ -69,49 +60,10 @@ async function resolveProviderConfig(
     requestedProvider?: string,
     requestedModel?: string,
 ) {
-    const { AIProviderFactory } = await import('@/services/AIProviderFactory.js');
-    const { SettingsService } = await import('@/services/SettingsService.js');
-
-    let settings = SettingsService.getDefaultSettings();
-
-    // 候选路径列表（按优先级排序）
-    const candidatePaths: string[] = [];
-    if (root) {
-        candidatePaths.push(path.join(root, '.llm', 'users', userId, 'settings.json'));
-    }
-    candidatePaths.push(path.join(PROJECT_ROOT, '.llm', 'users', userId, 'settings.json'));
-    candidatePaths.push(path.join(PROJECT_ROOT, '.electron-store', 'settings.json'));
-
-    for (const candidatePath of candidatePaths) {
-        try {
-            if (!fs.existsSync(candidatePath)) continue;
-            const raw = fs.readFileSync(candidatePath, 'utf-8');
-            let parsed: any;
-            try {
-                parsed = JSON.parse(raw);
-            } catch {
-                continue;
-            }
-
-            // .electron-store 格式为 { "user:<userId>": { providers, ... } }
-            const userData = parsed?.[`user:${userId}`] || parsed;
-            if (userData && typeof userData === 'object' && userData.providers) {
-                settings = { ...settings, ...userData };
-                console.log(`[AgentIPC] Loaded settings from: ${candidatePath}`);
-                break;
-            }
-        } catch {
-            // 文件损坏或不可读，尝试下一个路径
-        }
-    }
-
-    return AIProviderFactory.resolveSelection(
-        settings.providers,
-        settings.activeProvider,
-        settings.activeModel,
-        requestedProvider,
-        requestedModel,
-    );
+    const { ProviderConfigResolver } = await import('@/services/ProviderConfigResolver.js');
+    return ProviderConfigResolver.resolveForUser(userId, root, requestedProvider, requestedModel, {
+        onLoaded: (settingsPath) => console.log(`[AgentIPC] Loaded settings from: ${settingsPath}`),
+    });
 }
 
 export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {

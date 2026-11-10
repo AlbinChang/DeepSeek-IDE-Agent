@@ -21,7 +21,7 @@
  */
 
 import * as path from "path";
-import { AgentService } from "@/services/AgentService.js";
+import type { ToolExecutionContext, ToolManager } from "@/services/ToolManager.js";
 import { AIProviderFactory } from "@/services/AIProviderFactory.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
 import { TodoService } from "@/services/TodoService.js";
@@ -198,6 +198,15 @@ function streamTruncationNotice(label: string, totalChars: number) {
 // 类型定义
 // ---------------------------------------------------------------------------
 
+/**
+ * AgentTurnEngine 所需的最小宿主能力。
+ * AgentService 结构上满足该接口，因此现有调用方无需改动。
+ */
+export interface AgentTurnHost {
+    toolManager: Pick<ToolManager, "executeTool">;
+    updateSessionHistory?(userId: string, history: any[], workspaceRoot?: string): void;
+}
+
 export interface AgentTurnEngineOptions {
     /** OpenAI 兼容的 client 实例（由 AIProviderFactory.getClient 创建） */
     client: any;
@@ -209,8 +218,8 @@ export interface AgentTurnEngineOptions {
     toolsMetadata: any[];
     /** 推理模式额外参数（由 AIProviderFactory.buildThinkingOptions 生成；default 档位时不含 reasoning_effort） */
     thinkingOptions: any;
-    /** AgentService 实例（用于工具执行与会话历史持久化） */
-    agentService: AgentService;
+    /** Agent 宿主能力（工具执行与会话历史持久化） */
+    agentService: AgentTurnHost;
     /** 工作区根路径（用于 TodoService） */
     root: string;
     /** 用户标识 */
@@ -255,6 +264,31 @@ export interface AgentTurnEngineOptions {
     agentStage?: AgentStage;
     /** 用于在重启后重建外层 Agent 对话循环的上下文。 */
     recoveryContext?: LLMRequestRecoveryContext;
+    /**
+     * 只允许执行的工具名集合。
+     * 未列出的工具不会出现在本轮 tools schema 中；若模型仍输出未列出的工具名，执行前直接拒绝。
+     */
+    allowedToolNames?: ReadonlySet<string>;
+    /**
+     * 最大轮次上限（默认不限制，保持现有 chat 行为）。
+     * 达到上限后追加一次禁止工具调用的收尾轮次（tool_choice:"none"），要求模型给出最终答复。
+     */
+    maxTurns?: number;
+    /**
+     * 跳过 Telemetry 写盘（多 Worker 场景避免并发写 DAU）。
+     * 默认 false，保持现有行为。
+     */
+    skipTelemetry?: boolean;
+    /** skipTelemetry 时的用量回传通道（通常由 Worker 上报主进程）。 */
+    telemetrySink?: (usage: TokenUsage, modelId: string) => void;
+    /** 跳过 LLM 请求日志（workflow 步骤不参与 chat 崩溃恢复）。 */
+    skipJournal?: boolean;
+    /** workflow 运行标识（透传给工具上下文）。 */
+    runId?: string;
+    /** workflow 步骤路径（透传给工具上下文）。 */
+    stepPath?: string;
+    /** 执行该轮次的 worker 标识（透传给工具上下文）。 */
+    workerId?: string;
 }
 
 export interface AgentTurnEngineResult {
@@ -301,6 +335,14 @@ export class AgentTurnEngine {
             abortSignal,
             emit,
             startTimeStamp,
+            allowedToolNames,
+            maxTurns,
+            skipTelemetry,
+            telemetrySink,
+            skipJournal,
+            runId,
+            stepPath,
+            workerId,
         } = options;
 
         let activeHistory = options.resumeRequest
@@ -313,6 +355,27 @@ export class AgentTurnEngine {
         let finalAssistantReasoning = "";
         let lastNonEmptyAssistantContent = "";
         let lastAssistantReasoning = "";
+        let finalTurnRequested = false;
+        let forceFinalAnswer = false;
+
+        const maxTurnLimit = typeof maxTurns === "number" && Number.isFinite(maxTurns) && maxTurns > 0
+            ? Math.floor(maxTurns)
+            : undefined;
+        const effectiveToolsMetadata = allowedToolNames
+            ? toolsMetadata.filter((tool) => {
+                const name = tool?.function?.name;
+                return typeof name === "string" && allowedToolNames.has(name);
+            })
+            : toolsMetadata;
+        const toolExecutionContext: ToolExecutionContext = {
+            workspaceRoot: root,
+            abortSignal,
+            emit,
+            ...(runId ? { runId } : {}),
+            ...(stepPath ? { stepPath } : {}),
+            ...(workerId ? { workerId } : {}),
+            ...(allowedToolNames ? { allowedToolNames } : {}),
+        };
 
         while (true) {
             turns++;
@@ -320,6 +383,19 @@ export class AgentTurnEngine {
             if (abortSignal?.aborted) {
                 console.log(`${getTS()} [AgentTurnEngine] AI generation aborted for user: ${userId}`);
                 break;
+            }
+
+            if (maxTurnLimit && turns > maxTurnLimit && !finalTurnRequested) {
+                finalTurnRequested = true;
+                forceFinalAnswer = true;
+                emit({
+                    type: "stage",
+                    content: `已达到最大轮次 ${maxTurnLimit}，停止调用工具并生成最终答复。`,
+                });
+                activeHistory.push({
+                    role: "user",
+                    content: "[系统] 已达到本次运行的最大轮次上限。请不要调用任何工具，直接基于当前进展给出最终答复。",
+                });
             }
 
             totalSteps++;
@@ -426,25 +502,33 @@ export class AgentTurnEngine {
                     }
                 };
 
+                // 收尾轮次保留 tools schema（部分供应商要求带 tool_calls 的历史必须同时携带 tools），
+                // 通过 tool_choice:"none" 禁止继续调用工具。
+                const toolsForRequest = forceFinalAnswer
+                    ? (effectiveToolsMetadata.length > 0 ? effectiveToolsMetadata : undefined)
+                    : (allowedToolNames ? effectiveToolsMetadata : toolsMetadata);
                 const requestPayload = replayPayload ?? {
                     model: finalModelId,
                     messages: AIProviderFactory.buildProviderSafeMessages(activeHistory, options.provider),
-                    tools: toolsMetadata as any,
+                    ...(toolsForRequest !== undefined ? { tools: toolsForRequest as any } : {}),
                     stream: true,
                     stream_options: { include_usage: true },
+                    ...(forceFinalAnswer && toolsForRequest !== undefined ? { tool_choice: "none" as const } : {}),
                     ...thinkingOptions,
                 };
 
-                await LLMRequestJournal.getInstance().recordRequest({
-                    root,
-                    userId,
-                    modelId: typeof requestPayload.model === "string" ? requestPayload.model : finalModelId,
-                    providerId: options.provider?.id,
-                    agentStage: options.agentStage ?? "主Agent",
-                    traceId: currentTraceId,
-                    recoveryContext: options.recoveryContext,
-                    payload: requestPayload,
-                });
+                if (!skipJournal) {
+                    await LLMRequestJournal.getInstance().recordRequest({
+                        root,
+                        userId,
+                        modelId: typeof requestPayload.model === "string" ? requestPayload.model : finalModelId,
+                        providerId: options.provider?.id,
+                        agentStage: options.agentStage ?? "主Agent",
+                        traceId: currentTraceId,
+                        recoveryContext: options.recoveryContext,
+                        payload: requestPayload,
+                    });
+                }
 
                 try {
                     const response = await client.chat.completions.create(
@@ -497,8 +581,13 @@ export class AgentTurnEngine {
                     emitStreamProgress("complete", 0, undefined, true);
 
                     apiSuccess = true;
+                    if (forceFinalAnswer && toolCalls.length > 0) {
+                        console.warn(`${getTS()} [AgentTurnEngine] Ignoring unexpected tool calls after final-answer request`);
+                        toolCalls = [];
+                    }
                     usage = accumulateTokenUsage(usage, localUsage);
                     if (localUsage) {
+                        telemetrySink?.(localUsage, finalModelId);
                         emit({ type: "usage", usage: localUsage });
                     }
                     if (fullContent && fullContent.trim()) {
@@ -575,6 +664,22 @@ export class AgentTurnEngine {
                     if (!tc.function.name) continue;
                     if (abortSignal?.aborted) break;
 
+                    if (allowedToolNames && !allowedToolNames.has(tc.function.name)) {
+                        const errMessage = `Tool "${tc.function.name}" is not allowed in this run`;
+                        console.warn(`${getTS()} [AgentTurnEngine] Blocked disallowed tool call: ${tc.function.name}`);
+                        emit({
+                            type: "annotation",
+                            method: "tool/error",
+                            params: { toolCallId: tc.id, toolName: tc.function.name, error: errMessage },
+                        });
+                        activeHistory.push({
+                            role: "tool",
+                            tool_call_id: tc.id,
+                            content: `Error: ${errMessage}`,
+                        });
+                        continue;
+                    }
+
                     let parsedArgs = {};
                     try {
                         parsedArgs = JSON.parse(tc.function.arguments || "{}");
@@ -605,7 +710,7 @@ export class AgentTurnEngine {
                             tc.function.name,
                             parsedArgs,
                             currentTraceId,
-                            { workspaceRoot: root }
+                            toolExecutionContext
                         );
 
                         if (process.env.DEBUG_LOG === "true") {
@@ -730,7 +835,7 @@ export class AgentTurnEngine {
                 const assistantMsgToSave = { ...assistantMsg };
                 if (!options.skipPersist) {
                     const historyToSave = [...optimizedMessages, lastUserMsgRecord, assistantMsgToSave];
-                    agentService.updateSessionHistory(userId, historyToSave, root);
+                    agentService.updateSessionHistory?.(userId, historyToSave, root);
                 }
 
                 finalAssistantContent = assistantMsg.content || "";
@@ -747,23 +852,34 @@ export class AgentTurnEngine {
             // ---------------------------------------------------------------
             const turnDuration = Date.now() - startTimeStamp;
             if (localUsage) {
-                const totalTokensConsumed = localUsage.totalTokens;
-                TelemetryService.recordRequest(
-                    true,
-                    turnDuration,
-                    totalTokensConsumed,
-                    "chat",
-                    finalModelId,
-                    userId
-                );
-                console.log(
-                    `${getTS()} [AgentTurnEngine] Telemetry recorded: ${totalTokensConsumed} tokens for model ${finalModelId} (Turn Duration: ${turnDuration}ms)`
-                );
+                if (!skipTelemetry) {
+                    const totalTokensConsumed = localUsage.totalTokens;
+                    TelemetryService.recordRequest(
+                        true,
+                        turnDuration,
+                        totalTokensConsumed,
+                        "chat",
+                        finalModelId,
+                        userId
+                    );
+                    console.log(
+                        `${getTS()} [AgentTurnEngine] Telemetry recorded: ${totalTokensConsumed} tokens for model ${finalModelId} (Turn Duration: ${turnDuration}ms)`
+                    );
+                }
             }
 
             console.log(
                 `${getTS()} [AgentTurnEngine] Completed turn ${turns} for user: ${userId} (Duration: ${turnDuration}ms)`
             );
+        }
+
+        if (finalTurnRequested) {
+            if (!finalAssistantContent && lastNonEmptyAssistantContent) {
+                finalAssistantContent = lastNonEmptyAssistantContent;
+            }
+            if (!finalAssistantReasoning && lastAssistantReasoning) {
+                finalAssistantReasoning = lastAssistantReasoning;
+            }
         }
 
         return {

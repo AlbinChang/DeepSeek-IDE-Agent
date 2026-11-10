@@ -22,7 +22,7 @@ interface AgentRecoveryInfo {
     userId: string;
     modelId: string;
     providerId?: string;
-    agentStage: '主Agent' | '评估Agent';
+    agentStage: '主Agent' | '评估Agent' | '工作流步骤';
     timestamp: number;
     traceId?: string;
 }
@@ -229,6 +229,124 @@ interface DiagnosticsResult {
     durationMs: number;
 }
 
+// ── Workflow ──
+type WorkflowRunStatus = 'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled';
+
+interface WorkflowInputDefinition {
+    name: string;
+    type?: string;
+    description?: string;
+    required?: boolean;
+    default?: unknown;
+}
+
+interface WorkflowSummary {
+    name: string;
+    path: string;
+    title?: string;
+    summary?: string;
+    version?: string;
+    namespace?: string;
+    inputs: WorkflowInputDefinition[];
+    stepCount: number;
+}
+
+interface WorkflowValidationIssue {
+    path: string;
+    message: string;
+    severity: 'error' | 'warning';
+}
+
+interface WorkflowValidationResult {
+    ok: boolean;
+    issues: WorkflowValidationIssue[];
+    validator: 'builtin';
+}
+
+interface WorkflowDetail {
+    summary: WorkflowSummary;
+    yaml: string;
+    validation: WorkflowValidationResult;
+}
+
+interface WorkflowStepInfo {
+    path: string;
+    name: string;
+    status: WorkflowRunStatus;
+    startedAt?: number;
+    finishedAt?: number;
+    error?: string;
+}
+
+interface WorkflowRunInfo {
+    runId: string;
+    workflowName: string;
+    workflowPath?: string;
+    userId: string;
+    root: string;
+    status: WorkflowRunStatus;
+    createdAt: number;
+    startedAt?: number;
+    finishedAt?: number;
+    steps: WorkflowStepInfo[];
+    worker?: { workerId: string; pid?: number };
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    error?: string;
+    waitingApproval?: { stepPath: string; prompt?: string };
+}
+
+interface WorkflowEvent {
+    runId: string;
+    seq: number;
+    type: string;
+    timestamp: number;
+    [key: string]: unknown;
+}
+
+interface WorkflowWorkerStats {
+    workerId: string;
+    pid?: number;
+    runId?: string;
+    memMB?: number;
+    cpu?: number;
+}
+
+interface WorkflowRunParams {
+    userId: string;
+    root?: string;
+    name: string;
+    inputs?: Record<string, unknown>;
+    provider?: string;
+    model?: string;
+    reasoningEffort?: 'default' | 'low' | 'high' | 'max';
+    wait?: boolean;
+    timeoutSeconds?: number;
+}
+
+interface WorkflowApi {
+    list: (params: { userId: string; root?: string }) => Promise<{ success: boolean; workflows?: WorkflowSummary[]; error?: string }>;
+    get: (params: { userId: string; root?: string; name: string }) => Promise<{ success: boolean; workflow?: WorkflowDetail; error?: string }>;
+    validate: (params: { userId: string; root?: string; name?: string }) => Promise<{ success: boolean; validation?: WorkflowValidationResult; error?: string }>;
+    run: (params: WorkflowRunParams) => Promise<{
+        success: boolean;
+        runId?: string;
+        status?: WorkflowRunStatus;
+        position?: number;
+        error?: string;
+        validation?: WorkflowValidationResult;
+    }>;
+    getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }>;
+    cancel: (params: { userId: string; root?: string; runId: string }) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
+    resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => Promise<{ success: boolean; resumed?: boolean; error?: string }>;
+    workers: (params?: { userId?: string; root?: string }) => Promise<{
+        success: boolean;
+        active?: number;
+        queued?: number;
+        workers?: WorkflowWorkerStats[];
+        error?: string;
+    }>;
+}
+
 interface ElectronAPI {
     // Agent
     startAgentChat: (params: AgentChatParams) => Promise<string>;
@@ -291,6 +409,10 @@ interface ElectronAPI {
     // Diagnostics
     getDiagnostics: (params: { filePath: string }) => Promise<DiagnosticsResult>;
     getDiagnosticsBatch: (params: { filePaths: string[] }) => Promise<DiagnosticsResult[]>;
+
+    // Workflow
+    workflow: WorkflowApi;
+    onWorkflowEvent: (callback: (event: WorkflowEvent) => void) => () => void;
 }
 
 declare global {

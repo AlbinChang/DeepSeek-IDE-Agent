@@ -6,10 +6,8 @@
 import { IpcMain, BrowserWindow, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import { WorkspaceRegistry } from '@/services/WorkspaceRegistry.js';
 import { PROJECT_ROOT, ELECTRON_ROOT } from '../index.js';
-
-// 用户工作区映射
-const userWorkspaces = new Map<string, string>();
 
 export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
     
@@ -38,8 +36,8 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
                 return { success: false, error: `Workspace directory not found: ${root}` };
             }
 
-            // 记录用户工作区
-            userWorkspaces.set(userId, root);
+            // 记录用户工作区（与 AgentService/Workflow 共用同一真值源）
+            await WorkspaceRegistry.getInstance().switchWorkspace(userId, root);
             const { LLMRequestJournal } = await import('@/services/LLMRequestJournal.js');
             LLMRequestJournal.getInstance().trackWorkspace(root);
 
@@ -66,7 +64,7 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
 
     // ── 获取当前工作区 ──
     ipcMain.handle('workspace:getRoot', async (_event, userId: string) => {
-        return userWorkspaces.get(userId) || null;
+        return WorkspaceRegistry.getInstance().get(userId) || null;
     });
 
     // ── 应用信息 ──
@@ -145,7 +143,7 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
 
     // ── 工作区状态查询 ──
     ipcMain.handle('workspace:status', async (_event, params: { userId: string }) => {
-        const root = userWorkspaces.get(params.userId) || null;
+        const root = WorkspaceRegistry.getInstance().get(params.userId) || null;
         return {
             initialized: !!root,
             workspaceRoot: root,
@@ -154,7 +152,7 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
 
     // ── 重置工作区 ──
     ipcMain.handle('workspace:reset', async (_event, params: { userId: string }) => {
-        userWorkspaces.delete(params.userId);
+        await WorkspaceRegistry.getInstance().reset(params.userId);
         return { success: true };
     });
 

@@ -82,6 +82,10 @@ export interface ElectronAPI {
     // 诊断
     getDiagnostics: (params: { filePath: string }) => Promise<DiagnosticsResult>;
     getDiagnosticsBatch: (params: { filePaths: string[] }) => Promise<DiagnosticsResult[]>;
+
+    // Workflow
+    workflow: WorkflowApi;
+    onWorkflowEvent: (callback: (event: WorkflowEvent) => void) => () => void;
 }
 
 // ── 参数/结果类型 ──
@@ -208,6 +212,122 @@ interface DiagnosticsResult {
     durationMs: number;
 }
 
+// ── Workflow ──
+type WorkflowRunStatus = 'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled';
+
+interface WorkflowInputDefinition {
+    name: string;
+    type?: string;
+    description?: string;
+    required?: boolean;
+    default?: unknown;
+}
+
+interface WorkflowSummary {
+    name: string;
+    path: string;
+    title?: string;
+    summary?: string;
+    version?: string;
+    namespace?: string;
+    inputs: WorkflowInputDefinition[];
+    stepCount: number;
+}
+
+interface WorkflowValidationIssue {
+    path: string;
+    message: string;
+    severity: 'error' | 'warning';
+}
+
+interface WorkflowValidationResult {
+    ok: boolean;
+    issues: WorkflowValidationIssue[];
+    validator: 'builtin';
+}
+
+interface WorkflowDetail {
+    summary: WorkflowSummary;
+    yaml: string;
+    validation: WorkflowValidationResult;
+}
+
+interface WorkflowStepInfo {
+    path: string;
+    name: string;
+    status: WorkflowRunStatus;
+    startedAt?: number;
+    finishedAt?: number;
+    error?: string;
+}
+
+interface WorkflowRunInfo {
+    runId: string;
+    workflowName: string;
+    workflowPath?: string;
+    userId: string;
+    root: string;
+    status: WorkflowRunStatus;
+    createdAt: number;
+    startedAt?: number;
+    finishedAt?: number;
+    steps: WorkflowStepInfo[];
+    worker?: { workerId: string; pid?: number };
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    error?: string;
+    waitingApproval?: { stepPath: string; prompt?: string };
+}
+
+interface WorkflowEvent {
+    runId: string;
+    seq: number;
+    type: string;
+    timestamp: number;
+    [key: string]: unknown;
+}
+
+interface WorkflowWorkerStats {
+    workerId: string;
+    pid?: number;
+    runId?: string;
+    memMB?: number;
+    cpu?: number;
+}
+
+interface WorkflowApi {
+    list: (params: { userId: string; root?: string }) => Promise<{ success: boolean; workflows?: WorkflowSummary[]; error?: string }>;
+    get: (params: { userId: string; root?: string; name: string }) => Promise<{ success: boolean; workflow?: WorkflowDetail; error?: string }>;
+    validate: (params: { userId: string; root?: string; name?: string }) => Promise<{ success: boolean; validation?: WorkflowValidationResult; error?: string }>;
+    run: (params: {
+        userId: string;
+        root?: string;
+        name: string;
+        inputs?: Record<string, unknown>;
+        provider?: string;
+        model?: string;
+        reasoningEffort?: 'default' | 'low' | 'high' | 'max';
+        wait?: boolean;
+        timeoutSeconds?: number;
+    }) => Promise<{
+        success: boolean;
+        runId?: string;
+        status?: WorkflowRunStatus;
+        position?: number;
+        error?: string;
+        validation?: WorkflowValidationResult;
+    }>;
+    getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }>;
+    cancel: (params: { userId: string; root?: string; runId: string }) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
+    resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => Promise<{ success: boolean; resumed?: boolean; error?: string }>;
+    workers: (params?: { userId?: string; root?: string }) => Promise<{
+        success: boolean;
+        active?: number;
+        queued?: number;
+        workers?: WorkflowWorkerStats[];
+        error?: string;
+    }>;
+}
+
 // ── 暴露 API 到渲染进程 ──
 contextBridge.exposeInMainWorld('electronAPI', {
     // Agent 对话
@@ -296,6 +416,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 诊断
     getDiagnostics: (params: { filePath: string }) => ipcRenderer.invoke('diagnostics:get', params),
     getDiagnosticsBatch: (params: { filePaths: string[] }) => ipcRenderer.invoke('diagnostics:batch', params),
+
+    // Workflow
+    workflow: {
+        list: (params: { userId: string; root?: string }) => ipcRenderer.invoke('workflow:list', params),
+        get: (params: { userId: string; root?: string; name: string }) => ipcRenderer.invoke('workflow:get', params),
+        validate: (params: { userId: string; root?: string; name?: string }) => ipcRenderer.invoke('workflow:validate', params),
+        run: (params: {
+            userId: string;
+            root?: string;
+            name: string;
+            inputs?: Record<string, unknown>;
+            provider?: string;
+            model?: string;
+            reasoningEffort?: 'default' | 'low' | 'high' | 'max';
+            wait?: boolean;
+            timeoutSeconds?: number;
+        }) => ipcRenderer.invoke('workflow:run', params),
+        getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => ipcRenderer.invoke('workflow:getRun', params),
+        cancel: (params: { userId: string; root?: string; runId: string }) => ipcRenderer.invoke('workflow:cancel', params),
+        resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => ipcRenderer.invoke('workflow:resume', params),
+        workers: (params?: { userId?: string; root?: string }) => ipcRenderer.invoke('workflow:workers', params),
+    },
+    onWorkflowEvent: (callback: (event: WorkflowEvent) => void) => {
+        const handler = (_event: IpcRendererEvent, data: WorkflowEvent) => callback(data);
+        ipcRenderer.on('workflow:event', handler);
+        return () => ipcRenderer.removeListener('workflow:event', handler);
+    },
 } satisfies ElectronAPI);
 
 // TypeScript 类型声明：让渲染进程可以访问 window.electronAPI

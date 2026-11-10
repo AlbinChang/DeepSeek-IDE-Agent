@@ -71,9 +71,109 @@ export interface AgentRecoveryInfo {
     userId: string;
     modelId: string;
     providerId?: string;
-    agentStage: '主Agent' | '评估Agent';
+    agentStage: '主Agent' | '评估Agent' | '工作流步骤';
     timestamp: number;
     traceId?: string;
+}
+
+// ── Workflow ──
+export type WorkflowRunStatus = 'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface WorkflowInputDefinition {
+    name: string;
+    type?: string;
+    description?: string;
+    required?: boolean;
+    default?: unknown;
+}
+
+export interface WorkflowSummary {
+    name: string;
+    path: string;
+    title?: string;
+    summary?: string;
+    version?: string;
+    namespace?: string;
+    inputs: WorkflowInputDefinition[];
+    stepCount: number;
+}
+
+export interface WorkflowValidationIssue {
+    path: string;
+    message: string;
+    severity: 'error' | 'warning';
+}
+
+export interface WorkflowValidationResult {
+    ok: boolean;
+    issues: WorkflowValidationIssue[];
+    validator: 'builtin';
+}
+
+export interface WorkflowDetail {
+    summary: WorkflowSummary;
+    yaml: string;
+    validation: WorkflowValidationResult;
+}
+
+export interface WorkflowStepInfo {
+    path: string;
+    name: string;
+    status: WorkflowRunStatus;
+    startedAt?: number;
+    finishedAt?: number;
+    error?: string;
+}
+
+export interface WorkflowRunInfo {
+    runId: string;
+    workflowName: string;
+    workflowPath?: string;
+    userId: string;
+    root: string;
+    status: WorkflowRunStatus;
+    createdAt: number;
+    startedAt?: number;
+    finishedAt?: number;
+    steps: WorkflowStepInfo[];
+    worker?: { workerId: string; pid?: number };
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    error?: string;
+    waitingApproval?: { stepPath: string; prompt?: string };
+}
+
+export interface WorkflowEvent {
+    runId: string;
+    seq: number;
+    type: string;
+    timestamp: number;
+    [key: string]: unknown;
+}
+
+export interface WorkflowWorkerStats {
+    workerId: string;
+    pid?: number;
+    runId?: string;
+    memMB?: number;
+    cpu?: number;
+}
+
+export interface WorkflowRunParams {
+    userId: string;
+    root?: string;
+    name: string;
+    inputs?: Record<string, unknown>;
+    provider?: string;
+    model?: string;
+    reasoningEffort?: 'default' | 'low' | 'high' | 'max';
+    wait?: boolean;
+    timeoutSeconds?: number;
+}
+
+export interface WorkflowRuntimeStats {
+    active: number;
+    queued: number;
+    workers: WorkflowWorkerStats[];
 }
 
 // ── 统一接口（仅 IPC 路径） ──
@@ -315,5 +415,65 @@ export const electronBridge = {
     },
     async getDiagnosticsBatch(params: { filePaths: string[] }) {
         return callIpc('getDiagnosticsBatch', [params]);
+    },
+};
+
+// ═══ Workflow ═══
+function getWorkflowApi(): any {
+    const ipcApi = getIpcApi();
+    if (!ipcApi.workflow) {
+        throw new Error('[ElectronBridge] electronAPI.workflow 不可用，请确认 preload 脚本已更新。');
+    }
+    return ipcApi.workflow;
+}
+
+/**
+ * Workflow 桥接：独立于 chat 的 `AgentSSEPayload`，事件按 runId 归属。
+ */
+export const workflowBridge = {
+    async list(params: { userId: string; root?: string }): Promise<{ success: boolean; workflows?: WorkflowSummary[]; error?: string }> {
+        return getWorkflowApi().list(params);
+    },
+    async get(params: { userId: string; root?: string; name: string }): Promise<{ success: boolean; workflow?: WorkflowDetail; error?: string }> {
+        return getWorkflowApi().get(params);
+    },
+    async validate(params: { userId: string; root?: string; name?: string }): Promise<{ success: boolean; validation?: WorkflowValidationResult; error?: string }> {
+        return getWorkflowApi().validate(params);
+    },
+    async run(params: WorkflowRunParams): Promise<{
+        success: boolean;
+        runId?: string;
+        status?: WorkflowRunStatus;
+        position?: number;
+        error?: string;
+        validation?: WorkflowValidationResult;
+    }> {
+        return getWorkflowApi().run(params);
+    },
+    async getRun(params: { userId: string; root?: string; runId: string; includeEvents?: boolean }): Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }> {
+        return getWorkflowApi().getRun(params);
+    },
+    async cancel(params: { userId: string; root?: string; runId: string }): Promise<{ success: boolean; cancelled?: boolean; error?: string }> {
+        return getWorkflowApi().cancel(params);
+    },
+    async resume(params: { userId: string; root?: string; runId: string; decision?: unknown }): Promise<{ success: boolean; resumed?: boolean; error?: string }> {
+        return getWorkflowApi().resume(params);
+    },
+    async workers(params?: { userId?: string; root?: string }): Promise<{
+        success: boolean;
+        active?: number;
+        queued?: number;
+        workers?: WorkflowWorkerStats[];
+        error?: string;
+    }> {
+        return getWorkflowApi().workers(params);
+    },
+    /** 订阅主进程 workflow:event；返回取消订阅函数 */
+    onEvent(callback: (event: WorkflowEvent) => void): () => void {
+        const currentApi: any = api || (window as any).electronAPI;
+        if (!currentApi?.onWorkflowEvent) {
+            return () => {};
+        }
+        return currentApi.onWorkflowEvent(callback);
     },
 };

@@ -91,6 +91,8 @@ async function registerIpcHandlers() {
     const { registerContextIpc, registerCompletionIpc } = await import('./ipc/context-handlers.js');
     const { registerAppIpc } = await import('./ipc/app-handlers.js');
     const { registerDiagnosticsIpc } = await import('./ipc/diagnostics-handlers.js');
+    const { registerWorkflowIpc } = await import('./ipc/workflow-handlers.js');
+    const { WorkflowRuntime } = await import('./workflow/workflow-runtime.js');
 
     registerAgentIpc(ipcMain, mainWindow!);
     registerFileIpc(ipcMain);
@@ -101,6 +103,11 @@ async function registerIpcHandlers() {
     registerCompletionIpc(ipcMain, mainWindow!);
     registerAppIpc(ipcMain, mainWindow!);
     registerDiagnosticsIpc(ipcMain);
+
+    // Workflow：先初始化运行时（事件总线/工作区钩子），再注册 IPC
+    WorkflowRuntime.getInstance().initialize(() => mainWindow);
+    registerWorkflowIpc(ipcMain);
+    await WorkflowRuntime.getInstance().start();
 
     console.log('[Electron] All IPC handlers registered.');
 }
@@ -204,6 +211,13 @@ app.on('before-quit', (event) => {
 
     normalShutdownStarted = true;
     void (async () => {
+        try {
+            const { WorkflowRuntime } = await import('./workflow/workflow-runtime.js');
+            await WorkflowRuntime.getInstance().shutdown();
+        } catch (error) {
+            console.error('[Electron] Failed to shutdown workflow runtime:', error);
+        }
+
         try {
             const { LLMRequestJournal } = await import('@/services/LLMRequestJournal.js');
             await LLMRequestJournal.getInstance().markNormalShutdown();

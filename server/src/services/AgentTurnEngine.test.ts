@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentService } from "@/services/AgentService.js";
 import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
 import { LLMRequestJournal } from "@/services/LLMRequestJournal.js";
+import { TelemetryService } from "@/services/TelemetryService.js";
 import { TodoService } from "@/services/TodoService.js";
 
 describe("AgentTurnEngine request recovery", () => {
@@ -183,8 +184,201 @@ describe("AgentTurnEngine request recovery", () => {
             "do_work",
             {},
             "recovery-trace",
-            { workspaceRoot: root },
+            expect.objectContaining({ workspaceRoot: root }),
         );
         expect(result.finalAssistantContent).toBe("任务已继续完成");
+    });
+
+    it("filters the tool schema and rejects disallowed tool calls", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const executeTool = vi.fn().mockResolvedValue("tool result");
+        const toolsMetadata = [
+            { type: "function", function: { name: "read_file", parameters: {} } },
+            { type: "function", function: { name: "file_write", parameters: {} } },
+        ];
+        const create = vi.fn()
+            .mockImplementationOnce(async (payload: Record<string, any>) => {
+                expect(payload.tools.map((tool: any) => tool.function.name)).toEqual(["read_file"]);
+                return (async function* () {
+                    yield {
+                        choices: [{
+                            delta: {
+                                tool_calls: [{
+                                    index: 0,
+                                    id: "call-blocked",
+                                    type: "function",
+                                    function: {
+                                        name: "file_write",
+                                        arguments: JSON.stringify({ path: "a.txt", content: "x" }),
+                                    },
+                                }],
+                            },
+                        }],
+                    };
+                })();
+            })
+            .mockImplementationOnce(async (payload: Record<string, any>) => {
+                expect(payload.messages).toContainEqual(expect.objectContaining({
+                    role: "tool",
+                    tool_call_id: "call-blocked",
+                    content: expect.stringContaining("not allowed"),
+                }));
+                return (async function* () {
+                    yield { choices: [{ delta: { content: "done" } }] };
+                })();
+            });
+        const agentService = {
+            toolManager: { executeTool },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata,
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "workflow-user",
+            currentTraceId: "trace-allowlist",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "finish the task" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            allowedToolNames: new Set(["read_file"]),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(executeTool).not.toHaveBeenCalled();
+        expect(result.finalAssistantContent).toBe("done");
+    });
+
+    it("requests a final answer after reaching maxTurns", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const executeTool = vi.fn().mockResolvedValue("tool result");
+        const payloads: Record<string, any>[] = [];
+        const create = vi.fn().mockImplementation(async (payload: Record<string, any>) => {
+            payloads.push(payload);
+            if (payloads.length <= 2) {
+                return (async function* () {
+                    yield {
+                        choices: [{
+                            delta: {
+                                tool_calls: [{
+                                    index: 0,
+                                    id: `call-${payloads.length}`,
+                                    type: "function",
+                                    function: { name: "do_work", arguments: "{}" },
+                                }],
+                            },
+                        }],
+                    };
+                })();
+            }
+            return (async function* () {
+                yield { choices: [{ delta: { content: "final answer" } }] };
+            })();
+        });
+        const agentService = {
+            toolManager: { executeTool },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [{ type: "function", function: { name: "do_work", parameters: {} } }],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "workflow-user",
+            currentTraceId: "trace-maxturns",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "finish the task" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            maxTurns: 2,
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(create).toHaveBeenCalledTimes(3);
+        expect(executeTool).toHaveBeenCalledTimes(2);
+        expect(payloads[2].tools.map((tool: any) => tool.function.name)).toEqual(["do_work"]);
+        expect(payloads[2].tool_choice).toBe("none");
+        expect(result.finalAssistantContent).toBe("final answer");
+    });
+
+    it("skips telemetry writes and forwards usage to the sink", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const recordRequest = vi.spyOn(TelemetryService, "recordRequest").mockImplementation(() => {});
+        const telemetrySink = vi.fn();
+        const create = vi.fn()
+            .mockImplementationOnce(async () => (async function* () {
+                yield {
+                    choices: [{
+                        delta: {
+                            tool_calls: [{
+                                index: 0,
+                                id: "call-usage",
+                                type: "function",
+                                function: { name: "do_work", arguments: "{}" },
+                            }],
+                        },
+                    }],
+                    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+                };
+            })())
+            .mockImplementationOnce(async () => (async function* () {
+                yield {
+                    choices: [{ delta: { content: "ok" } }],
+                    usage: { prompt_tokens: 4, completion_tokens: 6, total_tokens: 10 },
+                };
+            })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn().mockResolvedValue("tool result") },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [{ type: "function", function: { name: "do_work", parameters: {} } }],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "workflow-user",
+            currentTraceId: "trace-telemetry",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "finish the task" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+            telemetrySink,
+        });
+
+        expect(recordRequest).not.toHaveBeenCalled();
+        expect(telemetrySink).toHaveBeenNthCalledWith(
+            1,
+            { inputTokens: 1, outputTokens: 2, totalTokens: 3 },
+            "test-model",
+        );
+        expect(telemetrySink).toHaveBeenNthCalledWith(
+            2,
+            { inputTokens: 4, outputTokens: 6, totalTokens: 10 },
+            "test-model",
+        );
+        expect(result.finalAssistantContent).toBe("ok");
     });
 });

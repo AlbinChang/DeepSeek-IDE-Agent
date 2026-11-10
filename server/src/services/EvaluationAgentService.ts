@@ -36,6 +36,13 @@ export interface EvaluationAgentInput {
     userInstruction: string;
     mainAgentFinalReply: string;
     resumeRequest?: LLMRequestRecord;
+    /**
+     * 是否把评估报告落盘到 `.evaluate/evl_result.md`（默认 true）。
+     * Workflow evaluator 应传 false，避免覆盖主 Agent 的评估报告。
+     */
+    persistReport?: boolean;
+    /** 限制评估 Agent 可用的工具（默认不限制，保持现有行为） */
+    allowedToolNames?: ReadonlySet<string>;
 }
 
 export interface EvaluationAgentOutput {
@@ -79,6 +86,8 @@ export class EvaluationAgentService {
             userInstruction,
             mainAgentFinalReply,
             resumeRequest,
+            persistReport,
+            allowedToolNames,
         } = input;
 
         const evaluationTask = [
@@ -149,7 +158,7 @@ export class EvaluationAgentService {
         const activeHistory = resumeRequest
             ? resumeRequest.payload.messages
             : await prepareMessages(optimizedMessages);
-        const toolsMetadata = agentService.getSharedToolsMetadata();
+        const toolsMetadata = agentService.getSharedToolsMetadata(allowedToolNames);
 
         const client = AIProviderFactory.getClient(providerConfig);
 
@@ -181,6 +190,7 @@ export class EvaluationAgentService {
                 skipPersist: true,
                 provider: providerConfig,
                 agentStage: "评估Agent",
+                allowedToolNames,
                 recoveryContext: {
                     userInstruction,
                     pinnedUserMessage,
@@ -221,13 +231,15 @@ export class EvaluationAgentService {
         // 【持久化】最近一次评估报告落盘到工作区 .evaluate/evl_result.md（覆盖式）。
         // 供多轮对话中主Agent在上下文缺少评估报告时按需检索补充；一般情况下无需读取。
         // 失败不应影响评估主流程，这里仅告警。
-        try {
-            await this.saveEvaluationReport(root, finalReply);
-        } catch (persistErr) {
-            console.warn(
-                `${getTS()} [EvaluationAgent] Failed to persist evaluation report to ${EVALUATION_REPORT_RELATIVE_PATH}:`,
-                persistErr
-            );
+        if (persistReport !== false) {
+            try {
+                await this.saveEvaluationReport(root, finalReply);
+            } catch (persistErr) {
+                console.warn(
+                    `${getTS()} [EvaluationAgent] Failed to persist evaluation report to ${EVALUATION_REPORT_RELATIVE_PATH}:`,
+                    persistErr
+                );
+            }
         }
 
         console.log(`${getTS()} [EvaluationAgent] Evaluation finished for user: ${userId}, decision: ${decision}, issueCount: ${issueCount}, p0p1IssueCount: ${p0p1IssueCount}`);

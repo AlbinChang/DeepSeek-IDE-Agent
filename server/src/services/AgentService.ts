@@ -1,5 +1,7 @@
 ﻿import { LiveContextStore } from '@/services/LiveContextStore.js';
 import { ToolManager } from '@/services/ToolManager.js';
+import type { ToolMetadata } from '@/services/ToolManager.js';
+import { WorkspaceRegistry } from '@/services/WorkspaceRegistry.js';
 import { SkillService } from '@/services/SkillService.js';
 import { BuiltinSkillService, buildAutoLoadedSkills, buildBuiltinSkillIndex } from '@/services/BuiltinSkillService.js';
 import { RuleService } from '@/services/RuleService.js';
@@ -36,7 +38,7 @@ export class AgentService extends EventEmitter {
     public sessionUsage: Map<string, number> = new Map();
     public sessionLastAccess: Map<string, number> = new Map();
     public activeModels: Map<string, { provider: string, modelId: string }> = new Map();
-    private userWorkspaces: Map<string, string> = new Map();
+    private readonly workspaces = WorkspaceRegistry.getInstance();
     private userHistories: Map<string, any[]> = new Map();
     private readonly sessionHistoryKeepLast: number;
     /**
@@ -563,8 +565,10 @@ export class AgentService extends EventEmitter {
             execute: async (params, context) => {
                 const root = this.resolveWorkspaceRootFromContext(context);
                 if (!root) throw new Error('Workspace not initialized');
-                const javaEncoding = this.getProjectJavaEncoding(context.userId, root);
-                return await SystemTools.executePowerShellCommand(params.command, root, context.userId, params.timeout, javaEncoding, root);
+                const userId = context?.userId;
+                if (!userId) throw new Error('User not initialized');
+                const javaEncoding = this.getProjectJavaEncoding(userId, root);
+                return await SystemTools.executePowerShellCommand(params.command, root, userId, params.timeout, javaEncoding, root);
             }
         });
 
@@ -583,8 +587,10 @@ export class AgentService extends EventEmitter {
             execute: async (params, context) => {
                 const root = this.resolveWorkspaceRootFromContext(context);
                 if (!root) throw new Error('Workspace not initialized');
-                const javaEncoding = this.getProjectJavaEncoding(context.userId, root);
-                return await SystemTools.executeCmdCommand(params.command, root, context.userId, params.timeout, javaEncoding, root);
+                const userId = context?.userId;
+                if (!userId) throw new Error('User not initialized');
+                const javaEncoding = this.getProjectJavaEncoding(userId, root);
+                return await SystemTools.executeCmdCommand(params.command, root, userId, params.timeout, javaEncoding, root);
             }
         });
 
@@ -743,7 +749,7 @@ export class AgentService extends EventEmitter {
 
     public getWorkspaceRoot(userId: string, preferredRoot?: string): string | undefined {
         if (typeof preferredRoot === 'string' && preferredRoot.trim()) return preferredRoot.trim();
-        return this.userWorkspaces.get(userId);
+        return this.workspaces.get(userId);
     }
 
     /**
@@ -1466,7 +1472,7 @@ export class AgentService extends EventEmitter {
     }
 
     public setWorkspace(userId: string, root: string) {
-        this.userWorkspaces.set(userId, root);
+        this.workspaces.set(userId, root);
     }
 
     public setUserIdentity(userId: string, userName: string) {
@@ -1479,13 +1485,13 @@ export class AgentService extends EventEmitter {
     }
 
     public async initializeWorkspace(userId: string, root: string): Promise<void> {
-        this.setWorkspace(userId, root);
+        await this.workspaces.switchWorkspace(userId, root);
         // Additional initialization logic can be added here
     }
 
     public async resetWorkspace(userId: string): Promise<void> {
         // 先断开 MCP 连接和 Playwright MCP 连接
-        const root = this.userWorkspaces.get(userId);
+        const root = this.workspaces.get(userId);
         if (root) {
             try {
                 this.clearMcpTools();
@@ -1499,7 +1505,7 @@ export class AgentService extends EventEmitter {
             }
         }
 
-        this.userWorkspaces.delete(userId);
+        await this.workspaces.reset(userId);
         const isoKey = this.getIsolationKey(userId, '');
         this.sessionUsage.delete(isoKey);
         this.sessionLastAccess.delete(isoKey);
@@ -1537,18 +1543,21 @@ export class AgentService extends EventEmitter {
         return this.toolManager;
     }
 
-    public getSharedToolsMetadata(): Array<{ type: 'function'; function: { name: string; description: string; parameters: any; strict?: boolean } }> {
-        return this.toolManager.getAllTools().map((t) => ({
-            type: 'function' as const,
-            function: {
-                name: t.name,
-                description: t.description,
-                parameters: t.parameters,
-                // strict: true 强制模型遵守 JSON Schema 的 required 字段，
-                // 配合 /beta 端点使用，防止模型依赖预训练记忆忽略必填参数
-                strict: true,
-            },
-        }));
+    public getSharedToolsMetadata(names?: Iterable<string>): ToolMetadata[] {
+        const allowed = names ? new Set(names) : undefined;
+        return this.toolManager.getAllTools()
+            .filter((t) => !allowed || allowed.has(t.name))
+            .map((t) => ({
+                type: 'function' as const,
+                function: {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.parameters,
+                    // strict: true 强制模型遵守 JSON Schema 的 required 字段，
+                    // 配合 /beta 端点使用，防止模型依赖预训练记忆忽略必填参数
+                    strict: true,
+                },
+            }));
     }
 
     public updateContextSelection(userId: string, data: any): void {
