@@ -11,7 +11,8 @@ export type WorkflowRunStatus =
     | 'waiting_approval'
     | 'succeeded'
     | 'failed'
-    | 'cancelled';
+    | 'cancelled'
+    | 'interrupted';
 
 export type WorkflowValidationSeverity = 'error' | 'warning';
 
@@ -55,30 +56,99 @@ export interface WorkflowDetail {
     validation: WorkflowValidationResult;
 }
 
+/** 已解析、可直接交给 WorkflowRunner 的定义 */
+export interface WorkflowDefinition {
+    summary: WorkflowSummary;
+    /** 原始 YAML document 节点 */
+    document: Record<string, unknown>;
+    /** document.do：顶层任务数组 */
+    steps: Record<string, any>[];
+    yaml: string;
+    validation: WorkflowValidationResult;
+}
+
+export type WorkflowStepStatus =
+    | 'pending'
+    | 'running'
+    | 'succeeded'
+    | 'failed'
+    | 'skipped'
+    | 'waiting_approval'
+    | 'cancelled';
+
+export interface WorkflowUsage {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+}
+
 export interface WorkflowStepInfo {
+    /** JSON Pointer 风格路径，如 /do/0/plan */
     path: string;
+    /** 步骤名（do 项的 key） */
     name: string;
-    status: WorkflowRunStatus;
+    status: WorkflowStepStatus;
+    attempts: number;
     startedAt?: number;
     finishedAt?: number;
+    /** 完整输出（受 maxStepOutputChars 截断），供后续步骤表达式使用 */
+    output?: unknown;
+    /** 面向 UI 的输出预览 */
+    outputPreview?: string;
     error?: string;
+    usage?: WorkflowUsage;
+}
+
+export interface WorkflowApprovalState {
+    stepPath: string;
+    message?: string;
+    risk?: string;
+    requestedAt: number;
+}
+
+export interface WorkflowCheckpoint {
+    /** 顶层 do 数组的下一个索引（Phase 1 仅支持顶层审批暂停） */
+    nextStepIndex: number;
+    /** set 步骤写入的上下文 */
+    context: Record<string, unknown>;
+    completedPaths: string[];
 }
 
 export interface WorkflowRunInfo {
+    schemaVersion: 1;
     runId: string;
+    workflow: {
+        name: string;
+        title?: string;
+        version?: string;
+        namespace?: string;
+        path: string;
+    };
+    /** 兼容字段：等价于 workflow.name */
     workflowName: string;
+    /** 兼容字段：等价于 workflow.path */
     workflowPath?: string;
     userId: string;
     root: string;
     status: WorkflowRunStatus;
+    inputs: Record<string, unknown>;
     createdAt: number;
     startedAt?: number;
     finishedAt?: number;
+    currentTask?: string;
     steps: WorkflowStepInfo[];
-    worker?: { workerId: string; pid?: number };
-    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    checkpoint?: WorkflowCheckpoint;
+    approval?: WorkflowApprovalState;
+    usage?: WorkflowUsage;
     error?: string;
-    waitingApproval?: { stepPath: string; prompt?: string };
+    /** 队列位置（queued 时） */
+    position?: number;
+    /** in-process 引擎用 workerId='in-process'；多 Worker 时填真实 worker */
+    worker?: { workerId: string; pid?: number };
+    /** 事件序号（持久化用） */
+    lastSeq?: number;
+    /** includeEvents=true 时附带最近事件 */
+    events?: WorkflowEvent[];
 }
 
 export interface WorkflowEvent {
@@ -114,9 +184,11 @@ export interface WorkflowRunRequest {
     provider?: string;
     model?: string;
     reasoningEffort?: 'default' | 'low' | 'high' | 'max';
+    locale?: string;
     /** true 时同步等待 run 终态（受 timeoutSeconds 限制） */
     wait?: boolean;
     timeoutSeconds?: number;
+    concurrencyGroup?: string;
 }
 
 export interface WorkflowRunStartResult {
@@ -125,6 +197,8 @@ export interface WorkflowRunStartResult {
     status?: WorkflowRunStatus;
     position?: number;
     error?: string;
+    issues?: WorkflowValidationIssue[];
+    run?: WorkflowRunInfo;
 }
 
 export interface WorkflowRunLookup {

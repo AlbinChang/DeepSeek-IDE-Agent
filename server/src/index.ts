@@ -36,6 +36,7 @@ import { setupCompletionWebSocket } from '@/services/CompletionWebSocket.js';
 import { EventDistributor } from '@/services/EventDistributor.js';
 import { AgentService } from '@/services/AgentService.js';
 import { LLMRequestJournal } from '@/services/LLMRequestJournal.js';
+import { WorkspaceRegistry } from '@/services/WorkspaceRegistry.js';
 import { CompletionService } from '@/services/CompletionService.js';
 import { TelemetryService } from '@/services/TelemetryService.js';
 import { SettingsService, UserSettings, ModelProviderConfig } from '@/services/SettingsService.js';
@@ -47,6 +48,8 @@ import { FileTools } from '@/tools/FileTools.js';
 import { FileIO } from '@/utils/FileIO.js';
 import { PathUtils } from '@/utils/PathUtils.js';
 import { config as globalConfig } from '@/config/index.js';
+import { InProcessWorkflowEngine } from '@/workflow/InProcessWorkflowEngine.js';
+import { WorkflowService } from '@/workflow/WorkflowService.js';
 import { performance } from 'perf_hooks';
 import * as os from 'os';
 import * as v8 from 'v8';
@@ -63,6 +66,16 @@ const server = Fastify({
 
 // 对齐 3.4 节：初始不默认任何 Workspace，由用户通过前端选择
 const agentService = AgentService.getInstance();
+
+// Workflow：standalone 路径使用进程内引擎（无 Electron utilityProcess）
+const workflowService = WorkflowService.getInstance();
+workflowService.setEngine(new InProcessWorkflowEngine({ agentService }));
+WorkspaceRegistry.getInstance().onWorkspaceChange(({ userId, previousRoot }) => {
+    // 工作区切换/重置后取消旧工作区的 workflow run（A17）
+    void workflowService.cancelUserRuns(userId, previousRoot).catch((error) => {
+        console.warn('[Workflow] Failed to cancel runs on workspace change:', error);
+    });
+});
 
 async function bootstrap() {
     try {
@@ -966,6 +979,13 @@ async function bootstrap() {
         const shutdown = async (signal: string) => {
             console.log(`[Server] Received ${signal}. Shutting down...`);
             
+            // 0. 取消 workflow 运行并释放引擎
+            try {
+                await workflowService.shutdown();
+            } catch (error) {
+                server.log.error({ err: error }, 'Failed to shutdown workflow engine');
+            }
+
             // 1. 停止接收新请求
             await server.close();
 

@@ -5,6 +5,7 @@ import yaml from 'js-yaml';
 
 import { PathUtils } from '@/utils/PathUtils.js';
 import type {
+    WorkflowDefinition,
     WorkflowDetail,
     WorkflowInputDefinition,
     WorkflowSummary,
@@ -14,7 +15,7 @@ import type {
 
 const WORKFLOW_DIRECTORY = '.workflow';
 const WORKFLOW_EXTENSIONS = new Set(['.yaml', '.yml']);
-const MAX_WORKFLOW_FILE_BYTES = 1024 * 1024;
+const MAX_WORKFLOW_FILE_BYTES = 256 * 1024;
 const MAX_SCAN_DEPTH = 3;
 
 interface ParsedDocumentResult {
@@ -76,6 +77,33 @@ export class WorkflowRegistry {
                 issues,
                 validator: 'builtin',
             },
+        };
+    }
+
+    /**
+     * 读取并解析为可执行定义；解析失败时 validation.ok=false，steps 为空。
+     */
+    public async loadDefinition(target: string): Promise<WorkflowDefinition | null> {
+        const detail = await this.get(target);
+        if (!detail) return null;
+
+        let data: any;
+        try {
+            data = yaml.load(detail.yaml);
+        } catch {
+            data = undefined;
+        }
+        const document = (data && typeof data === 'object' && !Array.isArray(data))
+            ? data as Record<string, unknown>
+            : {};
+        const steps = Array.isArray((data as any)?.do) ? (data as any).do as Record<string, any>[] : [];
+
+        return {
+            summary: detail.summary,
+            document,
+            steps,
+            yaml: detail.yaml,
+            validation: detail.validation,
         };
     }
 
@@ -168,7 +196,13 @@ export class WorkflowRegistry {
         const extension = path.extname(relative).toLowerCase();
         const candidates = WORKFLOW_EXTENSIONS.has(extension)
             ? [path.join(directory, relative)]
-            : [path.join(directory, `${relative}.yaml`), path.join(directory, `${relative}.yml`)];
+            : [
+                // 优先匹配规范布局 *.workflow.yaml，再兼容普通 *.yaml
+                path.join(directory, `${relative}.workflow.yaml`),
+                path.join(directory, `${relative}.workflow.yml`),
+                path.join(directory, `${relative}.yaml`),
+                path.join(directory, `${relative}.yml`),
+            ];
 
         for (const candidate of candidates) {
             const absolutePath = path.resolve(candidate);

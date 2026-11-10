@@ -1819,6 +1819,43 @@ flowchart TD
 | 多 Worker 并发写同一文件 | 数据损坏 | `maxConcurrentRunsPerWorkflow=1`；写型 workflow `concurrencyGroup` 串行；原子写 |
 | Telemetry/TODO 并发写 | 状态污染 | Worker 只回传 usage；TODO 工具禁用；主进程统一写 |
 
+### 7.6 实施记录（Phase 0 + Phase 1，已完成）
+
+本轮已按报告落地“可运行的 MVP”，不修改聊天/文件/工具/评估的既有行为。
+
+| 模块 | 实现 |
+|---|---|
+| 定义发现/解析 | `server/src/workflow/WorkflowRegistry.ts`：发现 `.workflow/*.workflow.yaml|yml`（兼容普通 `.yaml|yml`）、YAML 解析、轻量结构校验、按路径或 `document.name` 查找、拒绝路径穿越 |
+| 表达式 | `server/src/workflow/expressions.ts`：安全求值（路径/比较/布尔/算术/过滤器/模板插值/duration），禁止 `eval`/`new Function`，敏感 env 脱敏 |
+| Schema 校验 | `server/src/workflow/schema.ts`：`output.schema` 的 type/required/properties/items/enum/数值与长度约束 |
+| Runner | `server/src/workflow/WorkflowRunner.ts`：`do` 顺序、`set`、`switch`、`for`、`try/catch/retry`、`wait`、`raise`、`then:exit`、步骤超时/预算/取消 |
+| 步骤执行器 | `server/src/workflow/WorkflowStepExecutor.ts`：`agent`（AgentTurnEngine + 工具白名单 + `output.schema`）、`tool`、`run.shell`（ProcessSafetyGuard）、`evaluator`（`persistReport:false` + 只读白名单）、`approval` |
+| 运行存储 | `server/src/workflow/WorkflowRunStore.ts` / `WorkflowRunSession.ts`：`.workflow/.runs/<runId>/run.json`、`events.jsonl`、原子写、脱敏、保留最近 N 次 |
+| 执行引擎 | `server/src/workflow/InProcessWorkflowEngine.ts`：队列、`maxWorkers` 并发、同 workflow 串行、取消、审批恢复、重启 reconcile、多 run 并行 |
+| 工具面 | `server/src/tools/WorkflowTools.ts`：`list_workflows`/`get_workflow`/`validate_workflow`/`run_workflow`/`get_workflow_run`/`list_workflow_runs`/`cancel_workflow`/`resume_workflow` |
+| 提示词 | `server/src/services/WorkflowIndexSection.ts`：只注入工作流索引；无 `.workflow` 时零影响 |
+| IPC/Electron | `workflow:*` 已接真实引擎；`WorkflowRuntime` 注入 `InProcessWorkflowEngine`；workspace reset 取消 run；`before-quit` 关闭引擎 |
+| standalone | `server/src/index.ts` 注入进程内引擎，SIGINT/SIGTERM 时关闭 |
+| 配置 | `config.workflow` 增加 `maxStoredRuns`/`maxSteps`/`maxStepOutputChars`/`defaultStepTimeoutMs`/`agentStepMaxTurns` |
+
+**与报告的差异（有意收敛）**：
+
+- 未引入 `@serverlessworkflow/sdk`，改用内置轻量解析/校验；`WorkflowRegistry` 保持同一返回结构，后续可替换为 SDK。
+- `fork` 未启用（明确报 `WorkflowUnsupportedError`），按报告留到 Phase 2；子工作流、HTTP、`emit/listen` 同样未启用。
+- 审批仅支持顶层 `do`；嵌套审批留到 Phase 2。
+- `run.shell.environment` 未透传（记录 warning）。
+- 进程内引擎暂无 Worker；`maxWorkers` 表示并发 run 数，Phase 1.5 再替换为 `utilityProcess` 池。
+- `workflow:event` 只推送 run/step 级事件，不逐 token 推送，避免事件日志膨胀。
+
+**验证**：
+
+- server `tsc --noEmit` 通过；
+- 32 个测试文件 / 298 个用例全绿（新增表达式、RunStore、Runner、InProcessEngine、StepExecutor、WorkflowTools、Registry 契约测试）；
+- Electron 运行时冒烟：`workflow:run`（`set` 流程）→ `workflow:getRun` → 审批流程 `waiting_approval` → `workflow:resume` → `succeeded`，run.json/events.jsonl 持久化正确；
+- Electron main/preload 构建通过。
+
+**下一步**：Phase 1.5 `ProcessWorkerWorkflowEngine`（`utilityProcess` 池 + 主进程单写者 + 心跳/取消/恢复），随后 Phase 2 补 `fork`、嵌套审批、子工作流、HTTP/SSE 与客户端运行面板。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
+
 ---
 
 ## 8. 决策建议

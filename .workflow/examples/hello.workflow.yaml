@@ -1,0 +1,31 @@
+document:
+  dsl: 1.0.0
+  namespace: deepseek-ide
+  name: hello
+  version: 1.0.0
+  title: 最小可运行工作流
+  summary: set + shell，不调用模型，适合验证 workflow 引擎是否正常。
+  input:
+    schema:
+      type: object
+      properties:
+        name:
+          type: string
+          default: 世界
+
+do:
+  - prepare:
+      set:
+        greeting: "Hello ${ .inputs.name }"
+
+  - show:
+      run:
+        shell:
+          command: Write-Output "${ .context.greeting }"
+      timeout:
+        after:
+          seconds: 30
+
+  - done:
+      set:
+        finished: true

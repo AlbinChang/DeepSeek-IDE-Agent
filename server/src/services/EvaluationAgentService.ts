@@ -43,6 +43,12 @@ export interface EvaluationAgentInput {
     persistReport?: boolean;
     /** 限制评估 Agent 可用的工具（默认不限制，保持现有行为） */
     allowedToolNames?: ReadonlySet<string>;
+    /** 跳过 LLM 请求日志（workflow 步骤不参与 chat 崩溃恢复） */
+    skipJournal?: boolean;
+    /** 跳过 Telemetry 写盘（Worker/批量评估场景由调用方统一记录） */
+    skipTelemetry?: boolean;
+    /** 最大轮次上限（默认不限制；workflow 步骤建议传入） */
+    maxTurns?: number;
 }
 
 export interface EvaluationAgentOutput {
@@ -88,6 +94,9 @@ export class EvaluationAgentService {
             resumeRequest,
             persistReport,
             allowedToolNames,
+            skipJournal,
+            skipTelemetry,
+            maxTurns,
         } = input;
 
         const evaluationTask = [
@@ -191,6 +200,9 @@ export class EvaluationAgentService {
                 provider: providerConfig,
                 agentStage: "评估Agent",
                 allowedToolNames,
+                skipJournal,
+                skipTelemetry,
+                maxTurns,
                 recoveryContext: {
                     userInstruction,
                     pinnedUserMessage,

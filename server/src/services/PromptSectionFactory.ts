@@ -35,6 +35,7 @@ import {
 } from '@/services/PromptSections.js';
 
 import type { IPromptSection } from '@/types/prompt.js';
+import { WorkflowIndexSection } from '@/services/WorkflowIndexSection.js';
 
 /**
  * 创建预配置的 SystemPromptBuilder（包含所有标准片段）。
@@ -58,6 +59,7 @@ export function createStandardBuilder(agentConfig: any): SystemPromptBuilder {
     // Low-Churn 区 — 低频变化（随 workspace 切换变化）
     builder.register(new SkillsIndexSection());
     builder.register(new ProjectRulesSection());
+    builder.register(new WorkflowIndexSection());
 
     // Dynamic 区 — 每轮可能变化
     builder.register(new DateTimeSection());

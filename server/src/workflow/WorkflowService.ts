@@ -26,8 +26,17 @@ export const WORKFLOW_ENGINE_UNAVAILABLE = 'WORKFLOW_ENGINE_UNAVAILABLE';
  * 不依赖 Electron/Fastify，方便在 Electron 主进程、standalone server 与测试中复用。
  */
 export class WorkflowService {
+    private static instance: WorkflowService | undefined;
+
     private engine: WorkflowEngine | null = null;
     private eventBus: WorkflowEventBus = NULL_WORKFLOW_EVENT_BUS;
+
+    public static getInstance(): WorkflowService {
+        if (!WorkflowService.instance) {
+            WorkflowService.instance = new WorkflowService();
+        }
+        return WorkflowService.instance;
+    }
 
     public isEnabled(): boolean {
         return globalConfig.workflow.enabled;

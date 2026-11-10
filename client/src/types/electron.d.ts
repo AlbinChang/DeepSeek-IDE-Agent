@@ -230,7 +230,8 @@ interface DiagnosticsResult {
 }
 
 // ── Workflow ──
-type WorkflowRunStatus = 'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled';
+type WorkflowRunStatus = 'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+type WorkflowStepStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'waiting_approval' | 'cancelled';
 
 interface WorkflowInputDefinition {
     name: string;
@@ -272,27 +273,64 @@ interface WorkflowDetail {
 interface WorkflowStepInfo {
     path: string;
     name: string;
-    status: WorkflowRunStatus;
+    status: WorkflowStepStatus;
+    attempts: number;
     startedAt?: number;
     finishedAt?: number;
+    output?: unknown;
+    outputPreview?: string;
     error?: string;
+    usage?: WorkflowUsage;
 }
 
 interface WorkflowRunInfo {
+    schemaVersion: 1;
     runId: string;
+    workflow: {
+        name: string;
+        title?: string;
+        version?: string;
+        namespace?: string;
+        path: string;
+    };
     workflowName: string;
     workflowPath?: string;
     userId: string;
     root: string;
     status: WorkflowRunStatus;
+    inputs: Record<string, unknown>;
     createdAt: number;
     startedAt?: number;
     finishedAt?: number;
+    currentTask?: string;
     steps: WorkflowStepInfo[];
-    worker?: { workerId: string; pid?: number };
-    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    checkpoint?: WorkflowCheckpoint;
+    approval?: WorkflowApprovalState;
+    usage?: WorkflowUsage;
     error?: string;
-    waitingApproval?: { stepPath: string; prompt?: string };
+    position?: number;
+    worker?: { workerId: string; pid?: number };
+    lastSeq?: number;
+    events?: WorkflowEvent[];
+}
+
+interface WorkflowUsage {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+}
+
+interface WorkflowApprovalState {
+    stepPath: string;
+    message?: string;
+    risk?: string;
+    requestedAt: number;
+}
+
+interface WorkflowCheckpoint {
+    nextStepIndex: number;
+    context: Record<string, unknown>;
+    completedPaths: string[];
 }
 
 interface WorkflowEvent {
@@ -334,6 +372,8 @@ interface WorkflowApi {
         position?: number;
         error?: string;
         validation?: WorkflowValidationResult;
+        issues?: WorkflowValidationIssue[];
+        run?: WorkflowRunInfo;
     }>;
     getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }>;
     cancel: (params: { userId: string; root?: string; runId: string }) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;

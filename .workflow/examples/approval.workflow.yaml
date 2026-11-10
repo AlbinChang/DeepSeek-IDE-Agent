@@ -1,0 +1,23 @@
+document:
+  dsl: 1.0.0
+  namespace: deepseek-ide
+  name: approval-demo
+  version: 1.0.0
+  title: 人工审批示例
+  summary: 运行到 approval 步骤暂停，批准后继续；拒绝则取消。
+
+do:
+  - prepare:
+      set:
+        change: "demo change"
+
+  - approve:
+      call: approval
+      with:
+        message: 是否批准继续执行？
+        risk: low
+
+  - finish:
+      set:
+        approved: true
+        change: ${ .context.change }

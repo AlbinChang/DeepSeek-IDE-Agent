@@ -1,6 +1,7 @@
 import type { BrowserWindow } from 'electron';
 
 import { WorkspaceRegistry } from '@/services/WorkspaceRegistry.js';
+import { InProcessWorkflowEngine } from '@/workflow/InProcessWorkflowEngine.js';
 import { WorkflowService } from '@/workflow/WorkflowService.js';
 import type { WorkflowEvent, WorkflowEventBus } from '@/workflow/types.js';
 
@@ -13,7 +14,7 @@ import type { WorkflowEvent, WorkflowEventBus } from '@/workflow/types.js';
 export class WorkflowRuntime {
     private static instance: WorkflowRuntime | undefined;
 
-    private readonly service = new WorkflowService();
+    private readonly service = WorkflowService.getInstance();
     private getWindow: (() => BrowserWindow | null) | null = null;
     private unsubscribeWorkspace: (() => void) | null = null;
     private started = false;
@@ -32,6 +33,11 @@ export class WorkflowRuntime {
             publish: (event) => this.publishToRenderer(event),
         };
         this.service.setEventBus(eventBus);
+
+        // Phase 1：主进程内执行；Phase 1.5 可替换为 ProcessWorkerWorkflowEngine
+        if (!this.service.getEngine()) {
+            this.service.setEngine(new InProcessWorkflowEngine());
+        }
 
         if (!this.unsubscribeWorkspace) {
             this.unsubscribeWorkspace = WorkspaceRegistry.getInstance().onWorkspaceChange(

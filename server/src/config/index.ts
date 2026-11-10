@@ -180,5 +180,11 @@ export const config = {
         maxRunsPerWorker: parsePositiveInt(process.env.WORKFLOW_MAX_RUNS_PER_WORKER, 20, 1),
         maxWorkerRestarts: parsePositiveInt(process.env.WORKFLOW_MAX_WORKER_RESTARTS, 3, 0),
         workerRestartWindowMs: parsePositiveInt(process.env.WORKFLOW_WORKER_RESTART_WINDOW_MS, 5 * 60 * 1000, 1000),
+        // 运行记录保留数量与单 run 预算
+        maxStoredRuns: parsePositiveInt(process.env.WORKFLOW_MAX_STORED_RUNS, 50, 1),
+        maxSteps: parsePositiveInt(process.env.WORKFLOW_MAX_STEPS, 200, 1),
+        maxStepOutputChars: parsePositiveInt(process.env.WORKFLOW_MAX_STEP_OUTPUT_CHARS, 64 * 1024, 1024),
+        defaultStepTimeoutMs: parsePositiveInt(process.env.WORKFLOW_DEFAULT_STEP_TIMEOUT_MS, 10 * 60 * 1000, 1000),
+        agentStepMaxTurns: parsePositiveInt(process.env.WORKFLOW_AGENT_STEP_MAX_TURNS, 12, 1),
     }
 };

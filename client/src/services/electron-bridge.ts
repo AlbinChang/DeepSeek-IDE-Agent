@@ -77,7 +77,8 @@ export interface AgentRecoveryInfo {
 }
 
 // ── Workflow ──
-export type WorkflowRunStatus = 'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled';
+export type WorkflowRunStatus = 'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+export type WorkflowStepStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'waiting_approval' | 'cancelled';
 
 export interface WorkflowInputDefinition {
     name: string;
@@ -119,27 +120,64 @@ export interface WorkflowDetail {
 export interface WorkflowStepInfo {
     path: string;
     name: string;
-    status: WorkflowRunStatus;
+    status: WorkflowStepStatus;
+    attempts: number;
     startedAt?: number;
     finishedAt?: number;
+    output?: unknown;
+    outputPreview?: string;
     error?: string;
+    usage?: WorkflowUsage;
 }
 
 export interface WorkflowRunInfo {
+    schemaVersion: 1;
     runId: string;
+    workflow: {
+        name: string;
+        title?: string;
+        version?: string;
+        namespace?: string;
+        path: string;
+    };
     workflowName: string;
     workflowPath?: string;
     userId: string;
     root: string;
     status: WorkflowRunStatus;
+    inputs: Record<string, unknown>;
     createdAt: number;
     startedAt?: number;
     finishedAt?: number;
+    currentTask?: string;
     steps: WorkflowStepInfo[];
-    worker?: { workerId: string; pid?: number };
-    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    checkpoint?: WorkflowCheckpoint;
+    approval?: WorkflowApprovalState;
+    usage?: WorkflowUsage;
     error?: string;
-    waitingApproval?: { stepPath: string; prompt?: string };
+    position?: number;
+    worker?: { workerId: string; pid?: number };
+    lastSeq?: number;
+    events?: WorkflowEvent[];
+}
+
+export interface WorkflowUsage {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+}
+
+export interface WorkflowApprovalState {
+    stepPath: string;
+    message?: string;
+    risk?: string;
+    requestedAt: number;
+}
+
+export interface WorkflowCheckpoint {
+    nextStepIndex: number;
+    context: Record<string, unknown>;
+    completedPaths: string[];
 }
 
 export interface WorkflowEvent {
@@ -447,6 +485,8 @@ export const workflowBridge = {
         position?: number;
         error?: string;
         validation?: WorkflowValidationResult;
+        issues?: WorkflowValidationIssue[];
+        run?: WorkflowRunInfo;
     }> {
         return getWorkflowApi().run(params);
     },

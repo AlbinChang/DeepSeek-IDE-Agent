@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { WorkflowRegistry } from '@/workflow/WorkflowRegistry.js';
+import { PROJECT_ROOT } from '@/utils/PathUtils.js';
 
 const validWorkflow = `document:
   dsl: 1.0.0
@@ -117,6 +118,19 @@ describe('WorkflowRegistry', () => {
         await expect(registry.get('.workflow/../secret.yaml')).rejects.toThrow('Invalid workflow path');
     });
 
+    it('discovers the canonical *.workflow.yaml layout', async () => {
+        await writeFile(path.join(root, '.workflow', 'demo.workflow.yaml'), validWorkflow, 'utf8');
+
+        const registry = new WorkflowRegistry(root);
+        const byName = await registry.get('demo');
+        const definition = await registry.loadDefinition('demo');
+
+        expect(byName?.summary.name).toBe('feature-delivery');
+        expect(byName?.summary.path).toBe('.workflow/demo.workflow.yaml');
+        expect(definition?.steps).toHaveLength(2);
+        expect(definition?.steps[0]).toHaveProperty('plan');
+    });
+
     it('validates all workflows when no target is provided', async () => {
         await writeFile(path.join(root, '.workflow', 'good.yaml'), validWorkflow, 'utf8');
         await writeFile(path.join(root, '.workflow', 'bad.yaml'), 'document:\n  name: bad\ndo: []\n', 'utf8');
@@ -128,5 +142,15 @@ describe('WorkflowRegistry', () => {
             expect.objectContaining({ path: '.workflow/bad.yaml/do', severity: 'error' }),
         ]));
         expect(result.issues.every((issue) => !issue.path.startsWith('.workflow/good.yaml'))).toBe(true);
+    });
+
+    it('validates the bundled *.workflow.yaml examples', async () => {
+        const registry = new WorkflowRegistry(PROJECT_ROOT);
+        const workflows = await registry.list();
+        const names = workflows.map((workflow) => workflow.name);
+
+        expect(names).toEqual(expect.arrayContaining(['hello', 'approval-demo', 'workspace-review']));
+        const validation = await registry.validate();
+        expect(validation.issues.filter((issue) => issue.severity === 'error')).toEqual([]);
     });
 });

@@ -116,13 +116,20 @@ export function registerWorkflowIpc(ipcMain: IpcMain) {
                 timeoutSeconds: params.timeoutSeconds,
             });
             if (!result.ok) {
-                return { success: false, error: result.error, runId: result.runId, status: result.status };
+                return {
+                    success: false,
+                    error: result.error,
+                    runId: result.runId,
+                    status: result.status,
+                    issues: result.issues,
+                };
             }
             return {
                 success: true,
                 runId: result.runId,
                 status: result.status,
                 position: result.position,
+                run: result.run,
             };
         } catch (error: any) {
             return { success: false, error: toErrorMessage(error) };

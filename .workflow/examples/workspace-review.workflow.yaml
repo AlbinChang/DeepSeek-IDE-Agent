@@ -1,0 +1,40 @@
+document:
+  dsl: 1.0.0
+  namespace: deepseek-ide
+  name: workspace-review
+  version: 1.0.0
+  title: 只读工作区审查
+  summary: Agent 只读检查工作区结构，再由 evaluator 核验总结是否基于真实文件。
+  input:
+    schema:
+      type: object
+      properties:
+        focus:
+          type: string
+          default: 项目整体结构
+
+do:
+  - inspect:
+      call: agent
+      with:
+        prompt: |
+          请只读检查当前工作区，围绕「${ .inputs.focus }」输出一份简洁总结：
+          1. 主要目录及职责
+          2. 关键入口文件
+          3. 明显的结构问题或风险
+          不要修改任何文件，不要运行命令。
+        tools: [list_files, read_file]
+        maxTurns: 8
+      timeout:
+        after:
+          minutes: 10
+
+  - review:
+      call: evaluator
+      with:
+        target: ${ .steps.inspect.output }
+        instruction: 检查上述总结是否基于工作区真实文件，是否遗漏关键目录或编造不存在的文件。给出 P0/P1/P2 问题清单。
+        requirePass: false
+      timeout:
+        after:
+          minutes: 10

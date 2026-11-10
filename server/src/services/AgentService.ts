@@ -14,6 +14,7 @@ import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 import { FileIO } from '@/utils/FileIO.js';
 import { SystemTools } from '@/tools/SystemTools.js';
 import { CalculatorTool } from '@/tools/custom/CalculatorTool.js';
+import { WorkflowTools } from '@/tools/WorkflowTools.js';
 import { McpService } from '@/services/McpService.js';
 import { SERVER_ROOT, CONFIG_ROOT } from '@/utils/PathUtils.js';
 import { BEIJING_TIME_ZONE, formatBeijingDate } from '@/utils/TimeUtils.js';
@@ -601,6 +602,15 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering CalculatorTool (JS script executor + math engine)...');
         // 注册 JS 脚本执行器（mathjs 表达式求值 + vm 沙箱脚本执行）
         this.toolManager.registerTool(CalculatorTool);
+
+        console.log('[AgentService] Registering WorkflowTools (declarative .workflow)...');
+        if (globalConfig.workflow.enabled) {
+            for (const definition of WorkflowTools.getDefinitions()) {
+                this.toolManager.registerTool(definition);
+            }
+        } else {
+            console.log('[AgentService] Workflow feature disabled; skipping WorkflowTools registration.');
+        }
 
         // MCP 工具和 Playwright MCP 工具在 workspace 初始化时动态注册（见 registerMcpTools / registerBrowserMcpAdapter）
         console.log('[AgentService] All built-in tools initialized. MCP & Playwright tools will be registered per workspace.');
