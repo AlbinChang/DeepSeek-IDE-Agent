@@ -32,6 +32,16 @@ import type { PromptBuildContext } from '@/types/prompt.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function normalizeCommandEnvironment(value: unknown): Record<string, string> | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const env: Record<string, string> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        if (!key.trim() || typeof entry !== 'string') continue;
+        env[key.trim()] = entry;
+    }
+    return Object.keys(env).length > 0 ? env : undefined;
+}
+
 export class AgentService extends EventEmitter {
     private static instance: AgentService;
     public contextStore = LiveContextStore.getInstance();
@@ -559,7 +569,12 @@ export class AgentService extends EventEmitter {
                 type: 'object',
                 properties: {
                     command: { type: 'string', description: 'PowerShell 原生命令体。' },
-                    timeout: { type: 'number', description: '超时毫秒数。' }
+                    timeout: { type: 'number', description: '超时毫秒数。' },
+                    environment: {
+                        type: 'object',
+                        description: '可选：追加/覆盖子进程环境变量（仅字符串值）。',
+                        additionalProperties: { type: 'string' },
+                    },
                 },
                 required: ['command', 'timeout']
             },
@@ -569,7 +584,16 @@ export class AgentService extends EventEmitter {
                 const userId = context?.userId;
                 if (!userId) throw new Error('User not initialized');
                 const javaEncoding = this.getProjectJavaEncoding(userId, root);
-                return await SystemTools.executePowerShellCommand(params.command, root, userId, params.timeout, javaEncoding, root);
+                return await SystemTools.executePowerShellCommand(
+                    params.command,
+                    root,
+                    userId,
+                    params.timeout,
+                    javaEncoding,
+                    root,
+                    normalizeCommandEnvironment(params.environment),
+                    context?.abortSignal,
+                );
             }
         });
 
@@ -581,7 +605,12 @@ export class AgentService extends EventEmitter {
                 type: 'object',
                 properties: {
                     command: { type: 'string', description: 'CMD 原生命令体。' },
-                    timeout: { type: 'number', description: '超时毫秒数。' }
+                    timeout: { type: 'number', description: '超时毫秒数。' },
+                    environment: {
+                        type: 'object',
+                        description: '可选：追加/覆盖子进程环境变量（仅字符串值）。',
+                        additionalProperties: { type: 'string' },
+                    },
                 },
                 required: ['command', 'timeout']
             },
@@ -591,7 +620,16 @@ export class AgentService extends EventEmitter {
                 const userId = context?.userId;
                 if (!userId) throw new Error('User not initialized');
                 const javaEncoding = this.getProjectJavaEncoding(userId, root);
-                return await SystemTools.executeCmdCommand(params.command, root, userId, params.timeout, javaEncoding, root);
+                return await SystemTools.executeCmdCommand(
+                    params.command,
+                    root,
+                    userId,
+                    params.timeout,
+                    javaEncoding,
+                    root,
+                    normalizeCommandEnvironment(params.environment),
+                    context?.abortSignal,
+                );
             }
         });
 

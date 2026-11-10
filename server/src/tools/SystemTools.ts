@@ -183,9 +183,11 @@ export class SystemTools {
         userId?: string,
         timeout?: number,
         javaEncoding?: string | null,
-        workspaceRoot?: string
+        workspaceRoot?: string,
+        extraEnv?: Record<string, string>,
+        abortSignal?: AbortSignal,
     ): Promise<CommandResult> {
-        return this.executeCommandInternal(command, cwd, userId, timeout, javaEncoding, 'powershell', workspaceRoot, 'run_powershell_command');
+        return this.executeCommandInternal(command, cwd, userId, timeout, javaEncoding, 'powershell', workspaceRoot, 'run_powershell_command', extraEnv, abortSignal);
     }
 
     /**
@@ -199,9 +201,11 @@ export class SystemTools {
         userId?: string,
         timeout?: number,
         javaEncoding?: string | null,
-        workspaceRoot?: string
+        workspaceRoot?: string,
+        extraEnv?: Record<string, string>,
+        abortSignal?: AbortSignal,
     ): Promise<CommandResult> {
-        return this.executeCommandInternal(command, cwd, userId, timeout, javaEncoding, 'cmd', workspaceRoot, 'run_cmd_command');
+        return this.executeCommandInternal(command, cwd, userId, timeout, javaEncoding, 'cmd', workspaceRoot, 'run_cmd_command', extraEnv, abortSignal);
     }
 
     /**
@@ -216,7 +220,9 @@ export class SystemTools {
         javaEncoding: string | null | undefined,
         shell: 'powershell' | 'cmd',
         workspaceRoot: string | undefined,
-        toolName: string
+        toolName: string,
+        extraEnv?: Record<string, string>,
+        abortSignal?: AbortSignal,
     ): Promise<CommandResult> {
         if (!timeout || timeout <= 0) {
             throw new Error(`[${toolName}] timeout 为必填项且必须 > 0，请在调用时明确指定超时时间（ms），例如：简单命令 30000，构建/测试 120000~300000，依赖安装 600000`);
@@ -359,7 +365,8 @@ export class SystemTools {
                             return jto !== undefined ? { JAVA_TOOL_OPTIONS: jto } : {};
                           })()
                         : { FORCE_COLOR: '1', TERM: 'xterm-256color' }
-                    )
+                    ),
+                    ...(extraEnv || {}),
                 }
             });
 
@@ -433,11 +440,22 @@ export class SystemTools {
 
             // 统一 cleanup：无论哪条路径 resolve，都需要清除所有 timer
             let resolved = false;
+            let aborted = false;
             let timer: NodeJS.Timeout | null = null;
+            const onAbort = () => {
+                if (resolved || aborted) return;
+                aborted = true;
+                killProc();
+            };
             const cleanup = () => {
                 if (timer)          clearTimeout(timer);
                 if (heartbeatTimer) clearInterval(heartbeatTimer);
+                abortSignal?.removeEventListener('abort', onAbort);
             };
+            if (abortSignal) {
+                if (abortSignal.aborted) onAbort();
+                else abortSignal.addEventListener('abort', onAbort, { once: true });
+            }
 
             const onData = (data: Buffer, pipeType: 'stdout' | 'stderr') => {
                 
@@ -553,9 +571,9 @@ export class SystemTools {
                 // OOM 熔断时补充大模型可读的错误提示
                 const extraStderr = isHardKilled
                     ? '\n[错误] 命令输出超过 5MB 物理上限，进程已被强制终止。请优化命令减少输出量（如加 --silent / -q 参数）。'
-                    : '';
+                    : (aborted ? '\n[错误] 命令已被取消' : '');
 
-                const status = code === 0 ? 'success' as const : 'error' as const;
+                const status = code === 0 && !aborted ? 'success' as const : 'error' as const;
                 const duration = Date.now() - commandStartTime;
 
                 // 对最后一份数据做微小延迟确保 onData 队列清空，然后持久化并 resolve

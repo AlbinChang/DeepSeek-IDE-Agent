@@ -468,6 +468,19 @@ describe('WorkflowRunner', () => {
         expect(snapshot.steps.find((step) => step.name === 'container')?.status).toBe('failed');
     });
 
+    it('routes call: http and run.http to the http executor', async () => {
+        const executor = new FakeExecutor();
+        const runner = createRunner([
+            { fetch: { call: 'http', with: { url: 'https://example.com' } } },
+            { fetchRun: { run: { http: { url: 'https://example.com', method: 'GET' } } } },
+        ], executor);
+
+        await runner.run();
+
+        expect(executor.calls.map((call) => call.kind)).toEqual(['http', 'http']);
+        expect(executor.calls[0].definition.with?.url).toBe('https://example.com');
+    });
+
     it('does not allow set to pollute the prototype', async () => {
         const executor = new FakeExecutor();
         const runner = createRunner([

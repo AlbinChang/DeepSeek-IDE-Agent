@@ -142,7 +142,8 @@ do:
 ```
 
 - 统一走 `run_powershell_command`（Windows: powershell，macOS/Linux: pwsh）与 `ProcessSafetyGuard`。
-- `run.shell.environment` 目前忽略并记录警告。
+- `run.shell.environment` 会追加/覆盖子进程环境变量（仅字符串值）。
+- 取消/超时会通过 `AbortSignal` 终止命令；Windows 使用 `taskkill /T /F` 清理进程树。
 - **不要**把不可信输入（尤其是 `.inputs`）直接插值进 shell 命令；如需使用，先在脚本内部做参数校验，或改用只读/写文件工具。
 
 ### 4.5 `call: evaluator`
@@ -281,6 +282,39 @@ do:
 - 崩溃恢复以父 run 的顶层 checkpoint 为准；恢复时整个子工作流会重新执行。
 - 可运行示例：`.workflow/examples/subworkflow-demo.workflow.yaml` + `child-note.workflow.yaml`。
 
+### 4.13 HTTP 请求（`call: http` / `run.http`）
+
+```yaml
+- fetch:
+    call: http
+    with:
+      method: GET
+      url: https://api.example.com/items
+      headers:
+        accept: application/json
+      timeout: 30s
+      failOnError: true     # 默认 false；true 时 4xx/5xx 抛错
+```
+
+```yaml
+- submit:
+    run:
+      http:
+        method: POST
+        url: https://api.example.com/items
+        headers:
+          authorization: "Bearer ${ .inputs.token }"
+        body:
+          name: ${ .inputs.name }
+```
+
+- 输出：`{ status, statusText, headers, body, url }`；JSON 响应自动解析。
+- 默认禁止 `localhost`、私网、链路本地、保留地址和 `.local/.internal` 主机；需要访问本地服务时显式设置 `WORKFLOW_HTTP_ALLOW_PRIVATE=true`。
+- 禁止 URL 内嵌用户名/密码；跳过 `host`/`connection`/`content-length`/`transfer-encoding` 等危险请求头。
+- 最多跟随 5 次重定向，每次都会重新做内网地址校验；303/301/302 POST 按标准降级为 GET。
+- 响应体默认上限 1 MB、超时默认 60s；超限/超时会让步骤失败。
+- 注意：DNS 校验与实际连接之间仍存在 DNS rebinding 窗口；不要把 HTTP 步骤当作安全边界，敏感网络请使用专用代理。
+
 ## 5. Agent 工具
 
 聊天 Agent 可直接使用：
@@ -323,15 +357,19 @@ do:
 | `WORKFLOW_MAX_STEP_OUTPUT_CHARS` | `65536` | 单步骤输出持久化上限 |
 | `WORKFLOW_DEFAULT_STEP_TIMEOUT_MS` | `600000` | 默认步骤超时 |
 | `WORKFLOW_AGENT_STEP_MAX_TURNS` | `12` | Agent 步骤默认轮次 |
+| `WORKFLOW_HTTP_ALLOW_PRIVATE` | `false` | 是否允许 HTTP 步骤访问私网/localhost |
+| `WORKFLOW_HTTP_MAX_RESPONSE_BYTES` | `1048576` | HTTP 响应体上限 |
+| `WORKFLOW_HTTP_TIMEOUT_MS` | `60000` | HTTP 请求超时 |
 
 ## 8. Phase 1.5 限制
 
 - Worker 是故障隔离单元，不是安全沙箱；与主进程同 OS 用户/文件权限。
 - 审批仅支持顶层步骤；fork 分支/子工作流内审批会报错。
-- `http` / `run.script` / `run.container` / `emit` / `listen` 尚未启用。
+- `run.script` / `run.container` / `emit` / `listen` 尚未启用。
+- HTTP 步骤默认阻止私网地址；DNS rebinding 仍是已知窗口。
 - `run.shell.environment` 未透传。
 - `workflow:event` 只推送 run/step 级事件，不逐 token 推送。
-- 取消对 Agent 步骤即时生效；Worker 收到取消后若在宽限期内未退出会被强杀。Windows 使用 `taskkill /T /F` 清理进程树。
+- 取消对 Agent 步骤即时生效；shell 步骤通过 `AbortSignal` 终止，Windows 会清理进程树。Worker 收到取消后若在宽限期内未退出会被强杀。
 - Worker 为冷启动、worker-per-run；`WORKFLOW_MAX_RUNS_PER_WORKER` / `MAX_WORKER_RESTARTS` 预留给热池。
 - 心跳依赖 Worker 事件循环；长时间同步 CPU 步骤可能触发心跳超时（默认 30s）。这类步骤建议拆分或改用 `shell`。
 - 本地文件队列只能单机恢复；跨重启/跨机器请通过 `WorkflowEngine` 端口接 Temporal/Restate。

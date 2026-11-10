@@ -26,7 +26,7 @@ import type {
 } from '@/workflow/types.js';
 import { prepareWorkflowInputs } from '@/workflow/engineUtils.js';
 
-const CALLABLE_KINDS = new Set<WorkflowStepKind>(['agent', 'tool', 'shell', 'evaluator', 'approval']);
+const CALLABLE_KINDS = new Set<WorkflowStepKind>(['agent', 'tool', 'shell', 'http', 'evaluator', 'approval']);
 
 export interface WorkflowRunnerOptions {
     session: WorkflowRunChannel;
@@ -292,11 +292,14 @@ export class WorkflowRunner {
             if (definition.run?.shell !== undefined) {
                 return this.executeCallable('shell', definition, step);
             }
+            if (definition.run?.http !== undefined) {
+                return this.executeCallable('http', definition, step);
+            }
             if (definition.run?.workflow !== undefined) {
                 return this.executeSubworkflow(definition, step);
             }
             throw new WorkflowUnsupportedError(
-                '仅支持 run.shell / run.workflow；run.script/run.container 尚未启用',
+                '仅支持 run.shell / run.http / run.workflow；run.script/run.container 尚未启用',
                 step.stepPath,
             );
         }

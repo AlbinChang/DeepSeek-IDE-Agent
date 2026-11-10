@@ -5,6 +5,7 @@ import { EvaluationAgentService } from '@/services/EvaluationAgentService.js';
 import { ProviderConfigResolver, type ResolvedProviderConfig } from '@/services/ProviderConfigResolver.js';
 import { config as globalConfig } from '@/config/index.js';
 import { WorkflowError } from '@/workflow/errors.js';
+import { executeWorkflowHttp } from '@/workflow/httpStep.js';
 import { parseDurationMs } from '@/workflow/expressions.js';
 import { validateJsonSchema } from '@/workflow/schema.js';
 import type {
@@ -75,7 +76,7 @@ export interface WorkflowStepExecutionResult {
     approval?: WorkflowApprovalState;
 }
 
-export type WorkflowStepKind = 'agent' | 'tool' | 'shell' | 'evaluator' | 'approval';
+export type WorkflowStepKind = 'agent' | 'tool' | 'shell' | 'http' | 'evaluator' | 'approval';
 
 export interface WorkflowStepExecutor {
     execute(
@@ -93,6 +94,9 @@ export interface DefaultWorkflowStepExecutorOptions {
         provider?: string,
         model?: string,
     ) => ResolvedProviderConfig;
+    httpAllowPrivate?: boolean;
+    httpMaxResponseBytes?: number;
+    httpTimeoutMs?: number;
 }
 
 function mergeUsage(current: WorkflowUsage | undefined, next: TokenUsage | null | undefined): WorkflowUsage | undefined {
@@ -157,12 +161,18 @@ function extractOutputSchema(definition: Record<string, any>): any | undefined {
 export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
     private agentService: AgentService | null;
     private readonly resolveProvider: NonNullable<DefaultWorkflowStepExecutorOptions['resolveProvider']>;
+    private readonly httpAllowPrivate: boolean;
+    private readonly httpMaxResponseBytes: number;
+    private readonly httpTimeoutMs: number;
 
     constructor(options: DefaultWorkflowStepExecutorOptions = {}) {
         this.agentService = options.agentService || null;
         this.resolveProvider = options.resolveProvider || ((userId, root, provider, model) => (
             ProviderConfigResolver.resolveForUser(userId, root, provider, model)
         ));
+        this.httpAllowPrivate = options.httpAllowPrivate ?? globalConfig.workflow.httpAllowPrivate;
+        this.httpMaxResponseBytes = options.httpMaxResponseBytes ?? globalConfig.workflow.httpMaxResponseBytes;
+        this.httpTimeoutMs = options.httpTimeoutMs ?? globalConfig.workflow.httpTimeoutMs;
     }
 
     private getAgentService(): AgentService {
@@ -181,6 +191,7 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
             case 'agent': return this.executeAgent(definition, ctx);
             case 'tool': return this.executeTool(definition, ctx);
             case 'shell': return this.executeShell(definition, ctx);
+            case 'http': return this.executeHttp(definition, ctx);
             case 'evaluator': return this.executeEvaluator(definition, ctx);
             case 'approval': return this.executeApproval(definition, ctx);
             default: throw new WorkflowError(`Unsupported workflow step kind: ${String(kind)}`, 'unsupported', ctx.stepPath);
@@ -339,9 +350,14 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
         if (typeof command !== 'string' || !command.trim()) {
             throw new WorkflowError('run.shell 步骤缺少 command', 'validation', ctx.stepPath);
         }
-        if (shellConfig.environment && typeof shellConfig.environment === 'object') {
-            await ctx.log('run.shell 的 environment 暂不支持，已忽略', { stepPath: ctx.stepPath });
-        }
+        const environment = (shellConfig.environment
+            && typeof shellConfig.environment === 'object'
+            && !Array.isArray(shellConfig.environment))
+            ? Object.fromEntries(
+                Object.entries(shellConfig.environment as Record<string, unknown>)
+                    .filter(([, value]) => typeof value === 'string'),
+            ) as Record<string, string>
+            : undefined;
 
         const timeoutMs = parseDurationMs(definition.timeout?.after)
             ?? parseDurationMs(definition.with?.timeout)
@@ -351,7 +367,11 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
         const result: any = await this.getAgentService().toolManager.executeTool(
             ctx.userId,
             'run_powershell_command',
-            { command, timeout: timeoutMs },
+            {
+                command,
+                timeout: timeoutMs,
+                ...(environment && Object.keys(environment).length > 0 ? { environment } : {}),
+            },
             ctx.traceId,
             {
                 workspaceRoot: ctx.root,
@@ -371,6 +391,39 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
             );
         }
         return { output: result };
+    }
+
+    private async executeHttp(
+        definition: Record<string, any>,
+        ctx: WorkflowStepExecutionContext,
+    ): Promise<WorkflowStepExecutionResult> {
+        const withConfig = (definition.with && typeof definition.with === 'object')
+            ? definition.with
+            : ((definition.run?.http && typeof definition.run.http === 'object') ? definition.run.http : {});
+        const url = withConfig.url;
+        if (typeof url !== 'string' || !url.trim()) {
+            throw new WorkflowError('http 步骤缺少 with.url', 'validation', ctx.stepPath);
+        }
+        const headers = (withConfig.headers && typeof withConfig.headers === 'object' && !Array.isArray(withConfig.headers))
+            ? withConfig.headers as Record<string, unknown>
+            : undefined;
+        const timeoutMs = parseDurationMs(withConfig.timeout)
+            ?? parseDurationMs(definition.timeout?.after)
+            ?? this.httpTimeoutMs;
+
+        const output = await executeWorkflowHttp({
+            url: url.trim(),
+            method: typeof withConfig.method === 'string' ? withConfig.method : 'GET',
+            headers,
+            body: withConfig.body,
+            failOnError: withConfig.failOnError === true,
+            timeoutMs,
+            allowPrivate: this.httpAllowPrivate,
+            maxResponseBytes: this.httpMaxResponseBytes,
+            abortSignal: ctx.abortSignal,
+            stepPath: ctx.stepPath,
+        });
+        return { output };
     }
 
     private async executeEvaluator(
