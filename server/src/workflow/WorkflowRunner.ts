@@ -15,6 +15,7 @@ import {
     isForbiddenPropertyKey,
     type WorkflowExpressionContext,
 } from '@/workflow/expressions.js';
+import { WorkflowRegistry } from '@/workflow/WorkflowRegistry.js';
 import type { WorkflowRunChannel } from '@/workflow/WorkflowRunSession.js';
 import type { WorkflowStepExecutor, WorkflowStepKind } from '@/workflow/WorkflowStepExecutor.js';
 import type {
@@ -23,6 +24,7 @@ import type {
     WorkflowStepInfo,
     WorkflowUsage,
 } from '@/workflow/types.js';
+import { prepareWorkflowInputs } from '@/workflow/engineUtils.js';
 
 const CALLABLE_KINDS = new Set<WorkflowStepKind>(['agent', 'tool', 'shell', 'evaluator', 'approval']);
 
@@ -44,11 +46,28 @@ export interface WorkflowRunnerOptions {
     initialContext?: Record<string, unknown>;
     /** 顶层步骤完成后回调，用于持久化 crash/审批恢复所需的 checkpoint */
     onCheckpoint?: (checkpoint: { nextStepIndex: number; context: Record<string, unknown> }) => void | Promise<void>;
+    /** 顶层 do 的路径前缀；子工作流使用独立前缀避免步骤路径冲突 */
+    basePath?: string;
+    /** 子工作流内默认禁止审批（Phase 2 仅支持顶层审批） */
+    allowApproval?: boolean;
+    /** 子工作流名称栈，用于检测循环引用 */
+    workflowStack?: string[];
+    /** 当前子工作流嵌套深度 */
+    subworkflowDepth?: number;
+    maxSubworkflowDepth?: number;
+    /** fork/子工作流共享的步骤预算 */
+    sharedBudget?: { stepCount: number };
+    /** 共享的启动时间；子工作流继承父 run 的 wall-clock 预算 */
+    startedAt?: number;
 }
 
 interface SequenceOptions {
     depth: number;
     vars: Record<string, unknown>;
+    /** 当前作用域上下文；fork 分支使用独立副本 */
+    context: Record<string, unknown>;
+    /** 当前作用域的取消信号（父步骤超时/取消会传播到嵌套步骤） */
+    signal: AbortSignal;
     topLevelIndex?: number;
 }
 
@@ -61,8 +80,8 @@ export class WorkflowRunner {
     private readonly stepByPath = new Map<string, WorkflowStepInfo>();
     private readonly stepByName = new Map<string, WorkflowStepInfo>();
     private readonly contextValues: Record<string, unknown>;
-    private stepCount = 0;
-    private readonly startedAt = Date.now();
+    private readonly budgetState: { stepCount: number };
+    private readonly startedAt: number;
     private readonly maxSteps = globalConfig.workflow.maxSteps;
     private readonly maxWallClockMs = globalConfig.workflow.maxRunDurationMs;
     private readonly defaultStepTimeoutMs = globalConfig.workflow.defaultStepTimeoutMs;
@@ -70,6 +89,8 @@ export class WorkflowRunner {
 
     constructor(private readonly options: WorkflowRunnerOptions) {
         this.contextValues = Object.assign(Object.create(null), options.initialContext || {});
+        this.budgetState = options.sharedBudget || { stepCount: 0 };
+        this.startedAt = options.startedAt ?? Date.now();
         for (const step of options.session.snapshot.steps) {
             this.rememberStep(step);
         }
@@ -79,8 +100,8 @@ export class WorkflowRunner {
         try {
             return await this.executeSequence(
                 this.options.definition.steps,
-                '/do',
-                { depth: 0, vars: {} },
+                this.options.basePath || '/do',
+                { depth: 0, vars: {}, context: this.contextValues, signal: this.options.abortSignal },
                 this.options.startIndex ?? 0,
             );
         } catch (error) {
@@ -130,6 +151,8 @@ export class WorkflowRunner {
                 name,
                 depth: options.depth,
                 vars: options.vars,
+                context: options.context,
+                signal: options.signal,
                 topLevelIndex,
             });
             lastOutput = result.output;
@@ -139,7 +162,7 @@ export class WorkflowRunner {
             if (options.depth === 0 && this.options.onCheckpoint) {
                 await this.options.onCheckpoint({
                     nextStepIndex: index + 1,
-                    context: this.getContextValues(),
+                    context: { ...options.context },
                 });
             }
         }
@@ -153,11 +176,13 @@ export class WorkflowRunner {
             name: string;
             depth: number;
             vars: Record<string, unknown>;
+            context: Record<string, unknown>;
+            signal: AbortSignal;
             topLevelIndex?: number;
         },
     ): Promise<{ output?: unknown; exited?: boolean }> {
         this.assertBudget(step.stepPath);
-        const expressionContext = this.buildExpressionContext(step.vars);
+        const expressionContext = this.buildExpressionContext(step.vars, step.context);
         const timeoutMs = parseDurationMs(definition.timeout?.after) ?? this.defaultStepTimeoutMs;
         const record = this.beginStep(step.stepPath, step.name);
         await this.options.session.patch({ currentTask: step.stepPath });
@@ -176,14 +201,16 @@ export class WorkflowRunner {
                     expressionContext,
                 }),
                 timeoutMs,
-                this.options.abortSignal,
+                step.signal,
                 step.stepPath,
             );
 
             if (result.approval) {
-                if (step.depth > 0 || step.topLevelIndex === undefined) {
+                if (this.options.allowApproval === false
+                    || step.depth > 0
+                    || step.topLevelIndex === undefined) {
                     throw new WorkflowUnsupportedError(
-                        '审批步骤 Phase 1 仅支持顶层 do；嵌套审批将在 Phase 2 支持',
+                        '审批步骤仅支持顶层 do；子工作流/嵌套审批暂不支持',
                         step.stepPath,
                     );
                 }
@@ -244,12 +271,16 @@ export class WorkflowRunner {
             name: string;
             depth: number;
             vars: Record<string, unknown>;
+            context: Record<string, unknown>;
             signal: AbortSignal;
             expressionContext: WorkflowExpressionContext;
         },
     ): Promise<{ output?: unknown; usage?: WorkflowUsage; approval?: WorkflowApprovalState }> {
         const call = definition.call;
         if (typeof call === 'string') {
+            if (call === 'workflow') {
+                return this.executeSubworkflow(definition, step);
+            }
             const kind = call as WorkflowStepKind;
             if (!CALLABLE_KINDS.has(kind)) {
                 throw new WorkflowUnsupportedError(`不支持的 call: ${call}`, step.stepPath);
@@ -261,8 +292,11 @@ export class WorkflowRunner {
             if (definition.run?.shell !== undefined) {
                 return this.executeCallable('shell', definition, step);
             }
+            if (definition.run?.workflow !== undefined) {
+                return this.executeSubworkflow(definition, step);
+            }
             throw new WorkflowUnsupportedError(
-                '仅支持 run.shell；run.workflow/run.script/run.container 尚未启用',
+                '仅支持 run.shell / run.workflow；run.script/run.container 尚未启用',
                 step.stepPath,
             );
         }
@@ -272,7 +306,7 @@ export class WorkflowRunner {
             if (resolved && typeof resolved === 'object' && !Array.isArray(resolved)) {
                 for (const [key, value] of Object.entries(resolved as Record<string, unknown>)) {
                     if (isForbiddenPropertyKey(key)) continue;
-                    this.contextValues[key] = value;
+                    step.context[key] = value;
                 }
             }
             return { output: resolved };
@@ -291,7 +325,7 @@ export class WorkflowRunner {
         }
 
         if (definition.fork !== undefined) {
-            throw new WorkflowUnsupportedError('fork 并行分支尚未启用（Phase 2）', step.stepPath);
+            return this.executeFork(definition, step);
         }
 
         if (definition.wait !== undefined) {
@@ -335,6 +369,7 @@ export class WorkflowRunner {
             stepPath: string;
             name: string;
             signal: AbortSignal;
+            context: Record<string, unknown>;
             expressionContext: WorkflowExpressionContext;
         },
     ): Promise<{ output?: unknown; usage?: WorkflowUsage; approval?: WorkflowApprovalState }> {
@@ -349,7 +384,7 @@ export class WorkflowRunner {
             stepName: step.name,
             abortSignal: step.signal,
             inputs: this.options.inputs,
-            context: { ...this.contextValues },
+            context: { ...step.context },
             provider: this.options.provider,
             model: this.options.model,
             reasoningEffort: this.options.reasoningEffort,
@@ -391,6 +426,7 @@ export class WorkflowRunner {
             stepPath: string;
             depth: number;
             vars: Record<string, unknown>;
+            context: Record<string, unknown>;
             signal: AbortSignal;
             expressionContext: WorkflowExpressionContext;
         },
@@ -414,7 +450,7 @@ export class WorkflowRunner {
             const result = await this.executeSequence(
                 doSteps,
                 `${step.stepPath}/case-${caseIndex}/do`,
-                { depth: step.depth + 1, vars: step.vars },
+                { depth: step.depth + 1, vars: step.vars, context: step.context, signal: step.signal },
             );
             return { output: result.lastOutput };
         }
@@ -426,7 +462,7 @@ export class WorkflowRunner {
             const result = await this.executeSequence(
                 doSteps,
                 `${step.stepPath}/default/do`,
-                { depth: step.depth + 1, vars: step.vars },
+                { depth: step.depth + 1, vars: step.vars, context: step.context, signal: step.signal },
             );
             return { output: result.lastOutput };
         }
@@ -440,6 +476,7 @@ export class WorkflowRunner {
             stepPath: string;
             depth: number;
             vars: Record<string, unknown>;
+            context: Record<string, unknown>;
             signal: AbortSignal;
             expressionContext: WorkflowExpressionContext;
         },
@@ -457,13 +494,13 @@ export class WorkflowRunner {
             if (step.signal.aborted) throw new WorkflowCancelledError('Workflow cancelled', step.stepPath);
             const vars = { ...step.vars, [each]: collection[index], [at]: index };
             if (whileExpression !== undefined) {
-                const condition = this.evaluateCondition(whileExpression, this.buildExpressionContext(vars));
+                const condition = this.evaluateCondition(whileExpression, this.buildExpressionContext(vars, step.context));
                 if (!condition) break;
             }
             const result = await this.executeSequence(
                 doSteps,
                 `${step.stepPath}/iter-${index}/do`,
-                { depth: step.depth + 1, vars },
+                { depth: step.depth + 1, vars, context: step.context, signal: step.signal },
             );
             outputs.push(result.lastOutput);
             if (result.exited) break;
@@ -478,6 +515,7 @@ export class WorkflowRunner {
             stepPath: string;
             depth: number;
             vars: Record<string, unknown>;
+            context: Record<string, unknown>;
             signal: AbortSignal;
             expressionContext: WorkflowExpressionContext;
         },
@@ -505,7 +543,7 @@ export class WorkflowRunner {
                 const result = await this.executeSequence(
                     trySteps,
                     `${step.stepPath}/try`,
-                    { depth: step.depth + 1, vars: step.vars },
+                    { depth: step.depth + 1, vars: step.vars, context: step.context, signal: step.signal },
                 );
                 return { output: result.lastOutput };
             } catch (error: any) {
@@ -535,12 +573,249 @@ export class WorkflowRunner {
             const result = await this.executeSequence(
                 catchSteps,
                 `${step.stepPath}/catch`,
-                { depth: step.depth + 1, vars },
+                { depth: step.depth + 1, vars, context: step.context, signal: step.signal },
             );
             return { output: result.lastOutput };
         }
 
         throw lastError;
+    }
+
+    private async executeFork(
+        definition: Record<string, any>,
+        step: {
+            stepPath: string;
+            depth: number;
+            vars: Record<string, unknown>;
+            context: Record<string, unknown>;
+            signal: AbortSignal;
+        },
+    ): Promise<{ output?: unknown }> {
+        const forkConfig = (definition.fork && typeof definition.fork === 'object' && !Array.isArray(definition.fork))
+            ? definition.fork
+            : {};
+        const rawBranches: unknown[] = Array.isArray(definition.fork)
+            ? definition.fork
+            : (Array.isArray(forkConfig.branches) ? forkConfig.branches : []);
+        if (rawBranches.length === 0) {
+            throw new WorkflowError('fork 缺少 branches', 'validation', step.stepPath);
+        }
+        const compete = forkConfig.compete === true;
+        const branches = rawBranches.map((branch: unknown, index: number) => {
+            const record = (branch && typeof branch === 'object' && !Array.isArray(branch))
+                ? branch as Record<string, any>
+                : undefined;
+            const branchSteps = Array.isArray(branch)
+                ? branch
+                : (Array.isArray(record?.do) ? record.do : [branch]);
+            return {
+                index,
+                steps: branchSteps as Record<string, any>[],
+                context: Object.assign(Object.create(null), step.context),
+                controller: new AbortController(),
+            };
+        });
+
+        const onParentAbort = () => {
+            for (const branch of branches) {
+                if (!branch.controller.signal.aborted) {
+                    branch.controller.abort(step.signal.reason
+                        || new WorkflowCancelledError('Workflow cancelled', step.stepPath));
+                }
+            }
+        };
+        if (step.signal.aborted) onParentAbort();
+        else step.signal.addEventListener('abort', onParentAbort, { once: true });
+
+        try {
+            const outcomes = await new Promise<Array<
+                | { status: 'fulfilled'; index: number; output: unknown; branch: typeof branches[number] }
+                | { status: 'rejected'; index: number; reason: unknown }
+            >>((resolve) => {
+                const results: Array<any> = [];
+                let winner: number | undefined;
+                for (const branch of branches) {
+                    void this.executeSequence(
+                        branch.steps,
+                        `${step.stepPath}/branch-${branch.index}/do`,
+                        {
+                            depth: step.depth + 1,
+                            vars: { ...step.vars },
+                            context: branch.context,
+                            signal: branch.controller.signal,
+                        },
+                    ).then(
+                        (value) => {
+                            results.push({
+                                status: 'fulfilled',
+                                index: branch.index,
+                                output: value.lastOutput,
+                                branch,
+                            });
+                            if (winner === undefined && compete) {
+                                winner = branch.index;
+                                for (const other of branches) {
+                                    if (other.index !== branch.index && !other.controller.signal.aborted) {
+                                        other.controller.abort(new WorkflowCancelledError(
+                                            'fork.compete 其他分支已完成',
+                                            step.stepPath,
+                                        ));
+                                    }
+                                }
+                            }
+                        },
+                        (reason) => {
+                            results.push({ status: 'rejected', index: branch.index, reason });
+                        },
+                    ).finally(() => {
+                        if (results.length === branches.length) resolve(results as any);
+                    });
+                }
+                if (branches.length === 0) resolve([]);
+            });
+
+            if (step.signal.aborted) {
+                throw step.signal.reason || new WorkflowCancelledError('Workflow cancelled', step.stepPath);
+            }
+
+            outcomes.sort((left, right) => left.index - right.index);
+
+            if (compete) {
+                const winner = outcomes.find((entry) => entry.status === 'fulfilled');
+                if (!winner || winner.status !== 'fulfilled') {
+                    const failed = outcomes.find((entry) => entry.status === 'rejected');
+                    const reason = failed && failed.status === 'rejected' ? failed.reason : undefined;
+                    throw reason instanceof Error
+                        ? reason
+                        : new WorkflowError('fork 所有分支均失败', 'step', step.stepPath);
+                }
+                Object.assign(step.context, winner.branch.context);
+                return { output: winner.output };
+            }
+
+            const failure = outcomes.find((entry) => entry.status === 'rejected');
+            if (failure && failure.status === 'rejected') {
+                throw failure.reason instanceof Error
+                    ? failure.reason
+                    : new WorkflowError(String(failure.reason), 'step', step.stepPath);
+            }
+
+            const outputs: unknown[] = [];
+            for (const entry of outcomes) {
+                if (entry.status !== 'fulfilled') continue;
+                outputs.push(entry.output);
+                // 分支内 set 的结果按声明顺序合并回父上下文
+                Object.assign(step.context, entry.branch.context);
+            }
+            return { output: outputs };
+        } finally {
+            step.signal.removeEventListener('abort', onParentAbort);
+        }
+    }
+
+    private async executeSubworkflow(
+        definition: Record<string, any>,
+        step: {
+            stepPath: string;
+            name: string;
+            context: Record<string, unknown>;
+            signal: AbortSignal;
+            expressionContext: WorkflowExpressionContext;
+        },
+    ): Promise<{ output?: unknown }> {
+        const resolvedDefinition = this.resolveCallableDefinition('agent', definition, step.expressionContext);
+        const source = resolvedDefinition.run?.workflow ?? resolvedDefinition.with;
+        let target: string | undefined;
+        let rawInputs: unknown;
+        if (typeof source === 'string') {
+            target = source;
+        } else if (source && typeof source === 'object') {
+            const record = source as Record<string, unknown>;
+            if (typeof record.name === 'string') target = record.name;
+            else if (typeof record.workflow === 'string') target = record.workflow;
+            rawInputs = record.inputs ?? record.input;
+        }
+        if (rawInputs === undefined && resolvedDefinition.with && typeof resolvedDefinition.with === 'object') {
+            const withConfig = resolvedDefinition.with as Record<string, unknown>;
+            rawInputs = withConfig.inputs ?? withConfig.input;
+        }
+        if (!target || !target.trim()) {
+            throw new WorkflowError('子工作流步骤缺少 name', 'validation', step.stepPath);
+        }
+
+        const stack = this.options.workflowStack || [
+            this.options.definition.summary.name,
+            this.options.definition.summary.path,
+        ].filter(Boolean);
+        const depth = this.options.subworkflowDepth || 0;
+        const maxDepth = this.options.maxSubworkflowDepth ?? globalConfig.workflow.maxSubworkflowDepth;
+        if (depth >= maxDepth) {
+            throw new WorkflowError(
+                `子工作流嵌套超过上限 ${maxDepth}`,
+                'validation',
+                step.stepPath,
+            );
+        }
+
+        const registry = new WorkflowRegistry(this.options.root);
+        const nestedDefinition = await registry.loadDefinition(target.trim());
+        if (!nestedDefinition) {
+            throw new WorkflowError(`子工作流不存在: ${target}`, 'validation', step.stepPath);
+        }
+        if (!nestedDefinition.validation.ok) {
+            throw new WorkflowError(
+                `子工作流校验失败: ${target}`,
+                'validation',
+                step.stepPath,
+                nestedDefinition.validation.issues,
+            );
+        }
+        if (stack.includes(nestedDefinition.summary.name)
+            || stack.includes(nestedDefinition.summary.path)) {
+            throw new WorkflowError(
+                `检测到循环子工作流: ${[...stack, nestedDefinition.summary.name].join(' -> ')}`,
+                'validation',
+                step.stepPath,
+            );
+        }
+
+        const prepared = prepareWorkflowInputs(
+            nestedDefinition,
+            rawInputs && typeof rawInputs === 'object' && !Array.isArray(rawInputs)
+                ? rawInputs as Record<string, unknown>
+                : {},
+        );
+        if (!prepared.ok) {
+            throw new WorkflowError(prepared.error, 'validation', step.stepPath);
+        }
+
+        const nestedRunner = new WorkflowRunner({
+            session: this.options.session,
+            definition: nestedDefinition,
+            inputs: prepared.inputs,
+            executor: this.options.executor,
+            abortSignal: step.signal,
+            traceId: `${this.options.traceId}/sub/${nestedDefinition.summary.name}`,
+            userId: this.options.userId,
+            root: this.options.root,
+            provider: this.options.provider,
+            model: this.options.model,
+            reasoningEffort: this.options.reasoningEffort,
+            locale: this.options.locale,
+            basePath: `${step.stepPath}/subworkflow/do`,
+            allowApproval: false,
+            workflowStack: [
+                ...stack,
+                nestedDefinition.summary.name,
+                nestedDefinition.summary.path,
+            ].filter(Boolean),
+            subworkflowDepth: depth + 1,
+            maxSubworkflowDepth: maxDepth,
+            sharedBudget: this.budgetState,
+            startedAt: this.startedAt,
+        });
+        const result = await nestedRunner.run();
+        return { output: result.lastOutput };
     }
 
     private evaluateCondition(value: unknown, ctx: WorkflowExpressionContext): boolean {
@@ -574,7 +849,10 @@ export class WorkflowRunner {
         });
     }
 
-    private buildExpressionContext(vars: Record<string, unknown> = {}): WorkflowExpressionContext {
+    private buildExpressionContext(
+        vars: Record<string, unknown> = {},
+        context: Record<string, unknown> = this.contextValues,
+    ): WorkflowExpressionContext {
         const steps: WorkflowExpressionContext['steps'] = Object.create(null);
         for (const [name, record] of this.stepByName) {
             if (isForbiddenPropertyKey(name)) continue;
@@ -593,7 +871,7 @@ export class WorkflowRunner {
                 traceId: this.options.traceId,
             },
             steps,
-            context: this.contextValues,
+            context,
             vars,
         };
     }
@@ -617,8 +895,8 @@ export class WorkflowRunner {
     }
 
     private assertBudget(stepPath: string): void {
-        this.stepCount++;
-        if (this.stepCount > this.maxSteps) {
+        this.budgetState.stepCount++;
+        if (this.budgetState.stepCount > this.maxSteps) {
             throw new WorkflowBudgetExceededError(
                 `Workflow 超过最大步骤数 ${this.maxSteps}`,
                 stepPath,

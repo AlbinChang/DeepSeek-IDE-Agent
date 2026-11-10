@@ -1,0 +1,11 @@
+document:
+  dsl: 1.0.0
+  name: child-note
+  title: 子工作流示例
+  version: 1.0.0
+  summary: 接收输入并返回一条 note。
+
+do:
+  - makeNote:
+      set:
+        note: "child:${ .inputs.text }"

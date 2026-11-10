@@ -1837,7 +1837,7 @@ flowchart TD
 | 定义发现/解析 | `server/src/workflow/WorkflowRegistry.ts`：发现 `.workflow/*.workflow.yaml|yml`（兼容普通 `.yaml|yml`）、YAML 解析、轻量结构校验、按路径或 `document.name` 查找、拒绝路径穿越 |
 | 表达式 | `server/src/workflow/expressions.ts`：安全求值（路径/比较/布尔/算术/过滤器/模板插值/duration），禁止 `eval`/`new Function`，敏感 env 脱敏 |
 | Schema 校验 | `server/src/workflow/schema.ts`：`output.schema` 的 type/required/properties/items/enum/数值与长度约束 |
-| Runner | `server/src/workflow/WorkflowRunner.ts`：`do` 顺序、`set`、`switch`、`for`、`try/catch/retry`、`wait`、`raise`、`then:exit`、步骤超时/预算/取消 |
+| Runner | `server/src/workflow/WorkflowRunner.ts`：`do` 顺序、`set`、`switch`、`for`、`fork` 并行分支、子工作流、`try/catch/retry`、`wait`、`raise`、`then:exit`、步骤超时/预算/取消 |
 | 步骤执行器 | `server/src/workflow/WorkflowStepExecutor.ts`：`agent`（AgentTurnEngine + 工具白名单 + `output.schema`）、`tool`、`run.shell`（ProcessSafetyGuard）、`evaluator`（`persistReport:false` + 只读白名单）、`approval` |
 | 运行存储 | `server/src/workflow/WorkflowRunStore.ts` / `WorkflowRunSession.ts`：`.workflow/.runs/<runId>/run.json`、`events.jsonl`、原子写、脱敏、保留最近 N 次 |
 | 执行引擎 | `server/src/workflow/InProcessWorkflowEngine.ts`：队列、`maxWorkers` 并发、同 workflow 串行、取消、审批恢复、重启 reconcile、多 run 并行；standalone server 使用 |
@@ -1855,8 +1855,9 @@ flowchart TD
 **与报告的差异（有意收敛）**：
 
 - 未引入 `@serverlessworkflow/sdk`，改用内置轻量解析/校验；`WorkflowRegistry` 保持同一返回结构，后续可替换为 SDK。
-- `fork` 未启用（明确报 `WorkflowUnsupportedError`），按报告留到 Phase 2；子工作流、HTTP、`emit/listen` 同样未启用。
-- 审批仅支持顶层 `do`；嵌套审批留到 Phase 2。
+- `fork` 已启用：分支在同一 Worker 内并行，分支上下文隔离后按序合并；`fork.compete` 取最先成功分支并取消其他分支。
+- 子工作流已启用（`call: workflow` / `run.workflow`）：支持输入默认值、循环/深度限制；审批仍只支持顶层 `do`，子工作流内审批会报错。
+- 子工作流步骤预算/wall-clock 与父 run 共享；崩溃恢复以父 run 顶层 checkpoint 为准，恢复时整个子工作流重新执行。
 - `run.shell.environment` 未透传（记录 warning）。
 - Phase 1.5 采用 **worker-per-run 冷启动**，不做热池；`maxRunsPerWorker`/`maxWorkerRestarts` 暂未启用（保留给热池）。
 - Worker 只通过 `WorkflowRunChannel` 抽象上报状态；主进程独占写 `run.json`/`events.jsonl`，避免多进程写冲突。
@@ -1866,7 +1867,7 @@ flowchart TD
 **验证**：
 
 - server `tsc --noEmit` 通过；
-- 35 个测试文件 / 312 个用例全绿（新增表达式、RunStore、Runner、InProcessEngine、ProcessWorkerEngine、WorkerHost、workerProtocol、StepExecutor、WorkflowTools、Registry 契约测试）；
+- 35 个测试文件 / 317 个用例全绿（新增表达式、RunStore、Runner、InProcessEngine、ProcessWorkerEngine、WorkerHost、workerProtocol、StepExecutor、WorkflowTools、Registry 契约测试）；
 - Electron 运行时冒烟：
   - `workflow:run`（`set` 流程）→ `workflow:getRun` → 审批流程 `waiting_approval` → `workflow:resume` → `succeeded`，run.json/events.jsonl 持久化正确；
   - 真实 `utilityProcess` Worker 执行 `set` 流程成功，事件含 `step.output`/`run.completed`；
@@ -1874,7 +1875,7 @@ flowchart TD
   - 审批 run 在真实 Worker 中暂停并写出 checkpoint。
 - Electron main/preload/worker 构建通过。
 
-**下一步**：Phase 2 补 `fork`、嵌套审批、子工作流、HTTP/SSE、热池与客户端运行面板。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
+**下一步**：Phase 2 剩余项：嵌套审批、HTTP 步骤、全局限流、热池/Worker 健康回收、REST/SSE 与客户端运行面板。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
 
 ---
 

@@ -1,0 +1,25 @@
+document:
+  dsl: 1.0.0
+  name: subworkflow-demo
+  title: 子工作流调用示例
+  version: 1.0.0
+  summary: 调用 child-note 并把结果传给后续步骤。
+  input:
+    schema:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+
+do:
+  - child:
+      call: workflow
+      with:
+        name: child-note
+        inputs:
+          text: ${ .inputs.text }
+
+  - show:
+      set:
+        childOutput: ${ .steps.child.output }

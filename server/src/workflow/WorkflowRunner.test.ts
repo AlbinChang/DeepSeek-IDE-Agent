@@ -1,10 +1,10 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { WorkflowApprovalPause, WorkflowTimeoutError, WorkflowUnsupportedError } from '@/workflow/errors.js';
+import { WorkflowApprovalPause, WorkflowTimeoutError } from '@/workflow/errors.js';
 import { WorkflowRunner } from '@/workflow/WorkflowRunner.js';
 import { WorkflowRunSession } from '@/workflow/WorkflowRunSession.js';
 import { WorkflowRunStore } from '@/workflow/WorkflowRunStore.js';
@@ -264,13 +264,208 @@ describe('WorkflowRunner', () => {
         expect(slow?.status).toBe('failed');
     });
 
-    it('rejects unsupported fork steps', async () => {
+    it('runs fork branches concurrently and merges branch contexts in order', async () => {
         const executor = new FakeExecutor();
+        let active = 0;
+        let maxActive = 0;
+        executor.handler = async (kind, definition) => {
+            if (kind !== 'agent') return { output: `${kind}-output` };
+            active++;
+            maxActive = Math.max(maxActive, active);
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            active--;
+            return { output: definition.with?.prompt };
+        };
         const runner = createRunner([
-            { parallel: { fork: { branches: [] } } },
+            {
+                parallel: {
+                    fork: {
+                        branches: [
+                            {
+                                do: [
+                                    { leftSet: { set: { left: 'L' } } },
+                                    { leftWork: { call: 'agent', with: { prompt: 'left' } } },
+                                ],
+                            },
+                            {
+                                do: [
+                                    { rightSet: { set: { right: 'R' } } },
+                                    { rightWork: { call: 'agent', with: { prompt: 'right' } } },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            },
+            { combine: { set: { combined: '${ .context.left }-${ .context.right }' } } },
         ], executor);
 
-        await expect(runner.run()).rejects.toBeInstanceOf(WorkflowUnsupportedError);
+        await runner.run();
+
+        expect(maxActive).toBe(2);
+        expect(runner.getContextValues()).toMatchObject({ left: 'L', right: 'R', combined: 'L-R' });
+        const forkStep = snapshot.steps.find((step) => step.name === 'parallel');
+        expect(forkStep?.status).toBe('succeeded');
+        expect(Array.isArray(forkStep?.output)).toBe(true);
+        expect((forkStep?.output as unknown[]).length).toBe(2);
+        expect(snapshot.steps.some((step) => step.path.includes('/branch-0/do/'))).toBe(true);
+        expect(snapshot.steps.some((step) => step.path.includes('/branch-1/do/'))).toBe(true);
+    });
+
+    it('fails the fork when any branch fails', async () => {
+        const executor = new FakeExecutor();
+        executor.handler = async (kind, definition) => {
+            if (definition.with?.prompt === 'boom') throw new Error('branch exploded');
+            return { output: 'ok' };
+        };
+        const runner = createRunner([
+            {
+                parallel: {
+                    fork: {
+                        branches: [
+                            { do: [{ ok: { call: 'agent', with: { prompt: 'ok' } } }] },
+                            { do: [{ bad: { call: 'agent', with: { prompt: 'boom' } } }] },
+                        ],
+                    },
+                },
+            },
+        ], executor);
+
+        await expect(runner.run()).rejects.toThrow('branch exploded');
+        const forkStep = snapshot.steps.find((step) => step.name === 'parallel');
+        expect(forkStep?.status).toBe('failed');
+        const badStep = snapshot.steps.find((step) => step.name === 'bad');
+        expect(badStep?.status).toBe('failed');
+    });
+
+    it('runs a subworkflow with its own inputs and nested step paths', async () => {
+        const executor = new FakeExecutor();
+        const childYaml = [
+            'document:',
+            '  name: child',
+            '  input:',
+            '    schema:',
+            '      type: object',
+            '      properties:',
+            '        prefix: { type: string }',
+            'do:',
+            '  - greet:',
+            '      set:',
+            '        message: "${ .inputs.prefix }-child"',
+            '  - echo:',
+            '      call: agent',
+            '      with:',
+            '        prompt: "${ .context.message }"',
+        ].join('\n');
+        await mkdir(path.join(root, '.workflow'), { recursive: true });
+        await writeFile(path.join(root, '.workflow', 'child.workflow.yaml'), childYaml, 'utf8');
+
+        const runner = createRunner([
+            {
+                sub: {
+                    call: 'workflow',
+                    with: {
+                        name: 'child',
+                        inputs: { prefix: 'hello' },
+                    },
+                },
+            },
+        ], executor);
+
+        await runner.run();
+
+        expect(executor.calls.some((call) => call.ctx.workflowName === 'child')).toBe(true);
+        expect(executor.calls.find((call) => call.ctx.workflowName === 'child')?.definition.with?.prompt).toBe('hello-child');
+        expect(snapshot.steps.some((step) => step.path.includes('/subworkflow/do/0/greet'))).toBe(true);
+        const subStep = snapshot.steps.find((step) => step.name === 'sub');
+        expect(subStep?.status).toBe('succeeded');
+    });
+
+    it('detects cyclic subworkflows', async () => {
+        const executor = new FakeExecutor();
+        const childYaml = [
+            'document:',
+            '  name: child',
+            'do:',
+            '  - loopBack:',
+            '      call: workflow',
+            '      with:',
+            '        name: demo',
+        ].join('\n');
+        await mkdir(path.join(root, '.workflow'), { recursive: true });
+        await writeFile(path.join(root, '.workflow', 'child.workflow.yaml'), childYaml, 'utf8');
+        await writeFile(
+            path.join(root, '.workflow', 'demo.workflow.yaml'),
+            'document:\n  name: demo\ndo:\n  - noop:\n      set:\n        ok: true\n',
+            'utf8',
+        );
+
+        const runner = createRunner([
+            {
+                sub: {
+                    call: 'workflow',
+                    with: { name: 'child' },
+                },
+            },
+        ], executor);
+
+        await expect(runner.run()).rejects.toThrow(/循环子工作流/);
+        const subStep = snapshot.steps.find((step) => step.name === 'sub');
+        expect(subStep?.status).toBe('failed');
+    });
+
+    it('returns the first successful branch when fork.compete is enabled', async () => {
+        const executor = new FakeExecutor();
+        executor.handler = async (kind, definition) => {
+            if (definition.with?.prompt === 'slow') {
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                return { output: 'slow' };
+            }
+            return { output: 'fast' };
+        };
+        const runner = createRunner([
+            {
+                race: {
+                    fork: {
+                        compete: true,
+                        branches: [
+                            { do: [{ slow: { call: 'agent', with: { prompt: 'slow' } } }] },
+                            { do: [{ fast: { call: 'agent', with: { prompt: 'fast' } } }] },
+                        ],
+                    },
+                },
+            },
+        ], executor);
+
+        await runner.run();
+
+        const raceStep = snapshot.steps.find((step) => step.name === 'race');
+        expect(raceStep?.output).toBe('fast');
+        const slowStep = snapshot.steps.find((step) => step.name === 'slow');
+        expect(slowStep?.status).toBe('cancelled');
+    });
+
+    it('cancels nested steps when a container step times out', async () => {
+        const executor = new FakeExecutor();
+        executor.handler = () => new Promise(() => {});
+        const runner = createRunner([
+            {
+                container: {
+                    switch: [
+                        {
+                            when: true,
+                            do: [{ inner: { call: 'agent', with: { prompt: 'hang' } } }],
+                        },
+                    ],
+                    timeout: { after: { milliseconds: 20 } },
+                },
+            },
+        ], executor);
+
+        await expect(runner.run()).rejects.toBeInstanceOf(WorkflowTimeoutError);
+        const inner = snapshot.steps.find((step) => step.name === 'inner');
+        expect(inner?.status).toBe('cancelled');
+        expect(snapshot.steps.find((step) => step.name === 'container')?.status).toBe('failed');
     });
 
     it('does not allow set to pollute the prototype', async () => {

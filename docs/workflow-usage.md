@@ -229,7 +229,57 @@ do:
 - `wait`：`{ wait: { seconds: 5 } }` 或 `wait: PT5S`。
 - `raise`：`{ raise: { error: { message: 失败原因 } } }`。
 - `then: exit`：结束当前序列。
-- `fork` / `run.workflow` / `http` / `emit` / `listen`：Phase 1 尚未启用（`fork` 会明确报错）。
+- `run.script` / `run.container` / `http` / `emit` / `listen`：尚未启用（`run.script` 等会明确报错）。
+
+### 4.11 `fork` 并行分支
+
+```yaml
+- parallel:
+    fork:
+      branches:
+        - do:
+            - readA: { call: tool, with: { tool: read_file, args: { path: A.md } } }
+            - summarizeA: { call: agent, with: { prompt: "总结 ${ .steps.readA.output }" } }
+        - do:
+            - readB: { call: tool, with: { tool: read_file, args: { path: B.md } } }
+            - summarizeB: { call: agent, with: { prompt: "总结 ${ .steps.readB.output }" } }
+```
+
+- 分支在同一个 Worker/进程内并行执行；默认等待全部分支（`allSettled`），任一分支失败则整个 fork 失败。
+- `fork.compete: true` 时取最先成功完成的分支，并取消其他分支；若全部分支失败则抛第一个错误。
+- 分支默认使用父上下文的**独立副本**；全部成功或竞争胜出后才合并胜出分支的 `set` 结果，避免并发写竞争。
+- 分支内步骤路径形如 `/do/0/parallel/branch-0/do/...`，便于 UI 展示。
+- 分支内不支持审批（仅顶层 `do`）。
+- 可运行示例：`.workflow/examples/parallel-review.workflow.yaml`。
+
+### 4.12 子工作流（`call: workflow` / `run.workflow`）
+
+```yaml
+- child:
+    call: workflow
+    with:
+      name: child-workflow          # 或 .workflow/child-workflow.workflow.yaml
+      inputs:
+        target: ${ .inputs.target }
+```
+
+```yaml
+- child:
+    run:
+      workflow:
+        name: child-workflow
+        inputs:
+          target: ${ .inputs.target }
+```
+
+- 子工作流从工作区 `.workflow/` 加载，支持默认输入/必填校验。
+- 嵌套深度由 `WORKFLOW_MAX_SUBWORKFLOW_DEPTH` 限制（默认 3）；循环引用会被拒绝。
+- 子工作流步骤路径形如 `/do/0/child/subworkflow/do/0/...`；步骤记录写入同一个 run。
+- 步骤预算与父 run 共享（`maxSteps`/wall-clock 从父 run 启动时间计算）。
+- 子工作流内**不支持审批**；需要审批时请放在顶层。
+- 子工作流 context 与父 context 隔离，只通过步骤输出传递结果（返回子工作流最后一步输出）。
+- 崩溃恢复以父 run 的顶层 checkpoint 为准；恢复时整个子工作流会重新执行。
+- 可运行示例：`.workflow/examples/subworkflow-demo.workflow.yaml` + `child-note.workflow.yaml`。
 
 ## 5. Agent 工具
 
@@ -268,7 +318,8 @@ do:
 | `WORKFLOW_WORKER_READY_TIMEOUT_MS` | `15000` | Worker 启动就绪超时 |
 | `WORKFLOW_CANCEL_GRACE_MS` | `8000` | 取消后强杀 Worker 的宽限期 |
 | `WORKFLOW_MAX_STORED_RUNS` | `50` | 保留运行记录数 |
-| `WORKFLOW_MAX_STEPS` | `200` | 单 run 最大步骤数 |
+| `WORKFLOW_MAX_STEPS` | `200` | 单 run 最大步骤数（fork/子工作流共享） |
+| `WORKFLOW_MAX_SUBWORKFLOW_DEPTH` | `3` | 子工作流最大嵌套深度 |
 | `WORKFLOW_MAX_STEP_OUTPUT_CHARS` | `65536` | 单步骤输出持久化上限 |
 | `WORKFLOW_DEFAULT_STEP_TIMEOUT_MS` | `600000` | 默认步骤超时 |
 | `WORKFLOW_AGENT_STEP_MAX_TURNS` | `12` | Agent 步骤默认轮次 |
@@ -276,8 +327,8 @@ do:
 ## 8. Phase 1.5 限制
 
 - Worker 是故障隔离单元，不是安全沙箱；与主进程同 OS 用户/文件权限。
-- `fork` 并行分支、子工作流、HTTP 步骤未启用。
-- 审批仅支持顶层步骤。
+- 审批仅支持顶层步骤；fork 分支/子工作流内审批会报错。
+- `http` / `run.script` / `run.container` / `emit` / `listen` 尚未启用。
 - `run.shell.environment` 未透传。
 - `workflow:event` 只推送 run/step 级事件，不逐 token 推送。
 - 取消对 Agent 步骤即时生效；Worker 收到取消后若在宽限期内未退出会被强杀。Windows 使用 `taskkill /T /F` 清理进程树。

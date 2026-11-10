@@ -1,0 +1,29 @@
+document:
+  dsl: 1.0.0
+  name: parallel-review
+  title: 并行检查示例
+  version: 1.0.0
+  summary: 用 fork 并行读取两个目录，再合并结果。
+
+do:
+  - parallel:
+      fork:
+        branches:
+          - do:
+              - readRoot:
+                  call: tool
+                  with:
+                    tool: list_files
+                    args:
+                      path: .
+          - do:
+              - readWorkflow:
+                  call: tool
+                  with:
+                    tool: list_files
+                    args:
+                      path: .workflow
+
+  - combine:
+      set:
+        branchCount: ${ .steps.parallel.output | length }
