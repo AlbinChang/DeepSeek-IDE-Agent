@@ -1,5 +1,3 @@
-import * as path from 'node:path';
-
 import { config as globalConfig } from '@/config/index.js';
 import type { AgentService } from '@/services/AgentService.js';
 import {
@@ -7,6 +5,13 @@ import {
     WorkflowCancelledError,
     WorkflowTimeoutError,
 } from '@/workflow/errors.js';
+import {
+    buildCheckpoint,
+    buildInitialSteps,
+    prepareWorkflowInputs,
+    resolveApprovalDecision,
+    samePath,
+} from '@/workflow/engineUtils.js';
 import { WorkflowRegistry } from '@/workflow/WorkflowRegistry.js';
 import { WorkflowRunner } from '@/workflow/WorkflowRunner.js';
 import { WorkflowRunSession } from '@/workflow/WorkflowRunSession.js';
@@ -28,7 +33,6 @@ import {
     type WorkflowRunResumeRequest,
     type WorkflowRunStartResult,
     type WorkflowRuntimeStats,
-    type WorkflowStepInfo,
 } from '@/workflow/types.js';
 
 export interface InProcessWorkflowEngineOptions {
@@ -46,6 +50,7 @@ interface QueuedRun {
     definition: WorkflowDefinition;
     snapshot: WorkflowRunInfo;
     session: WorkflowRunSession;
+    concurrencyKey: string;
     startIndex?: number;
     initialContext?: Record<string, unknown>;
     waitResolver?: (run: WorkflowRunInfo) => void;
@@ -57,43 +62,14 @@ interface ActiveRun {
     userId: string;
     root: string;
     workflowName: string;
+    concurrencyKey: string;
     controller: AbortController;
     promise: Promise<void>;
 }
 
-function samePath(left: string, right: string): boolean {
-    const a = path.resolve(left);
-    const b = path.resolve(right);
-    return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-}
-
-function buildInitialSteps(steps: Record<string, any>[], basePath = '/do'): WorkflowStepInfo[] {
-    return steps.map((entry, index) => {
-        const name = (entry && typeof entry === 'object' && Object.keys(entry)[0]) || `step-${index}`;
-        return {
-            path: `${basePath}/${index}/${name}`,
-            name,
-            status: 'pending',
-            attempts: 0,
-        };
-    });
-}
-
-function resolveApprovalDecision(decision: unknown): boolean | undefined {
-    if (decision === undefined || decision === null) return undefined;
-    if (typeof decision === 'boolean') return decision;
-    if (typeof decision === 'string') {
-        const normalized = decision.trim().toLowerCase();
-        if (['approve', 'approved', 'yes', 'ok', 'accept'].includes(normalized)) return true;
-        if (['reject', 'rejected', 'no', 'deny', 'cancel'].includes(normalized)) return false;
-        return undefined;
-    }
-    if (typeof decision === 'object') {
-        const record = decision as Record<string, unknown>;
-        if (typeof record.approved === 'boolean') return record.approved;
-        if (typeof record.decision === 'string') return resolveApprovalDecision(record.decision);
-    }
-    return undefined;
+function concurrencyKeyFor(request: WorkflowRunRequest, workflowName: string): string {
+    const group = request.concurrencyGroup?.trim();
+    return group ? `group:${group}` : `workflow:${workflowName}`;
 }
 
 /**
@@ -155,22 +131,11 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
             };
         }
 
-        const inputs: Record<string, unknown> = { ...(request.inputs || {}) };
-        try {
-            if (JSON.stringify(inputs).length > 256 * 1024) {
-                return { ok: false, error: 'WORKFLOW_INPUTS_TOO_LARGE' };
-            }
-        } catch {
-            return { ok: false, error: 'WORKFLOW_INPUTS_NOT_SERIALIZABLE' };
+        const prepared = prepareWorkflowInputs(definition, request.inputs);
+        if (!prepared.ok) {
+            return { ok: false, error: prepared.error };
         }
-        for (const input of definition.summary.inputs) {
-            if (inputs[input.name] !== undefined) continue;
-            if (input.default !== undefined) {
-                inputs[input.name] = input.default;
-            } else if (input.required) {
-                return { ok: false, error: `Missing required input: ${input.name}` };
-            }
-        }
+        const inputs = prepared.inputs;
 
         const store = new WorkflowRunStore(request.root);
         const runId = store.newRunId();
@@ -210,6 +175,7 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
             definition,
             snapshot,
             session,
+            concurrencyKey: concurrencyKeyFor(request, definition.summary.name),
         };
 
         let waitPromise: Promise<WorkflowRunInfo> | null = null;
@@ -305,18 +271,19 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
     }
 
     public async resumeRun(request: WorkflowRunResumeRequest): Promise<boolean> {
-        const decision = resolveApprovalDecision(request.decision);
-        if (decision === undefined) return false;
-
         const store = new WorkflowRunStore(request.root);
         const run = await store.read(request.runId);
         if (!run || run.userId !== request.userId || !samePath(run.root, request.root)) return false;
-        if (run.status !== 'waiting_approval') return false;
+        if (run.status !== 'waiting_approval' && run.status !== 'interrupted') return false;
+
+        const previousStatus = run.status;
+        const decision = resolveApprovalDecision(request.decision);
+        if (previousStatus === 'waiting_approval' && decision === undefined) return false;
 
         const approvalStepPath = run.approval?.stepPath;
         const approvalStep = run.steps.find((step) => step.path === approvalStepPath);
 
-        if (!decision) {
+        if (decision === false) {
             if (approvalStep) {
                 approvalStep.status = 'cancelled';
                 approvalStep.finishedAt = Date.now();
@@ -345,6 +312,7 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
             approvalStep.outputPreview = 'approved';
         }
         run.status = 'queued';
+        run.finishedAt = undefined;
         run.approval = undefined;
         run.currentTask = undefined;
         run.error = undefined;
@@ -366,7 +334,7 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
             globalConfig.workflow.maxStepOutputChars,
         );
         this.sessions.set(run.runId, session);
-        await session.emit('run.resumed', { decision: request.decision });
+        await session.emit('run.resumed', { decision: request.decision, previousStatus });
 
         this.queue.push({
             request: {
@@ -379,6 +347,7 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
             definition,
             snapshot: run,
             session,
+            concurrencyKey: `workflow:${run.workflow.name}`,
             startIndex: run.checkpoint?.nextStepIndex ?? 0,
             initialContext: run.checkpoint?.context,
         });
@@ -507,6 +476,7 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
                 definition,
                 snapshot: run,
                 session,
+                concurrencyKey: `workflow:${run.workflow.name}`,
                 startIndex: run.checkpoint?.nextStepIndex ?? 0,
                 initialContext: run.checkpoint?.context,
             });
@@ -519,10 +489,10 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
         if (this.closed) return;
         while (this.active.size < this.maxWorkers) {
             const index = this.queue.findIndex((item) => {
-                const activeForWorkflow = Array.from(this.active.values())
-                    .filter((active) => active.workflowName === item.snapshot.workflow.name)
+                const activeForKey = Array.from(this.active.values())
+                    .filter((active) => active.concurrencyKey === item.concurrencyKey)
                     .length;
-                return activeForWorkflow < this.maxConcurrentRunsPerWorkflow;
+                return activeForKey < this.maxConcurrentRunsPerWorkflow;
             });
             if (index < 0) return;
             const [item] = this.queue.splice(index, 1);
@@ -538,6 +508,7 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
             userId: snapshot.userId,
             root: snapshot.root,
             workflowName: snapshot.workflow.name,
+            concurrencyKey: item.concurrencyKey,
             controller,
             promise: Promise.resolve(),
         };
@@ -572,6 +543,16 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
                 locale: item.request.locale,
                 startIndex: item.startIndex,
                 initialContext: item.initialContext,
+                onCheckpoint: async (checkpoint) => {
+                    await session.patch({
+                        checkpoint: buildCheckpoint(
+                            checkpoint.nextStepIndex,
+                            checkpoint.context,
+                            snapshot.steps,
+                            globalConfig.workflow.maxStepOutputChars,
+                        ),
+                    });
+                },
             });
 
             try {
@@ -609,13 +590,12 @@ export class InProcessWorkflowEngine implements WorkflowEngine {
                         status: 'waiting_approval',
                         approval: error.approval,
                         currentTask: error.approval.stepPath,
-                        checkpoint: {
-                            nextStepIndex: error.topLevelIndex + 1,
-                            context: runner.getContextValues(),
-                            completedPaths: snapshot.steps
-                                .filter((step) => step.status === 'succeeded')
-                                .map((step) => step.path),
-                        },
+                        checkpoint: buildCheckpoint(
+                            error.topLevelIndex + 1,
+                            runner.getContextValues(),
+                            snapshot.steps,
+                            globalConfig.workflow.maxStepOutputChars,
+                        ),
                     });
                 } else {
                     const reason = controller.signal.reason;

@@ -176,6 +176,9 @@ export const config = {
         // 心跳与超时
         heartbeatIntervalMs: parsePositiveInt(process.env.WORKFLOW_HEARTBEAT_INTERVAL_MS, 5000, 500),
         heartbeatTimeoutMs: parsePositiveInt(process.env.WORKFLOW_HEARTBEAT_TIMEOUT_MS, 30000, 1000),
+        // Worker 启动就绪超时 / 取消后强制回收宽限期
+        workerReadyTimeoutMs: parsePositiveInt(process.env.WORKFLOW_WORKER_READY_TIMEOUT_MS, 15000, 1000),
+        cancelGraceMs: parsePositiveInt(process.env.WORKFLOW_CANCEL_GRACE_MS, 8000, 200),
         // Worker 复用与崩溃重启策略
         maxRunsPerWorker: parsePositiveInt(process.env.WORKFLOW_MAX_RUNS_PER_WORKER, 20, 1),
         maxWorkerRestarts: parsePositiveInt(process.env.WORKFLOW_MAX_WORKER_RESTARTS, 3, 0),

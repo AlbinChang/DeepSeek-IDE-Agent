@@ -88,6 +88,7 @@ export function registerWorkflowIpc(ipcMain: IpcMain) {
         reasoningEffort?: WorkflowRunRequest['reasoningEffort'];
         wait?: boolean;
         timeoutSeconds?: number;
+        concurrencyGroup?: string;
     }) => {
         try {
             const root = resolveWorkspaceRoot(params?.userId, params?.root);
@@ -114,6 +115,7 @@ export function registerWorkflowIpc(ipcMain: IpcMain) {
                 reasoningEffort: params.reasoningEffort,
                 wait: params.wait,
                 timeoutSeconds: params.timeoutSeconds,
+                concurrencyGroup: params.concurrencyGroup,
             });
             if (!result.ok) {
                 return {

@@ -15,11 +15,11 @@ import {
     isForbiddenPropertyKey,
     type WorkflowExpressionContext,
 } from '@/workflow/expressions.js';
-import type { WorkflowRunSession } from '@/workflow/WorkflowRunSession.js';
+import type { WorkflowRunChannel } from '@/workflow/WorkflowRunSession.js';
 import type { WorkflowStepExecutor, WorkflowStepKind } from '@/workflow/WorkflowStepExecutor.js';
 import type {
     WorkflowApprovalState,
-    WorkflowDefinition,
+    WorkflowExecutableDefinition,
     WorkflowStepInfo,
     WorkflowUsage,
 } from '@/workflow/types.js';
@@ -27,8 +27,8 @@ import type {
 const CALLABLE_KINDS = new Set<WorkflowStepKind>(['agent', 'tool', 'shell', 'evaluator', 'approval']);
 
 export interface WorkflowRunnerOptions {
-    session: WorkflowRunSession;
-    definition: WorkflowDefinition;
+    session: WorkflowRunChannel;
+    definition: WorkflowExecutableDefinition;
     inputs: Record<string, unknown>;
     executor: WorkflowStepExecutor;
     abortSignal: AbortSignal;
@@ -39,9 +39,11 @@ export interface WorkflowRunnerOptions {
     model?: string;
     reasoningEffort?: 'default' | 'low' | 'high' | 'max';
     locale?: string;
-    /** 恢复时从顶层 do 的第 N 个步骤继续（审批恢复） */
+    /** 恢复时从顶层 do 的第 N 个步骤继续（审批恢复/中断恢复） */
     startIndex?: number;
     initialContext?: Record<string, unknown>;
+    /** 顶层步骤完成后回调，用于持久化 crash/审批恢复所需的 checkpoint */
+    onCheckpoint?: (checkpoint: { nextStepIndex: number; context: Record<string, unknown> }) => void | Promise<void>;
 }
 
 interface SequenceOptions {
@@ -133,6 +135,12 @@ export class WorkflowRunner {
             lastOutput = result.output;
             if (result.exited) {
                 return { lastOutput, exited: true };
+            }
+            if (options.depth === 0 && this.options.onCheckpoint) {
+                await this.options.onCheckpoint({
+                    nextStepIndex: index + 1,
+                    context: this.getContextValues(),
+                });
             }
         }
         return { lastOutput };

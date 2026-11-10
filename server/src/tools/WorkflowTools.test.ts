@@ -104,6 +104,14 @@ describe('WorkflowTools', () => {
             runId: 'wf-run-1',
             decision: 'approve',
         });
+
+        await tool('resume_workflow').execute({ runId: 'wf-run-1' }, context(root));
+        expect(engine.resumeRun).toHaveBeenLastCalledWith({
+            userId: 'user-1',
+            root,
+            runId: 'wf-run-1',
+            decision: undefined,
+        });
     });
 
     it('surfaces engine errors as tool errors', async () => {

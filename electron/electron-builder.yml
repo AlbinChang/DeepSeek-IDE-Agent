@@ -17,6 +17,8 @@ extraResources:
     to: config
   - from: ../.env
     to: .env
+  - from: dist/workers
+    to: workers
 
 win:
   target:

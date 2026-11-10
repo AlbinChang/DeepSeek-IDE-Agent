@@ -23,6 +23,6 @@
     },
     "baseUrl": "."
   },
-  "include": ["src/main/**/*.ts"],
+  "include": ["src/main/**/*.ts", "src/workers/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

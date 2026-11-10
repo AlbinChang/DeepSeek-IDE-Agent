@@ -8,11 +8,45 @@ import type {
 
 const EVENT_STRING_LIMIT = 2000;
 
+export interface WorkflowRunChannel {
+    readonly snapshot: WorkflowRunInfo;
+    readonly runId: string;
+    patch(patch: Partial<WorkflowRunInfo>): Promise<void>;
+    upsertStep(step: WorkflowStepInfo): Promise<void>;
+    addUsage(usage: WorkflowUsage): Promise<void>;
+    emit(type: string, data?: Record<string, unknown>): Promise<void>;
+    sanitizeOutput(value: unknown): unknown;
+    previewOutput(value: unknown): string;
+}
+
+export function sanitizeOutputValue(value: unknown, maxOutputChars: number): unknown {
+    const sanitized = sanitizeForStore(value, maxOutputChars);
+    try {
+        const serialized = JSON.stringify(sanitized);
+        if (typeof serialized === 'string' && serialized.length > maxOutputChars) {
+            return `${serialized.slice(0, maxOutputChars)}…[truncated ${serialized.length - maxOutputChars} chars]`;
+        }
+    } catch {
+        return String(sanitized);
+    }
+    return sanitized;
+}
+
+export function previewOutputValue(value: unknown, maxOutputChars: number): string {
+    const sanitized = sanitizeForStore(value, maxOutputChars);
+    if (typeof sanitized === 'string') return sanitized;
+    try {
+        return JSON.stringify(sanitized);
+    } catch {
+        return String(sanitized);
+    }
+}
+
 /**
  * 单次 run 的内存快照 + 持久化会话。
  * 所有写入串行化，避免 run.json 并发覆盖。
  */
-export class WorkflowRunSession {
+export class WorkflowRunSession implements WorkflowRunChannel {
     private writeChain: Promise<void> = Promise.resolve();
     private closed = false;
 
@@ -79,26 +113,11 @@ export class WorkflowRunSession {
     }
 
     public sanitizeOutput(value: unknown): unknown {
-        const sanitized = sanitizeForStore(value, this.maxOutputChars);
-        try {
-            const serialized = JSON.stringify(sanitized);
-            if (typeof serialized === 'string' && serialized.length > this.maxOutputChars) {
-                return `${serialized.slice(0, this.maxOutputChars)}…[truncated ${serialized.length - this.maxOutputChars} chars]`;
-            }
-        } catch {
-            return String(sanitized);
-        }
-        return sanitized;
+        return sanitizeOutputValue(value, this.maxOutputChars);
     }
 
     public previewOutput(value: unknown): string {
-        const sanitized = sanitizeForStore(value, this.maxOutputChars);
-        if (typeof sanitized === 'string') return sanitized;
-        try {
-            return JSON.stringify(sanitized);
-        } catch {
-            return String(sanitized);
-        }
+        return previewOutputValue(value, this.maxOutputChars);
     }
 
     public async persist(): Promise<void> {

@@ -3,9 +3,10 @@
  * 
  * 开发模式启动流程：
  * 1. 编译 preload 脚本（esbuild，CJS）
- * 2. 编译 main process（esbuild，ESM）
- * 3. 启动 Vite dev server（Renderer 热更新）
- * 4. 启动 Electron（加载编译后的 main process）
+ * 2. 编译 workflow worker（esbuild，CJS 单文件）
+ * 3. 编译 main process（esbuild，ESM）
+ * 4. 启动 Vite dev server（Renderer 热更新）
+ * 5. 启动 Electron（加载编译后的 main process）
  * 
  * 使用: node electron/scripts/dev.mjs
  */
@@ -46,6 +47,10 @@ function ensureDist() {
     const mainDir = path.join(distDir, 'main');
     if (!fs.existsSync(mainDir)) {
         fs.mkdirSync(mainDir, { recursive: true });
+    }
+    const workersDir = path.join(distDir, 'workers');
+    if (!fs.existsSync(workersDir)) {
+        fs.mkdirSync(workersDir, { recursive: true });
     }
 }
 
@@ -108,7 +113,22 @@ function buildPreload() {
     }
 }
 
-// ── 步骤 2: 编译 Main Process ──
+// ── 步骤 2: 编译 Workflow Worker ──
+function buildWorkflowWorker() {
+    log('WORKER', colors.magenta, 'Building workflow worker...');
+    try {
+        execSync('node scripts/build-workflow-worker.mjs', {
+            cwd: ELECTRON_ROOT,
+            stdio: 'pipe',
+        });
+        log('WORKER', colors.green, 'Workflow worker built → dist/workers/workflowWorker.cjs');
+    } catch (err) {
+        log('WORKER', colors.red, 'Workflow worker build failed:', err.message);
+        process.exit(1);
+    }
+}
+
+// ── 步骤 3: 编译 Main Process ──
 function buildMainProcess() {
     log('MAIN', colors.magenta, 'Building main process...');
     try {
@@ -453,10 +473,13 @@ async function main() {
     // 1. 编译 Preload（CJS，供 Electron 加载）
     buildPreload();
 
-    // 2. 编译 Main Process（ESM）
+    // 2. 编译 Workflow Worker（ESM）
+    buildWorkflowWorker();
+
+    // 3. 编译 Main Process（ESM）
     buildMainProcess();
 
-    // 3. 启动 Vite Dev Server
+    // 4. 启动 Vite Dev Server
     await startViteDevServer();
 
     // 4. 启动 Electron

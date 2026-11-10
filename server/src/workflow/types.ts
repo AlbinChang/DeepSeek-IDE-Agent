@@ -67,6 +67,9 @@ export interface WorkflowDefinition {
     validation: WorkflowValidationResult;
 }
 
+/** 执行器真正需要的最小定义；Worker IPC 只传这个，避免重复传 YAML。 */
+export type WorkflowExecutableDefinition = Pick<WorkflowDefinition, 'summary' | 'steps'>;
+
 export type WorkflowStepStatus =
     | 'pending'
     | 'running'

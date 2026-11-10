@@ -1004,9 +1004,9 @@ type WorkerToMain =
 | 事项 | 做法 |
 |---|---|
 | Worker 入口 | 新增 `electron/src/workers/workflowWorker.ts`，只 import server 模块；**不要 import `electron`** |
-| 构建 | 新增 `build:workflow-worker`：`esbuild ... --platform=node --target=node20 --format=esm --bundle --alias:@=../server/src --outfile=dist/workers/workflowWorker.js`，externals 与 main 保持一致 |
-| 打包 | `electron-builder.yml` 的 `files: dist/**/*` 已覆盖；建议 `asarUnpack: ["dist/workers/**"]` 或 `extraResources` 把 Worker 入口放到 asar 外，避免 `utilityProcess.fork` 读 asar 的兼容性问题 |
-| 路径 | 开发：`ELECTRON_ROOT/dist/workers/workflowWorker.js`；打包：`process.resourcesPath/app.asar.unpacked/...` 或 `resources/workers/...`；统一封装 `resolveWorkerEntry()` |
+| 构建 | 新增 `build:workflow-worker`：`esbuild` CJS 单文件 bundle（server 依赖是 CJS），banner 注入 `import.meta.url` 兼容值；输出 `dist/workers/workflowWorker.cjs` |
+| 打包 | `electron-builder.yml` 的 `files: dist/**/*` 已覆盖；`extraResources: dist/workers → resources/workers` 把 Worker 入口放到 asar 外 |
+| 路径 | 开发：`ELECTRON_ROOT/dist/workers/workflowWorker.cjs`；打包：`process.resourcesPath/workers/workflowWorker.cjs`；统一封装 `resolveWorkflowWorkerEntry()` |
 | 环境变量 | `utilityProcess.fork` 默认继承 `process.env`；Worker 依赖 `PROJECT_ROOT`/`SERVER_ROOT`/`CONFIG_ROOT`（`PathUtils` 在模块初始化时读取）。若自定义 `env`，必须保留这些变量、`PATH` 和 provider keys，否则路径/模型配置会错 |
 | 生命周期 | `app.whenReady()` 后 `scheduler.start()`；`before-quit` 中 `await scheduler.shutdown()`；`window-all-closed` 不直接退出前先停 Worker |
 | 原生模块 | `node-pty`、`@playwright/*` 已在 `asarUnpack`；Worker 复用同一规则 |
@@ -1115,7 +1115,7 @@ flowchart TD
 | `InProcessWorkflowEngine` | `server/src/services/workflow/InProcessWorkflowEngine.ts` | standalone/Node 路径的无 Worker 执行 | 80–120 |
 | `workflowProtocol` | `server/src/types/workflowProtocol.ts` | 主进程 ↔ Worker 消息类型 + 校验 | 80–120 |
 | `workflowWorker` | `electron/src/workers/workflowWorker.ts` | Worker 入口：`process.parentPort` + `WorkflowRunner` | 80–120 |
-| `resolveWorkerEntry` | `electron/src/main/workflow-worker-path.ts` | 开发/打包路径解析（asar/extraResources） | 30–50 |
+| `resolveWorkflowWorkerEntry` | `electron/src/main/workflow/workflow-runtime.ts` | 开发/打包路径解析（resources/workers） | 20–40 |
 
 **总计**：单进程 P1 约 1,200–1,800 行；加 `utilityProcess` Worker 模式再加约 700–1,000 行（调度器/池/协议/Worker 入口/event bus），完整 P2 约 2,700–3,400 行（不含测试）。如果只做只读索引 + 顺序 + tool/shell，可压到 900–1,200 行。
 
@@ -1719,7 +1719,16 @@ flowchart TD
 - 实现表达式求值（路径 + 有限运算符）。
 - **验收**：`hello.workflow.yaml` 能跑通；失败步骤能重试/取消；运行日志可查询；Agent 步骤只能用白名单工具。
 
-#### Phase 1.5：进程 Worker 模式（5–8 人日）
+#### Phase 1.5：进程 Worker 模式（已完成）
+
+- 已实现 `ProcessWorkerWorkflowEngine` + `WorkflowWorkerSpawner`/`WorkerHost` + `workflowProtocol`。
+- 新增 `electron/src/workers/workflowWorker.ts`，只跑 `WorkflowRunner`，不启动 Fastify/UI。
+- `utilityProcess.fork` 生命周期：`serviceName`、`stdio: 'pipe'`、`env`、`execArgv` 堆上限。
+- 队列/准入/心跳/取消/崩溃恢复；主进程集中写 `run.json`/`events.jsonl`；顶层步骤 checkpoint 支持 interrupted 恢复。
+- 构建/打包：`build:workflow-worker`、`extraResources` 暴露 `resources/workers/workflowWorker.cjs`。
+- **验收**：2 个真实 Worker 并行执行 2 个 workflow；`taskkill` 一个 Worker，另一个继续；崩溃 run 标记 interrupted 并可从 checkpoint resume；`app.getAppMetrics()` 可见 Worker（PID/内存/CPU）。
+
+> 以下为原始规划，保留作为背景。
 
 - 实现 `WorkflowScheduler` + `WorkerPool` + `workflowProtocol`。
 - 新增 `electron/src/workers/workflowWorker.ts`，只跑 `WorkflowRunner`，不启动 Fastify/UI。
@@ -1819,7 +1828,7 @@ flowchart TD
 | 多 Worker 并发写同一文件 | 数据损坏 | `maxConcurrentRunsPerWorkflow=1`；写型 workflow `concurrencyGroup` 串行；原子写 |
 | Telemetry/TODO 并发写 | 状态污染 | Worker 只回传 usage；TODO 工具禁用；主进程统一写 |
 
-### 7.6 实施记录（Phase 0 + Phase 1，已完成）
+### 7.6 实施记录（Phase 0 + Phase 1 + Phase 1.5，已完成）
 
 本轮已按报告落地“可运行的 MVP”，不修改聊天/文件/工具/评估的既有行为。
 
@@ -1831,10 +1840,15 @@ flowchart TD
 | Runner | `server/src/workflow/WorkflowRunner.ts`：`do` 顺序、`set`、`switch`、`for`、`try/catch/retry`、`wait`、`raise`、`then:exit`、步骤超时/预算/取消 |
 | 步骤执行器 | `server/src/workflow/WorkflowStepExecutor.ts`：`agent`（AgentTurnEngine + 工具白名单 + `output.schema`）、`tool`、`run.shell`（ProcessSafetyGuard）、`evaluator`（`persistReport:false` + 只读白名单）、`approval` |
 | 运行存储 | `server/src/workflow/WorkflowRunStore.ts` / `WorkflowRunSession.ts`：`.workflow/.runs/<runId>/run.json`、`events.jsonl`、原子写、脱敏、保留最近 N 次 |
-| 执行引擎 | `server/src/workflow/InProcessWorkflowEngine.ts`：队列、`maxWorkers` 并发、同 workflow 串行、取消、审批恢复、重启 reconcile、多 run 并行 |
+| 执行引擎 | `server/src/workflow/InProcessWorkflowEngine.ts`：队列、`maxWorkers` 并发、同 workflow 串行、取消、审批恢复、重启 reconcile、多 run 并行；standalone server 使用 |
+| 进程 Worker 引擎 | `server/src/workflow/ProcessWorkerWorkflowEngine.ts`：主进程调度、worker-per-run、队列/准入、心跳/取消/崩溃恢复、主进程单写者；`utilityProcess` 通过可注入 `WorkflowWorkerSpawner` 端口接入 |
+| Worker 协议/运行时 | `server/src/workflow/workerProtocol.ts` + `WorkerHost.ts` + `RemoteWorkflowRunSession.ts`：`worker.init`/`run.start`/`run.event`/`run.step`/`run.checkpoint`/`run.result`/`run.cancel`/heartbeat；Worker 内只跑 `WorkflowRunner` |
+| Electron Worker 适配 | `electron/src/workers/workflowWorker.ts`、`electron/src/main/workflow/utility-process-spawner.ts`：`utilityProcess.fork`、`serviceName`、`stdio:pipe`、堆上限、stdout/stderr 排空、`taskkill /T /F`、`app.getAppMetrics()` |
+| Worker 构建/打包 | `electron/scripts/build-workflow-worker.mjs`（CJS 单文件 + `import.meta.url` 兼容 banner）、`build:workflow-worker`、dev 自动构建、`extraResources: dist/workers → resources/workers` |
+| 检查点/恢复 | Runner 顶层步骤完成后回调 checkpoint；`interrupted` 与 `waiting_approval` 均可通过 `resume_workflow` 从 checkpoint 继续 |
 | 工具面 | `server/src/tools/WorkflowTools.ts`：`list_workflows`/`get_workflow`/`validate_workflow`/`run_workflow`/`get_workflow_run`/`list_workflow_runs`/`cancel_workflow`/`resume_workflow` |
 | 提示词 | `server/src/services/WorkflowIndexSection.ts`：只注入工作流索引；无 `.workflow` 时零影响 |
-| IPC/Electron | `workflow:*` 已接真实引擎；`WorkflowRuntime` 注入 `InProcessWorkflowEngine`；workspace reset 取消 run；`before-quit` 关闭引擎 |
+| IPC/Electron | `workflow:*` 已接真实引擎；`WorkflowRuntime` 优先注入 `ProcessWorkerWorkflowEngine`，Worker bundle 缺失时回退 `InProcessWorkflowEngine`；workspace reset 取消 run；`before-quit` 关闭引擎/Worker |
 | standalone | `server/src/index.ts` 注入进程内引擎，SIGINT/SIGTERM 时关闭 |
 | 配置 | `config.workflow` 增加 `maxStoredRuns`/`maxSteps`/`maxStepOutputChars`/`defaultStepTimeoutMs`/`agentStepMaxTurns` |
 
@@ -1844,17 +1858,23 @@ flowchart TD
 - `fork` 未启用（明确报 `WorkflowUnsupportedError`），按报告留到 Phase 2；子工作流、HTTP、`emit/listen` 同样未启用。
 - 审批仅支持顶层 `do`；嵌套审批留到 Phase 2。
 - `run.shell.environment` 未透传（记录 warning）。
-- 进程内引擎暂无 Worker；`maxWorkers` 表示并发 run 数，Phase 1.5 再替换为 `utilityProcess` 池。
+- Phase 1.5 采用 **worker-per-run 冷启动**，不做热池；`maxRunsPerWorker`/`maxWorkerRestarts` 暂未启用（保留给热池）。
+- Worker 只通过 `WorkflowRunChannel` 抽象上报状态；主进程独占写 `run.json`/`events.jsonl`，避免多进程写冲突。
+- Worker bundle 选择 CJS 单文件（server 依赖是 CJS），并用 banner 提供 `import.meta.url` 兼容值；未引入新的 npm 依赖。
 - `workflow:event` 只推送 run/step 级事件，不逐 token 推送，避免事件日志膨胀。
 
 **验证**：
 
 - server `tsc --noEmit` 通过；
-- 32 个测试文件 / 298 个用例全绿（新增表达式、RunStore、Runner、InProcessEngine、StepExecutor、WorkflowTools、Registry 契约测试）；
-- Electron 运行时冒烟：`workflow:run`（`set` 流程）→ `workflow:getRun` → 审批流程 `waiting_approval` → `workflow:resume` → `succeeded`，run.json/events.jsonl 持久化正确；
-- Electron main/preload 构建通过。
+- 35 个测试文件 / 312 个用例全绿（新增表达式、RunStore、Runner、InProcessEngine、ProcessWorkerEngine、WorkerHost、workerProtocol、StepExecutor、WorkflowTools、Registry 契约测试）；
+- Electron 运行时冒烟：
+  - `workflow:run`（`set` 流程）→ `workflow:getRun` → 审批流程 `waiting_approval` → `workflow:resume` → `succeeded`，run.json/events.jsonl 持久化正确；
+  - 真实 `utilityProcess` Worker 执行 `set` 流程成功，事件含 `step.output`/`run.completed`；
+  - 2 个真实 Worker 并行（PID 不同，`app.getAppMetrics()` 可见 `memMB/cpu`）；`taskkill` 杀掉其中一个后，另一个继续运行，被杀 run 标记 `interrupted`；
+  - 审批 run 在真实 Worker 中暂停并写出 checkpoint。
+- Electron main/preload/worker 构建通过。
 
-**下一步**：Phase 1.5 `ProcessWorkerWorkflowEngine`（`utilityProcess` 池 + 主进程单写者 + 心跳/取消/恢复），随后 Phase 2 补 `fork`、嵌套审批、子工作流、HTTP/SSE 与客户端运行面板。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
+**下一步**：Phase 2 补 `fork`、嵌套审批、子工作流、HTTP/SSE、热池与客户端运行面板。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
 
 ---
 

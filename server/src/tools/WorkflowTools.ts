@@ -206,7 +206,7 @@ export class WorkflowTools {
             },
             {
                 name: 'resume_workflow',
-                description: '对等待审批的 workflow run 做出批准/拒绝决策；拒绝会取消运行。',
+                description: '恢复 waiting_approval 或 interrupted 的 workflow run；审批决策 approval 必填，interrupted 运行可省略 decision。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -214,18 +214,21 @@ export class WorkflowTools {
                         decision: {
                             type: 'string',
                             enum: ['approve', 'reject'],
-                            description: '批准继续或拒绝取消',
+                            description: '批准继续或拒绝取消；interrupted 运行可省略',
                         },
                     },
-                    required: ['runId', 'decision'],
+                    required: ['runId'],
                     additionalProperties: false,
                 },
                 execute: async (params, context) => {
                     const { userId, root } = resolveScope(context);
                     const runId = String(params?.runId || '').trim();
                     if (!runId) throw new Error('runId 不能为空');
-                    const decision = String(params?.decision || '').trim();
-                    if (decision !== 'approve' && decision !== 'reject') {
+                    const rawDecision = params?.decision;
+                    const decision = rawDecision === undefined || rawDecision === null
+                        ? undefined
+                        : String(rawDecision).trim();
+                    if (decision !== undefined && decision !== 'approve' && decision !== 'reject') {
                         throw new Error('decision 必须是 approve 或 reject');
                     }
                     const resumed = await service().resume({ userId, root, runId, decision });

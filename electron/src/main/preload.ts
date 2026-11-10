@@ -472,6 +472,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
             reasoningEffort?: 'default' | 'low' | 'high' | 'max';
             wait?: boolean;
             timeoutSeconds?: number;
+            concurrencyGroup?: string;
         }) => ipcRenderer.invoke('workflow:run', params),
         getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => ipcRenderer.invoke('workflow:getRun', params),
         cancel: (params: { userId: string; root?: string; runId: string }) => ipcRenderer.invoke('workflow:cancel', params),

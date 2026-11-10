@@ -206,6 +206,7 @@ export interface WorkflowRunParams {
     reasoningEffort?: 'default' | 'low' | 'high' | 'max';
     wait?: boolean;
     timeoutSeconds?: number;
+    concurrencyGroup?: string;
 }
 
 export interface WorkflowRuntimeStats {

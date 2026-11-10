@@ -1,4 +1,4 @@
-# Workflow 使用指南（Phase 1）
+# Workflow 使用指南（Phase 1.5）
 
 本项目的声明式 Workflow 放在工作区 `.workflow/` 目录，使用 Open Workflow DSL 1.0.0 的可执行子集。运行时复用现有 Agent、工具、评估与命令安全能力。
 
@@ -18,6 +18,16 @@
 
 - 单文件上限 256 KB；最多扫描 3 层；隐藏目录（如 `.runs`）不会被当作工作流。
 - `.workflow/.runs/` 由系统管理，Agent 只读。
+
+### 1.1 执行模型（Phase 1.5）
+
+- Electron 下每个 run 独占一个 `utilityProcess` Worker（worker-per-run）；不同 run 可并行，默认 `maxWorkers = min(4, CPU-1)`。
+- 主进程是 `run.json` / `events.jsonl` 的唯一写者；Worker 只上报事件、步骤、checkpoint。
+- Worker 心跳默认 5s；30s 无心跳、异常退出或主进程关闭 → run 标记 `interrupted`。
+- 每个顶层步骤完成后写入 checkpoint；`resume_workflow` 对 `interrupted`（无需 decision）与 `waiting_approval`（需要 approve/reject）都可用。
+- 审批暂停后 Worker 退出释放槽位，恢复时启动新 Worker 从 checkpoint 继续。
+- 同一 workflow 默认串行（`WORKFLOW_MAX_CONCURRENT_RUNS_PER_WORKFLOW=1`）；可用 `concurrencyGroup` 让不同 workflow 共享串行组。
+- standalone server 没有 Electron `utilityProcess`，继续使用进程内引擎；行为与 Worker 模式一致（队列/审批/取消/checkpoint）。
 
 ## 2. 最小示例
 
@@ -160,7 +170,8 @@ do:
 ```
 
 - Phase 1 仅支持顶层 `do` 中的审批；嵌套审批会在 Phase 2 支持。
-- 审批暂停后 Worker/进程内槽位会释放，`resume_workflow` 从下一个顶层步骤继续。
+- 审批暂停后 Worker 会退出释放槽位；`resume_workflow` 启动新 Worker 从下一个顶层步骤继续。
+- `interrupted` 的 run 也可以不带 decision 直接 `resume_workflow`，从最后一个顶层 checkpoint 继续。
 
 ### 4.7 `switch`
 
@@ -229,38 +240,47 @@ do:
 | `list_workflows` | 列出 `.workflow` 工作流 |
 | `get_workflow` | 查看 YAML + 元数据 + 校验 |
 | `validate_workflow` | 校验单个或全部 |
-| `run_workflow` | 入队执行；`wait=true` 等待终态/审批 |
+| `run_workflow` | 入队执行；`wait=true` 等待终态/审批；可选 `concurrencyGroup` 同组串行 |
 | `get_workflow_run` | 查询运行/步骤/用量/审批 |
 | `list_workflow_runs` | 列出运行记录 |
 | `cancel_workflow` | 取消排队/运行/等待审批 |
-| `resume_workflow` | `approve` / `reject` 审批 |
+| `resume_workflow` | `approve` / `reject` 审批；`interrupted` 运行可省略 decision 直接恢复 |
 
 ## 6. Desktop IPC / 客户端
 
 - IPC 通道：`workflow:list/get/validate/run/getRun/cancel/resume/workers`。
 - 事件通道：`workflow:event`（按 `runId` 归属，与 chat 的 `agent:event` 解耦）。
 - 客户端桥接：`electronAPI.workflow.*`、`workflowBridge`、`workflowBridge.onEvent()`。
+- `workflow:workers` 返回 `{ active, queued, workers: [{ workerId, pid, runId, memMB, cpu }] }`；`memMB/cpu` 来自 `app.getAppMetrics()`。
 
 ## 7. 配置
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
 | `WORKFLOW_ENABLED` | `true` | 总开关；关闭后 run/cancel/resume 拒绝 |
-| `WORKFLOW_MAX_WORKERS` | `min(4, CPU-1)` | 进程内并发 run 数（Phase 1.5 为 Worker 数） |
+| `WORKFLOW_MAX_WORKERS` | `min(4, CPU-1)` | utilityProcess 并发 Worker 上限 |
 | `WORKFLOW_MAX_QUEUE_SIZE` | `20` | 排队上限 |
-| `WORKFLOW_MAX_CONCURRENT_RUNS_PER_WORKFLOW` | `1` | 同一工作流并发 run 上限 |
+| `WORKFLOW_MAX_CONCURRENT_RUNS_PER_WORKFLOW` | `1` | 同一工作流/并发组的上限 |
 | `WORKFLOW_MAX_RUN_DURATION_MS` | `7200000` | 单 run 最大时长 |
+| `WORKFLOW_WORKER_HEAP_MB` | `512` | Worker V8 堆上限（`--js-flags=--max-old-space-size`） |
+| `WORKFLOW_HEARTBEAT_INTERVAL_MS` | `5000` | Worker 心跳间隔 |
+| `WORKFLOW_HEARTBEAT_TIMEOUT_MS` | `30000` | 心跳超时判定 |
+| `WORKFLOW_WORKER_READY_TIMEOUT_MS` | `15000` | Worker 启动就绪超时 |
+| `WORKFLOW_CANCEL_GRACE_MS` | `8000` | 取消后强杀 Worker 的宽限期 |
 | `WORKFLOW_MAX_STORED_RUNS` | `50` | 保留运行记录数 |
 | `WORKFLOW_MAX_STEPS` | `200` | 单 run 最大步骤数 |
 | `WORKFLOW_MAX_STEP_OUTPUT_CHARS` | `65536` | 单步骤输出持久化上限 |
 | `WORKFLOW_DEFAULT_STEP_TIMEOUT_MS` | `600000` | 默认步骤超时 |
 | `WORKFLOW_AGENT_STEP_MAX_TURNS` | `12` | Agent 步骤默认轮次 |
 
-## 8. Phase 1 限制
+## 8. Phase 1.5 限制
 
-- 进程内执行；`utilityProcess` 多 Worker 是 Phase 1.5。
+- Worker 是故障隔离单元，不是安全沙箱；与主进程同 OS 用户/文件权限。
 - `fork` 并行分支、子工作流、HTTP 步骤未启用。
 - 审批仅支持顶层步骤。
 - `run.shell.environment` 未透传。
 - `workflow:event` 只推送 run/step 级事件，不逐 token 推送。
-- 取消对 Agent 步骤即时生效；shell 步骤依赖其 `timeout`，不会立即杀掉子进程（Phase 2 改进）。
+- 取消对 Agent 步骤即时生效；Worker 收到取消后若在宽限期内未退出会被强杀。Windows 使用 `taskkill /T /F` 清理进程树。
+- Worker 为冷启动、worker-per-run；`WORKFLOW_MAX_RUNS_PER_WORKER` / `MAX_WORKER_RESTARTS` 预留给热池。
+- 心跳依赖 Worker 事件循环；长时间同步 CPU 步骤可能触发心跳超时（默认 30s）。这类步骤建议拆分或改用 `shell`。
+- 本地文件队列只能单机恢复；跨重启/跨机器请通过 `WorkflowEngine` 端口接 Temporal/Restate。
