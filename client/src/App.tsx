@@ -1,7 +1,7 @@
 ﻿import { useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react';
 import { 
   Files, Box, Cpu, HardDrive, Terminal as TerminalIcon, 
-  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2, Clock, X, FolderOpen, AlertCircle, MoreHorizontal
+  RefreshCw, FolderSync, GitBranch, Search, Puzzle, ListTodo, Loader2, Clock, X, FolderOpen, AlertCircle, MoreHorizontal, Workflow
 } from 'lucide-react';
 import { TabOverflowMenu } from '@/components/TabOverflowMenu';
 import { 
@@ -43,6 +43,7 @@ const SourceControl = lazy(() => import('@/components/SourceControl').then((mod)
 const FileEditor = lazy(() => import('@/components/FileEditor').then((mod) => ({ default: mod.FileEditor })));
 const SearchPanel = lazy(() => import('@/components/SearchPanel').then((mod) => ({ default: mod.SearchPanel })));
 const ProblemList = lazy(() => import('@/components/ProblemList').then((mod) => ({ default: mod.ProblemList })));
+const WorkflowPanel = lazy(() => import('@/components/WorkflowPanel').then((mod) => ({ default: mod.WorkflowPanel })));
 
 const PanelFallback = ({ label }: { label: string }) => (
   <div className="h-full w-full flex items-center justify-center text-[10px] font-semibold tracking-[0.22em] uppercase text-white/35 bg-black/30">
@@ -125,7 +126,7 @@ function App() {
   const [historyIndex, setHistoryIndex] = useState(-1);
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(-1);
-  const [activeSidebarView, setActiveSidebarView] = useState<'explorer' | 'git' | 'search' | 'extensions' | 'todo'>('explorer');
+  const [activeSidebarView, setActiveSidebarView] = useState<'explorer' | 'git' | 'search' | 'extensions' | 'todo' | 'workflow'>('explorer');
   const [bottomPanelTab, setBottomPanelTab] = useState<'terminal' | 'problems'>('terminal');
   const [lockedFiles, setLockedFiles] = useState<Record<string, string>>({}); // path -> toolCallId
   const [editorMode, setEditorMode] = useState<'editor' | 'diff'>('editor');
@@ -405,7 +406,8 @@ function App() {
                {[
                  { id: 'explorer', icon: Files, label: '资源管理器' },
                  { id: 'search', icon: Search, label: 'SEARCH' },
-                 { id: 'git', icon: GitBranch, label: '源代码管理' }
+                 { id: 'git', icon: GitBranch, label: '源代码管理' },
+                 { id: 'workflow', icon: Workflow, label: '工作流' }
                ].map((item) => (
                  <button 
                   key={item.id}
@@ -431,6 +433,7 @@ function App() {
                 {activeSidebarView === 'git' && <><GitBranch size={9} className="text-white/80" /> 源代码管理</>}
                 {activeSidebarView === 'search' && <><Search size={9} className="text-white/80" /> 全局搜索</>}
                 {activeSidebarView === 'todo' && <><ListTodo size={9} className="text-white/80" /> 任务流水线 (MISSION_PIPELINE)</>}
+                {activeSidebarView === 'workflow' && <><Workflow size={9} className="text-white/80" /> 工作流 (WORKFLOWS)</>}
                 {activeSidebarView === 'extensions' && <><Puzzle size={9} className="text-white/80" /> 插件枢纽 (PLUGINS)</>}
 
                 <div className="ml-auto flex items-center gap-1">
@@ -469,6 +472,10 @@ function App() {
                 ) : activeSidebarView === 'search' ? (
                   <Suspense fallback={<PanelFallback label="Loading Search" />}>
                     <SearchPanel activeFile={activeFile} onFileSelect={handleFileSelect} />
+                  </Suspense>
+                ) : activeSidebarView === 'workflow' ? (
+                  <Suspense fallback={<PanelFallback label="Loading Workflows" />}>
+                    <WorkflowPanel />
                   </Suspense>
                 ) : (
                   <div className="h-full flex flex-col p-6 items-center justify-center opacity-[0.05] pointer-events-none select-none animate-pulse">

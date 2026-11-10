@@ -346,6 +346,7 @@ interface WorkflowApi {
         reasoningEffort?: 'default' | 'low' | 'high' | 'max';
         wait?: boolean;
         timeoutSeconds?: number;
+        concurrencyGroup?: string;
     }) => Promise<{
         success: boolean;
         runId?: string;
@@ -357,6 +358,7 @@ interface WorkflowApi {
         run?: WorkflowRunInfo;
     }>;
     getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }>;
+    listRuns: (params: { userId: string; root?: string; status?: WorkflowRunStatus }) => Promise<{ success: boolean; runs?: WorkflowRunInfo[]; error?: string }>;
     cancel: (params: { userId: string; root?: string; runId: string }) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
     resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => Promise<{ success: boolean; resumed?: boolean; error?: string }>;
     workers: (params?: { userId?: string; root?: string }) => Promise<{
@@ -475,6 +477,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
             concurrencyGroup?: string;
         }) => ipcRenderer.invoke('workflow:run', params),
         getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => ipcRenderer.invoke('workflow:getRun', params),
+        listRuns: (params: { userId: string; root?: string; status?: string }) => ipcRenderer.invoke('workflow:listRuns', params),
         cancel: (params: { userId: string; root?: string; runId: string }) => ipcRenderer.invoke('workflow:cancel', params),
         resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => ipcRenderer.invoke('workflow:resume', params),
         workers: (params?: { userId?: string; root?: string }) => ipcRenderer.invoke('workflow:workers', params),

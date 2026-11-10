@@ -468,7 +468,11 @@ describe('WorkflowRunner', () => {
         ], executor);
 
         await expect(runner.run()).rejects.toBeInstanceOf(WorkflowTimeoutError);
-        const inner = snapshot.steps.find((step) => step.name === 'inner');
+        let inner = snapshot.steps.find((step) => step.name === 'inner');
+        for (let attempt = 0; attempt < 100 && inner?.status === 'running'; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            inner = snapshot.steps.find((step) => step.name === 'inner');
+        }
         expect(inner?.status).toBe('cancelled');
         expect(snapshot.steps.find((step) => step.name === 'container')?.status).toBe('failed');
     });

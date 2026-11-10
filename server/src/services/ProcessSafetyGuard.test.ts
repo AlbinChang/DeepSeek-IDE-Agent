@@ -267,7 +267,7 @@ describe('ProcessSafetyGuard — self-awareness', () => {
     it('recognizes a real child PID as self/child', async () => {
         // spawn a transient child to get a real child PID
         const { spawn } = await import('child_process');
-        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 500)']);
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 5000)']);
         try {
             expect(child.pid).toBeDefined();
             await guard.refreshChildPids();
@@ -279,7 +279,7 @@ describe('ProcessSafetyGuard — self-awareness', () => {
 
     it('exempts command-tool spawned PIDs from self/child protection', async () => {
         const { spawn } = await import('child_process');
-        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 500)']);
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 5000)']);
         try {
             expect(child.pid).toBeDefined();
             // simulate command tool registration
@@ -296,7 +296,7 @@ describe('ProcessSafetyGuard — self-awareness', () => {
 
     it('unregisters a command-tool spawned PID back to protected state', async () => {
         const { spawn } = await import('child_process');
-        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 500)']);
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 5000)']);
         try {
             expect(child.pid).toBeDefined();
             guard.registerCommandChild(child.pid!);
@@ -313,7 +313,7 @@ describe('ProcessSafetyGuard — self-awareness', () => {
 
     it('allows killing a command-tool spawned PID via evaluate (unprotected)', async () => {
         const { spawn } = await import('child_process');
-        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 500)']);
+        const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 5000)']);
         try {
             expect(child.pid).toBeDefined();
             guard.registerCommandChild(child.pid!);

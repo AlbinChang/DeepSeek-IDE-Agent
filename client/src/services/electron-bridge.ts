@@ -494,6 +494,9 @@ export const workflowBridge = {
     async getRun(params: { userId: string; root?: string; runId: string; includeEvents?: boolean }): Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }> {
         return getWorkflowApi().getRun(params);
     },
+    async listRuns(params: { userId: string; root?: string; status?: WorkflowRunStatus }): Promise<{ success: boolean; runs?: WorkflowRunInfo[]; error?: string }> {
+        return getWorkflowApi().listRuns(params);
+    },
     async cancel(params: { userId: string; root?: string; runId: string }): Promise<{ success: boolean; cancelled?: boolean; error?: string }> {
         return getWorkflowApi().cancel(params);
     },

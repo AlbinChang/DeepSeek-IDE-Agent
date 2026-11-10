@@ -333,9 +333,10 @@ do:
 
 ## 6. Desktop IPC / 客户端
 
-- IPC 通道：`workflow:list/get/validate/run/getRun/cancel/resume/workers`。
+- IPC 通道：`workflow:list/get/validate/run/getRun/listRuns/cancel/resume/workers`。
 - 事件通道：`workflow:event`（按 `runId` 归属，与 chat 的 `agent:event` 解耦）。
 - 客户端桥接：`electronAPI.workflow.*`、`workflowBridge`、`workflowBridge.onEvent()`。
+- 桌面端侧边栏提供「工作流」面板：列表、输入表单、运行、运行记录、步骤时间线、取消/审批/中断恢复。
 - `workflow:workers` 返回 `{ active, queued, workers: [{ workerId, pid, runId, memMB, cpu }] }`；`memMB/cpu` 来自 `app.getAppMetrics()`。
 
 ## 7. 配置

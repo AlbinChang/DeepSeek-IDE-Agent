@@ -377,6 +377,7 @@ interface WorkflowApi {
         run?: WorkflowRunInfo;
     }>;
     getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }>;
+    listRuns: (params: { userId: string; root?: string; status?: WorkflowRunStatus }) => Promise<{ success: boolean; runs?: WorkflowRunInfo[]; error?: string }>;
     cancel: (params: { userId: string; root?: string; runId: string }) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
     resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => Promise<{ success: boolean; resumed?: boolean; error?: string }>;
     workers: (params?: { userId?: string; root?: string }) => Promise<{

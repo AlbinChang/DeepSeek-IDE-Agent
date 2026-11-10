@@ -1198,6 +1198,7 @@ flowchart TD
 | `workflow:validate` | invoke | `{ userId, root, name? , path? }` | `{ ok, errors: JsonPointerError[] }` |
 | `workflow:run` | invoke | `{ userId, root, name, inputs?, wait?, timeoutSeconds?, provider?, model?, reasoningEffort? }` | `{ runId, status: 'queued' / 'running' / 'succeeded' / ..., position? }` |
 | `workflow:getRun` | invoke | `{ userId, root, runId, includeEvents? }` | `WorkflowRunInfo`（status/steps/worker/usage/error） |
+| `workflow:listRuns` | invoke | `{ userId, root, status? }` | `{ runs: WorkflowRunInfo[] }`（按 root/user 过滤） |
 | `workflow:cancel` | invoke | `{ userId, runId }` | `{ ok }` |
 | `workflow:resume` | invoke | `{ userId, runId, decision? }` | `{ ok, runId }` |
 | `workflow:workers` | invoke | `{ userId?, root? }` | `{ active, queued, workers: [{workerId,pid,runId,memMB,cpu}] }` |
@@ -1849,6 +1850,7 @@ flowchart TD
 | Worker 构建/打包 | `electron/scripts/build-workflow-worker.mjs`（CJS 单文件 + `import.meta.url` 兼容 banner）、`build:workflow-worker`、dev 自动构建、`extraResources: dist/workers → resources/workers` |
 | 检查点/恢复 | Runner 顶层步骤完成后回调 checkpoint；`interrupted` 与 `waiting_approval` 均可通过 `resume_workflow` 从 checkpoint 继续 |
 | 工具面 | `server/src/tools/WorkflowTools.ts`：`list_workflows`/`get_workflow`/`validate_workflow`/`run_workflow`/`get_workflow_run`/`list_workflow_runs`/`cancel_workflow`/`resume_workflow` |
+| 客户端面板 | `client/src/components/WorkflowPanel.tsx`：侧边栏工作流列表、输入表单、运行、运行记录/步骤时间线、取消/审批/中断恢复；`workflow:listRuns` IPC |
 | 提示词 | `server/src/services/WorkflowIndexSection.ts`：只注入工作流索引；无 `.workflow` 时零影响 |
 | IPC/Electron | `workflow:*` 已接真实引擎；`WorkflowRuntime` 优先注入 `ProcessWorkerWorkflowEngine`，Worker bundle 缺失时回退 `InProcessWorkflowEngine`；workspace reset 取消 run；`before-quit` 关闭引擎/Worker |
 | standalone | `server/src/index.ts` 注入进程内引擎，SIGINT/SIGTERM 时关闭 |
@@ -1878,9 +1880,9 @@ flowchart TD
   - 真实 `utilityProcess` Worker 执行 `set` 流程成功，事件含 `step.output`/`run.completed`；
   - 2 个真实 Worker 并行（PID 不同，`app.getAppMetrics()` 可见 `memMB/cpu`）；`taskkill` 杀掉其中一个后，另一个继续运行，被杀 run 标记 `interrupted`；
   - 审批 run 在真实 Worker 中暂停并写出 checkpoint。
-- Electron main/preload/worker 构建通过。
+- Electron main/preload/worker 构建通过；client `tsc -b` 与生产构建通过（含工作流面板）。
 
-**下一步**：Phase 2 剩余项：嵌套审批、Worker 热池/健康回收、provider token bucket、REST/SSE 与客户端运行面板。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
+**下一步**：Phase 2 剩余项：嵌套审批、Worker 热池/健康回收、provider token bucket、REST/SSE。Phase 3：Mermaid 图预览、触发器与模板市场。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
 
 ---
 

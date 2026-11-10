@@ -8,7 +8,7 @@ import { IpcMain } from 'electron';
 
 import { WorkspaceRegistry } from '@/services/WorkspaceRegistry.js';
 import { PathUtils } from '@/utils/PathUtils.js';
-import type { WorkflowRunRequest } from '@/workflow/types.js';
+import type { WorkflowRunRequest, WorkflowRunStatus } from '@/workflow/types.js';
 import { WorkflowRuntime } from '../workflow/workflow-runtime.js';
 
 interface WorkflowIpcBaseParams {
@@ -138,11 +138,29 @@ export function registerWorkflowIpc(ipcMain: IpcMain) {
         }
     });
 
+    ipcMain.handle('workflow:listRuns', async (_event, params: WorkflowIpcBaseParams & {
+        status?: string;
+    }) => {
+        try {
+            const root = resolveWorkspaceRoot(params?.userId, params?.root);
+            const runs = await service.listRuns({
+                userId: params.userId,
+                root,
+                status: params?.status as WorkflowRunStatus | undefined,
+            });
+            return {
+                success: true,
+                runs: runs.filter((run) => run.userId === params.userId && isSamePath(run.root, root)),
+            };
+        } catch (error: any) {
+            return { success: false, error: toErrorMessage(error) };
+        }
+    });
+
     ipcMain.handle('workflow:getRun', async (_event, params: WorkflowIpcBaseParams & {
         runId: string;
         includeEvents?: boolean;
-    }) => {
-        try {
+    }) => {        try {
             const root = resolveWorkspaceRoot(params?.userId, params?.root);
             if (!params?.runId) throw new Error('runId is required');
             const run = await service.getRun({
