@@ -3,7 +3,7 @@
  *
  * 统一管理「服务过载 / 网络层故障」两类可重试错误的识别、退避与重试：
  * - 服务过载：HTTP 408/409/425/429/500/502/503/504（含 DeepSeek 的
- *   「503 Service is too busy」），按 AGENT_API_SERVICE_BUSY_RETRY_LIMIT（默认 10）重试
+ *   「503 Service is too busy」），按 AGENT_API_SERVICE_BUSY_RETRY_LIMIT（默认 100）重试
  * - 网络层：未收到 HTTP 响应（DNS / 连接 / TLS / 流中断等），按 AGENT_API_RETRY_LIMIT（默认 3）重试
  *
  * 供 AgentTurnEngine（流式对话）/ CompletionService（补全）/ HistoryOptimizerService（历史修复）共用，
@@ -100,7 +100,7 @@ export function computeRetryDelayMs(
 export interface WithApiRetryOptions {
     /** 网络层错误重试次数（默认取 3） */
     retries?: number;
-    /** 服务过载（429/5xx）错误重试次数（默认取 10） */
+    /** 服务过载（429/5xx）错误重试次数（默认取 100） */
     serviceBusyRetries?: number;
     /** 每次重试前的回调（用于日志 / 推送前端状态） */
     onRetry?: (info: {

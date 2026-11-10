@@ -316,6 +316,60 @@ describe("AgentTurnEngine request recovery", () => {
         expect(result.finalAssistantContent).toBe("final answer");
     });
 
+    it("clears the retry stage once the retried stream starts producing tokens", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const emitted: any[] = [];
+            const create = vi.fn()
+                .mockImplementationOnce(async () => {
+                    throw Object.assign(new Error("429 rate limited"), { status: 429 });
+                })
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { choices: [{ delta: { content: "recovered" } }] };
+                })());
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "retry-user",
+                currentTraceId: "trace-retry",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "finish the task" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            const retryIndex = emitted.findIndex(
+                (chunk) => chunk.type === "stage" && String(chunk.content).includes("正在自动进行第 1 次自动重试"),
+            );
+            const clearIndex = emitted.findIndex(
+                (chunk, index) => index > retryIndex && chunk.type === "stage" && chunk.content === "",
+            );
+            expect(retryIndex).toBeGreaterThanOrEqual(0);
+            expect(clearIndex).toBeGreaterThan(retryIndex);
+            expect(result.finalAssistantContent).toBe("recovered");
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
     it("skips telemetry writes and forwards usage to the sink", async () => {
         vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
         const recordRequest = vi.spyOn(TelemetryService, "recordRequest").mockImplementation(() => {});

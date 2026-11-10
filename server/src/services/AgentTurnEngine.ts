@@ -7,7 +7,7 @@
  * 职责范围：
  *  - 流式调用 AI API，收集 text / reasoning / tool_calls
  *  - 可重试错误自动重试（指数退避 + 抖动）：网络层按 AGENT_API_RETRY_LIMIT（默认 3 次），
- *    服务过载 HTTP 408/429/500/502/503/504 按 AGENT_API_SERVICE_BUSY_RETRY_LIMIT（默认 10 次）
+ *    服务过载 HTTP 408/429/500/502/503/504 按 AGENT_API_SERVICE_BUSY_RETRY_LIMIT（默认 100 次）
  *  - 按顺序执行工具调用，将结果推入 activeHistory
  *  - 每轮调用后执行 prepareMessages 整理上下文
  *  - 向前端 emit 事件（text / reasoning / annotation / stage / error）
@@ -47,7 +47,7 @@ const getTS = () => getBeijingLogTimePrefix();
 const RETRY_LIMIT = globalConfig.agent.apiRetryLimit;
 /**
  * 服务过载类错误（HTTP 408/429/500/502/503/504，如 DeepSeek 的「503 Service is too busy」）
- * 的最大重试次数。可通过环境变量 AGENT_API_SERVICE_BUSY_RETRY_LIMIT 覆盖，默认 10 次。
+ * 的最大重试次数。可通过环境变量 AGENT_API_SERVICE_BUSY_RETRY_LIMIT 覆盖，默认 100 次。
  */
 const SERVICE_BUSY_RETRY_LIMIT = globalConfig.agent.apiServiceBusyRetryLimit;
 /** 外层 while 循环需要容纳两类错误中更大的重试上限，具体次数在 catch 分支内按分类决定 */
@@ -414,6 +414,7 @@ export class AgentTurnEngine {
             // ---------------------------------------------------------------
             let retryCount = 0;
             let apiSuccess = false;
+            let retryStageVisible = false;
             let fullContent = "";
             let fullReasoning = "";
             let toolCalls: any[] = [];
@@ -545,6 +546,13 @@ export class AgentTurnEngine {
                             const delta = chunk.choices[0]?.delta as any;
                             if (!delta) continue;
 
+                            // 重试成功后，第一条增量到达即清除顶部的“正在重试”状态，
+                            // 避免 token 已恢复输出但按钮/横幅仍停留在 429 重试态。
+                            if (retryStageVisible) {
+                                emit({ type: "stage", content: "" });
+                                retryStageVisible = false;
+                            }
+
                             // 【原封不动】reasoning_content 优先直接拼接 delta 的原始字符串，
                             // 不做任何加工（不增、不删、不改），保证后续请求能逐字回传 API。
                             // 仅当该字段非字符串（如其他供应商的 reasoning/thinking 字段）时才走兼容解析。
@@ -580,6 +588,12 @@ export class AgentTurnEngine {
                     }
                     emitStreamProgress("complete", 0, undefined, true);
 
+                    // 空响应/仅 usage 的响应不会走到增量清除逻辑，这里兜底清除重试状态
+                    if (retryStageVisible) {
+                        emit({ type: "stage", content: "" });
+                        retryStageVisible = false;
+                    }
+
                     apiSuccess = true;
                     if (forceFinalAnswer && toolCalls.length > 0) {
                         console.warn(`${getTS()} [AgentTurnEngine] Ignoring unexpected tool calls after final-answer request`);
@@ -602,7 +616,7 @@ export class AgentTurnEngine {
                     // ================================================================
                     // 可重试错误分类（共享工具 ApiRetryUtils）：
                     // - service_busy：HTTP 408/409/425/429/500/502/503/504（服务过载/临时故障）
-                    //   → 按 SERVICE_BUSY_RETRY_LIMIT（默认 10 次）重试，覆盖 DeepSeek
+                    //   → 按 SERVICE_BUSY_RETRY_LIMIT（默认 100 次）重试，覆盖 DeepSeek
                     //     「503 Service is too busy」等场景
                     // - network：无 HTTP 响应（DNS 解析失败 / 连接被拒 / 流中断 / TLS 握手失败等）
                     //   → 按 RETRY_LIMIT（默认 3 次）重试
@@ -621,6 +635,7 @@ export class AgentTurnEngine {
                             `${getTS()} [AgentTurnEngine] 遇到${label}错误 (${verdict.reason}, code=${errCode})，正在进行第 ${retryCount}/${maxRetries} 次重试...`
                         );
                         emit({ type: "stage", content: `${label}（${verdict.reason}），正在自动进行第 ${retryCount} 次自动重试...` });
+                        retryStageVisible = true;
                         // 制造视觉断层补偿
                         emit({
                             type: "text",
