@@ -42,6 +42,7 @@ import {
     detectRepeatedControlToken,
     isModelMismatch,
     ModelOutputCorruptionError,
+    ModelSubstitutionError,
     probeLeadingContent,
     type ControlTokenHit,
     type ModelOutputDiagnostics,
@@ -51,6 +52,9 @@ const getTS = () => getBeijingLogTimePrefix();
 
 /** 首段正文至少攒够这么多字符再判定是否泄漏控制标记，避免把控制标记拆包后漏检。 */
 const PREFIX_PROBE_CHARS = 32;
+
+/** 丢弃被替换模型的回复后，重新请求前的短暂等待，避免连续冲撞网关。 */
+const SUBSTITUTION_RETRY_DELAY_MS = 300;
 
 function resolveHost(baseURL?: string): string | undefined {
     if (!baseURL) return undefined;
@@ -402,31 +406,51 @@ export class AgentTurnEngine {
             ...(allowedToolNames ? { allowedToolNames } : {}),
         };
         const outputGuardEnabled = globalConfig.agent.modelOutputGuard;
+        const substitutionRetryLimit = globalConfig.agent.modelSubstitutionRetries;
         const servedModels = new Set<string>();
         const systemFingerprints = new Set<string>();
         let substitutionNotified = false;
-        const notifyModelSubstitution = () => {
+        /**
+         * @param retryInfo 本次轮次内针对模型替换做过多少次“丢弃重试”，以及最终是否拿到请求的模型。
+         *   用于把“已重试成功”和“重试后仍被替换”区分开，避免同一次替换重复刷屏。
+         */
+        const notifyModelSubstitution = (retryInfo?: { retries: number; resolved: boolean }) => {
             if (substitutionNotified) return;
             const served = Array.from(servedModels);
-            if (!isModelMismatch(finalModelId, served)) return;
+            // servedModels 会跨轮次累积，这里只关心“与所选模型不一致”的返回值
+            const mismatched = served.filter((id) => isModelMismatch(finalModelId, [id]));
+            if (mismatched.length === 0) return;
+            const resolved = retryInfo?.resolved === true;
             substitutionNotified = true;
+            const retries = retryInfo?.retries ?? 0;
             const systemFingerprint = Array.from(systemFingerprints)[0];
+            const servedList = mismatched.join(', ');
             console.warn(
                 `${getTS()} [AgentTurnEngine] 供应商回报的模型与请求不一致：请求 ${finalModelId}，`
-                + `实际 ${served.join(', ')}（请核查是否存在模型替换/代理降级）`,
+                + `实际 ${servedList}（丢弃重试 ${retries} 次，${resolved ? '已恢复' : '仍被替换'}）`,
             );
+            const content = resolved
+                ? `检测到服务端返回的模型为“${servedList}”（与所选“${finalModelId}”不一致），`
+                    + `已丢弃该次回复并重试，第 ${retries} 次重试后已恢复为所选模型。`
+                : retries > 0
+                    ? `服务端返回的模型与所选模型不一致：请求“${finalModelId}”，实际返回“${servedList}”。`
+                        + `已丢弃被替换的回复并重试 ${retries} 次仍不一致，以下回复来自“${servedList}”，`
+                        + '请核对供应商、网关路由与模型配置。'
+                    : `服务端返回的模型与所选模型不一致：请求“${finalModelId}”，实际返回“${servedList}”。`
+                        + '本次回答可能来自被替换或降级的后端，请核对供应商、网关路由与模型配置。';
             emit({
                 type: 'notice',
                 code: 'MODEL_SUBSTITUTION',
                 level: 'warning',
-                content: `服务端返回的模型与所选模型不一致：请求“${finalModelId}”，实际返回“${served.join(', ')}”。`
-                    + '本次回答可能来自被替换或降级的后端，请核对供应商、网关路由与模型配置。',
+                content,
                 params: {
                     requestedModel: finalModelId,
-                    servedModels: served,
+                    servedModels: mismatched,
                     systemFingerprint,
                     providerId: options.provider?.id,
                     baseUrlHost: resolveHost(options.provider?.baseURL),
+                    retries,
+                    resolved,
                 },
             });
         };
@@ -487,6 +511,10 @@ export class AgentTurnEngine {
             let toolCalls: any[] = [];
             let localUsage: TokenUsage | null = null;
             let corruptionRetryUsed = false;
+            // 本轮的“模型被替换 → 丢弃回复并重试”计数；与网络错误重试预算相互独立
+            let substitutionRetries = 0;
+            // 重试预算耗尽或已有内容送到前端时，接受该次回复，仅在结束时提示
+            let substitutionAccepted = false;
             const replayPayload = turns === 1 ? options.resumeRequest?.payload : undefined;
 
             while (retryCount <= MAX_ALLOWED_RETRIES && !apiSuccess) {
@@ -622,6 +650,31 @@ export class AgentTurnEngine {
                                 systemFingerprints.add(fingerprint.trim());
                             }
 
+                            // 模型替换检测：必须在任何增量送出之前判定，
+                            // 这样“丢弃本次回复”才不会留下半截内容。
+                            if (outputGuardEnabled && !substitutionAccepted
+                                && isModelMismatch(finalModelId, Array.from(servedModels))) {
+                                const nothingEmitted = !contentPrefixConfirmed
+                                    && emittedClientReasoningChars === 0
+                                    && emittedClientContentChars === 0
+                                    && toolArgumentChars === 0;
+                                if (nothingEmitted && substitutionRetries < substitutionRetryLimit) {
+                                    substitutionRetries++;
+                                    throw new ModelSubstitutionError(
+                                        `服务端返回的模型与所选不一致：请求 ${finalModelId}，`
+                                        + `实际 ${Array.from(servedModels).join(', ')}；已丢弃本次回复并重试`,
+                                        {
+                                            attempt: substitutionRetries,
+                                            limit: substitutionRetryLimit,
+                                            requestedModel: finalModelId,
+                                            servedModels: Array.from(servedModels),
+                                        },
+                                    );
+                                }
+                                // 已送出内容或重试预算用尽：接受该回复，结束时统一提示
+                                substitutionAccepted = true;
+                            }
+
                             const delta = chunk.choices[0]?.delta as any;
                             if (!delta) continue;
 
@@ -699,7 +752,9 @@ export class AgentTurnEngine {
                         if (bodyHit) throw buildCorruptionError(bodyHit, 'body');
                     }
                     if (isModelMismatch(finalModelId, Array.from(servedModels))) {
-                        notifyModelSubstitution();
+                        notifyModelSubstitution({ retries: substitutionRetries, resolved: false });
+                    } else if (substitutionRetries > 0) {
+                        notifyModelSubstitution({ retries: substitutionRetries, resolved: true });
                     }
                     emitStreamProgress("complete", 0, undefined, true);
 
@@ -728,6 +783,29 @@ export class AgentTurnEngine {
                 } catch (error: any) {
                     if (abortSignal?.aborted) throw error;
 
+                    if (error instanceof ModelSubstitutionError) {
+                        // 被替换的回复一字未出，可以安全丢弃并立即重新请求；
+                        // 这次重试不占用网络/服务过载的重试预算（retryCount 保持不变）。
+                        console.warn(
+                            `${getTS()} [AgentTurnEngine] 服务端模型被替换，丢弃本次回复并重试 `
+                            + `(${error.detail.attempt}/${error.detail.limit})：${error.message}`,
+                        );
+                        if (localUsage) {
+                            // 已产生的 token 真实消耗过，仍需计入用量与预算
+                            usage = accumulateTokenUsage(usage, localUsage);
+                            telemetrySink?.(localUsage, finalModelId);
+                            localUsage = null;
+                        }
+                        emit({
+                            type: "stage",
+                            content: `服务端模型与所选不一致（请求 ${finalModelId}，实际 ${error.detail.servedModels.join(', ')}），`
+                                + `已丢弃本次回复并重试（第 ${error.detail.attempt}/${error.detail.limit} 次）...`,
+                        });
+                        retryStageVisible = true;
+                        await new Promise((resolve) => setTimeout(resolve, SUBSTITUTION_RETRY_DELAY_MS));
+                        continue;
+                    }
+
                     if (error instanceof ModelOutputCorruptionError) {
                         console.warn(
                             `${getTS()} [AgentTurnEngine] 模型输出异常（${error.detail.phase}）：${error.message}`,
@@ -741,7 +819,7 @@ export class AgentTurnEngine {
                             await new Promise((resolve) => setTimeout(resolve, 500));
                         } else {
                             // 失败前先让用户看到“模型被替换”的明确提示
-                            notifyModelSubstitution();
+                            notifyModelSubstitution({ retries: substitutionRetries, resolved: false });
                             throw error;
                         }
                     } else {

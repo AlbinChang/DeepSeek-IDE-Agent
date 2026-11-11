@@ -7,6 +7,7 @@ import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
 import { LLMRequestJournal } from "@/services/LLMRequestJournal.js";
 import { TelemetryService } from "@/services/TelemetryService.js";
 import { TodoService } from "@/services/TodoService.js";
+import { config as globalConfig } from "@/config/index.js";
 
 describe("AgentTurnEngine request recovery", () => {
     let root: string;
@@ -541,7 +542,8 @@ describe("AgentTurnEngine request recovery", () => {
             vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
             const emitted: any[] = [];
             const garbage = {
-                model: "ernie-4.5-300b-a47b",
+                // 与请求模型一致，确保本用例只验证“控制标记泄漏”处理路径，不与模型替换重试互相干扰
+                model: "deepseek-v4-flash",
                 system_fingerprint: "fp-proxy-1",
                 choices: [{ delta: { content: "<|begin_of_sentence|>####异常输出<|end_of_sentence|>" } }],
             };
@@ -650,20 +652,33 @@ describe("AgentTurnEngine request recovery", () => {
         expect(result.finalAssistantContent).toContain("begin_of_sentence");
     });
 
-    it("emits a visible notice when the server returns a different model", async () => {
+    it("discards the substituted reply and retries until the requested model is served", async () => {
         vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
         vi.spyOn(console, "warn").mockImplementation(() => {});
         const emitted: any[] = [];
-        const create = vi.fn(async () => (async function* () {
-            yield {
-                model: "ernie-4.5-300b-a47b",
-                system_fingerprint: "fp-proxy-9",
-                choices: [{ delta: { content: "这是一个正常长度的回答，用于验证提示逻辑。" } }],
-            };
-        })());
+        let call = 0;
+        const create = vi.fn(async () => {
+            call += 1;
+            if (call === 1) {
+                return (async function* () {
+                    yield {
+                        model: "ernie-4.5-300b-a47b",
+                        system_fingerprint: "fp-proxy-9",
+                        choices: [{ delta: { content: "被替换模型的回复不该出现在最终结果里。" } }],
+                    };
+                })();
+            }
+            return (async function* () {
+                yield {
+                    model: "deepseek-v4-flash",
+                    choices: [{ delta: { content: "这是来自请求模型的干净回答，长度足够确认前缀。" } }],
+                };
+            })();
+        });
+        const updateSessionHistory = vi.fn();
         const agentService = {
             toolManager: { executeTool: vi.fn() },
-            updateSessionHistory: vi.fn(),
+            updateSessionHistory,
         } as unknown as AgentService;
 
         const result = await AgentTurnEngine.runTurns({
@@ -675,7 +690,7 @@ describe("AgentTurnEngine request recovery", () => {
             agentService,
             root,
             userId: "notice-user",
-            currentTraceId: "trace-notice",
+            currentTraceId: "trace-notice-retry",
             optimizedMessages: [],
             lastUserMsgRecord: { role: "user", content: "检查代码" },
             prepareMessages: async (messages) => messages,
@@ -687,6 +702,12 @@ describe("AgentTurnEngine request recovery", () => {
             provider: { id: "proxy", name: "proxy", type: "openai-compatible", modelId: "deepseek-v4-flash", apiKey: "x", baseURL: "https://gateway.example.com/v1" },
         });
 
+        expect(create).toHaveBeenCalledTimes(2);
+        expect(result.finalAssistantContent).toContain("干净回答");
+        expect(result.finalAssistantContent).not.toContain("被替换模型");
+        const streamedText = emitted.filter((chunk) => chunk.type === "text").map((chunk) => chunk.content).join("");
+        expect(streamedText).not.toContain("被替换模型");
+
         const notices = emitted.filter((chunk) => chunk.type === "notice");
         expect(notices).toHaveLength(1);
         expect(notices[0]).toMatchObject({
@@ -695,12 +716,120 @@ describe("AgentTurnEngine request recovery", () => {
             params: {
                 requestedModel: "deepseek-v4-flash",
                 servedModels: ["ernie-4.5-300b-a47b"],
-                systemFingerprint: "fp-proxy-9",
-                baseUrlHost: "gateway.example.com",
+                retries: 1,
+                resolved: true,
             },
         });
-        expect(notices[0].content).toContain("ernie-4.5-300b-a47b");
-        expect(result.finalAssistantContent).toContain("正常长度");
+        expect(notices[0].content).toContain("已丢弃该次回复并重试");
+    });
+
+    it("keeps only the last reply when substitution persists beyond the retry budget", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const originalLimit = globalConfig.agent.modelSubstitutionRetries;
+        globalConfig.agent.modelSubstitutionRetries = 2;
+        try {
+            const emitted: any[] = [];
+            const create = vi.fn(async () => (async function* () {
+                yield {
+                    model: "ernie-4.5-300b-a47b",
+                    system_fingerprint: "fp-proxy-9",
+                    choices: [{ delta: { content: "这是一个正常长度的回答，用于验证提示逻辑。" } }],
+                };
+            })());
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "deepseek-v4-flash",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "notice-user",
+                currentTraceId: "trace-notice",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+                provider: { id: "proxy", name: "proxy", type: "openai-compatible", modelId: "deepseek-v4-flash", apiKey: "x", baseURL: "https://gateway.example.com/v1" },
+            });
+
+            // 两次重试预算用尽后接受最后一次回复，避免用户拿不到答案
+            expect(create).toHaveBeenCalledTimes(3);
+            const notices = emitted.filter((chunk) => chunk.type === "notice");
+            expect(notices).toHaveLength(1);
+            expect(notices[0]).toMatchObject({
+                code: "MODEL_SUBSTITUTION",
+                level: "warning",
+                params: {
+                    requestedModel: "deepseek-v4-flash",
+                    servedModels: ["ernie-4.5-300b-a47b"],
+                    systemFingerprint: "fp-proxy-9",
+                    baseUrlHost: "gateway.example.com",
+                    retries: 2,
+                    resolved: false,
+                },
+            });
+            expect(notices[0].content).toContain("ernie-4.5-300b-a47b");
+            expect(notices[0].content).toContain("重试 2 次仍不一致");
+            expect(result.finalAssistantContent).toContain("正常长度");
+        } finally {
+            globalConfig.agent.modelSubstitutionRetries = originalLimit;
+        }
+    });
+
+    it("does not discard the reply when substitution retries are disabled", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const originalLimit = globalConfig.agent.modelSubstitutionRetries;
+        globalConfig.agent.modelSubstitutionRetries = 0;
+        try {
+            const emitted: any[] = [];
+            const create = vi.fn(async () => (async function* () {
+                yield { model: "ernie-4.5-300b-a47b", choices: [{ delta: { content: "直接接受该回复，长度足够确认前缀。" } }] };
+            })());
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "deepseek-v4-flash",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "notice-user",
+                currentTraceId: "trace-notice-off",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(create).toHaveBeenCalledTimes(1);
+            expect(result.finalAssistantContent).toContain("直接接受");
+            const notices = emitted.filter((chunk) => chunk.type === "notice");
+            expect(notices).toHaveLength(1);
+            expect(notices[0].params).toMatchObject({ retries: 0, resolved: false });
+        } finally {
+            globalConfig.agent.modelSubstitutionRetries = originalLimit;
+        }
     });
 
     it("does not emit substitution notices when the served model matches", async () => {
@@ -749,7 +878,7 @@ describe("AgentTurnEngine request recovery", () => {
                 model,
                 choices: [{ index: 0, delta: { content }, finish_reason: null }],
             })}\n\n`;
-            response.write(chunk("<|begin_of_sentence|>####下列判色丑 插件Combine<|end_of_sentence|>", "ernie-4.5-300b-a47b"));
+            response.write(chunk("<|begin_of_sentence|>####下列判色丑 插件Combine<|end_of_sentence|>", "deepseek-v4-flash"));
             response.end("data: [DONE]\n\n");
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -787,6 +916,74 @@ describe("AgentTurnEngine request recovery", () => {
             expect(agentService.updateSessionHistory).not.toHaveBeenCalled();
             expect(emitted.some((chunk) => chunk.type === "text" && String(chunk.content).includes("begin_of_sentence")))
                 .toBe(false);
+        } finally {
+            vi.restoreAllMocks();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+
+    it("discards a substituted SSE stream and re-requests until the requested model answers", async () => {
+        const { createServer } = await import("node:http");
+        const OpenAI = (await import("openai")).default;
+        let connections = 0;
+        const server = createServer((_request, response) => {
+            connections += 1;
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            const chunk = (content: string, model: string) => `data: ${JSON.stringify({
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                created: 0,
+                model,
+                choices: [{ index: 0, delta: { content }, finish_reason: null }],
+            })}\n\n`;
+            if (connections === 1) {
+                response.write(chunk("被替换模型的回复不该出现在最终结果里。", "ernie-4.5-300b-a47b"));
+            } else {
+                response.write(chunk("这是请求模型返回的干净回答，长度足够确认前缀。", "deepseek-v4-flash"));
+            }
+            response.end("data: [DONE]\n\n");
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        const client = new OpenAI({ apiKey: "test-key", baseURL: `http://127.0.0.1:${port}/v1`, maxRetries: 0 });
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+        const emitted: any[] = [];
+        try {
+            const result = await AgentTurnEngine.runTurns({
+                client,
+                finalModelId: "deepseek-v4-flash",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "substitution-user",
+                currentTraceId: "trace-substitution-sse",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+                provider: { id: "proxy", name: "proxy", type: "openai-compatible", modelId: "deepseek-v4-flash", apiKey: "test-key", baseURL: `http://127.0.0.1:${port}/v1` },
+            });
+
+            expect(connections).toBe(2);
+            expect(result.finalAssistantContent).toContain("干净回答");
+            expect(result.finalAssistantContent).not.toContain("被替换模型");
+            expect(emitted.some((chunk) => chunk.type === "text" && String(chunk.content).includes("被替换模型")))
+                .toBe(false);
+            const notices = emitted.filter((chunk) => chunk.type === "notice");
+            expect(notices).toHaveLength(1);
+            expect(notices[0].params).toMatchObject({ retries: 1, resolved: true });
         } finally {
             vi.restoreAllMocks();
             await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -162,11 +162,19 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                                 </div>
                             )}
                             {part.type === 'notice' && (
-                                <div className='my-2 p-2 rounded bg-amber-500/10 border border-amber-500/25 text-amber-200/90 text-[8pt] flex items-start gap-2'>
-                                    <AlertTriangle className='w-3 h-3 mt-0.5 shrink-0 text-amber-400/80' />
+                                <div className={`my-2 p-2 rounded border text-[8pt] flex items-start gap-2 ${part.params?.resolved
+                                    ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200/90'
+                                    : 'bg-amber-500/10 border-amber-500/25 text-amber-200/90'}`}>
+                                    <AlertTriangle className={`w-3 h-3 mt-0.5 shrink-0 ${part.params?.resolved
+                                        ? 'text-emerald-400/80'
+                                        : 'text-amber-400/80'}`} />
                                     <div className='min-w-0 whitespace-pre-wrap break-words'>
-                                        <div className='font-bold text-amber-300/90 mb-0.5'>
-                                            {part.method === 'MODEL_SUBSTITUTION' ? '模型来源异常' : '提示'}
+                                        <div className={`font-bold mb-0.5 ${part.params?.resolved
+                                            ? 'text-emerald-300/90'
+                                            : 'text-amber-300/90'}`}>
+                                            {part.method === 'MODEL_SUBSTITUTION'
+                                                ? (part.params?.resolved ? '模型来源已恢复' : '模型来源异常')
+                                                : '提示'}
                                         </div>
                                         <div>{part.content}</div>
                                         {Array.isArray(part.params?.servedModels) && part.params.servedModels.length > 0 && (

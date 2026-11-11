@@ -80,6 +80,27 @@ export class ModelOutputCorruptionError extends Error {
     }
 }
 
+/**
+ * 供应商回报的模型与请求模型不一致（模型替换/网关降级）。
+ * 命中时本次回复尚未送到前端，可安全丢弃并重新请求。
+ */
+export class ModelSubstitutionError extends Error {
+    public readonly code = 'MODEL_SUBSTITUTED';
+
+    constructor(
+        message: string,
+        public readonly detail: {
+            attempt: number;
+            limit: number;
+            requestedModel?: string;
+            servedModels: string[];
+        },
+    ) {
+        super(message);
+        this.name = 'ModelSubstitutionError';
+    }
+}
+
 function escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

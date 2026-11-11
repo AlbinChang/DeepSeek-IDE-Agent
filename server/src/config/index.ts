@@ -137,6 +137,8 @@ export const config = {
         lowWatermarkBytes: parsePositiveInt(process.env.AGENT_LOW_WATERMARK_BYTES, 128 * 1024, 1),
         // 拦截“控制标记泄漏”的异常模型输出（BOS/EOS 等被当成正文），避免污染会话历史
         modelOutputGuard: parseBoolean(process.env.AGENT_MODEL_OUTPUT_GUARD, true),
+        // 检测到服务端返回的模型与所选不一致时，丢弃本次回复并重试的次数（0 = 不重试，仅提示）
+        modelSubstitutionRetries: parsePositiveInt(process.env.AGENT_MODEL_SUBSTITUTION_RETRIES, 2, 0),
     },
 
     // read_file 工具限制
