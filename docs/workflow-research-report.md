@@ -3,7 +3,7 @@
 > **调研日期**：2026-11-09  
 > **本次更新**：新增“主进程调度 + `utilityProcess` 多 Worker 并行”与“现有接口全面核查 / workflow 友好度改造”（见 0.5/0.6、3.6.1、4.6、5.11、6.11、9.4）  
 > **适用项目**：DeepSeek IDE Agent（Electron + Fastify + React + TypeScript）  
-> **调研范围**：仅做框架调研、方案设计与可行性验证，**不修改业务代码**  
+> **调研范围**：原始调研阶段仅做选型与可行性验证；此后已按本报告实施。下文的“现状”分析和阶段规划保留当时背景，当前实现以 0.7 和 7.6 为准。
 > **一句话结论**：当前项目最适合走「**Open Workflow DSL 1.0 子集 + 轻量自研执行器 + 复用现有 ToolManager / AgentTurnEngine**」的路线；不建议在 v1 直接嵌入 Mastra、LangGraph、Inngest、Temporal 等重型框架。
 
 ---
@@ -71,6 +71,14 @@
 | Phase 3 | 可视化 UI + 触发器 + 可选持久化后端 | 10–15 人日 |
 
 > 以上为一名熟悉本项目的资深 TypeScript 工程师的粗略估算，不含产品/设计评审时间；建议预留 30% 风险缓冲。
+
+### 0.7 当前实现与边界
+
+- 已落地单机声明式执行、Electron `utilityProcess` 多 Worker 调度、控制流、审批/取消/恢复、桌面时间线和 Mermaid 预览；standalone server 可显式启用带 Bearer 鉴权的 REST/SSE。
+- 嵌套审批支持在父容器内重放已持久化的成功叶子步骤；上下文或输出被截断/脱敏、定义发生变化时拒绝不安全恢复。重启后被脱敏的输入需重新提供。外部操作和崩溃时在途步骤不保证 exactly-once。
+- 按 provider/model 同时限制 Agent/evaluator 步骤，并可选启用覆盖真实请求与重试的请求令牌桶；可选 token 预算只依据已报告 usage，不能保证严格计费上限。`fork` 同时运行的分支数受 `WORKFLOW_MAX_FORK_PARALLEL` 限制。
+- HTTP 使用校验后的 DNS 地址建立连接，逐跳校验重定向并在跨源时移除敏感请求头；Worker 不是安全沙箱。
+- 可选的本地定时/文件触发器默认关闭，仅在已初始化且可信的工作区启用；热池、事件投递/监听、模板市场、图形编辑和分布式后端仍未实现。`run.script` / `run.container` 仍不支持。详见 [使用指南](./workflow-usage.md)。
 
 ### 0.5 执行模型结论
 
@@ -1683,7 +1691,7 @@ flowchart TD
 - `vitest run`：26 个测试文件 / 254 个用例全绿（基线 22 / 228）；
 - Electron 运行时冒烟：替换 `ipcMain.handle` 为捕获器后，`workflow:list`、`workflow:validate`、`workflow:run`、`workflow:workers`、`workflow:getRun` 以及 workspace 越权校验均返回预期结果。
 
-> 当前 `WorkflowService` 尚未注入 `WorkflowEngine`，因此 `workflow:run` 明确返回 `WORKFLOW_ENGINE_UNAVAILABLE`；Phase 1 注入 `InProcessWorkflowEngine`、Phase 1.5 注入 `ProcessWorkerWorkflowEngine` 即可启用，无需再改 IPC。
+> 历史说明：接口改造阶段 `WorkflowService` 尚未注入 `WorkflowEngine`。现已在 standalone 注入 `InProcessWorkflowEngine`，Electron 优先注入 `ProcessWorkerWorkflowEngine`。
 
 ---
 
@@ -1767,7 +1775,7 @@ flowchart TD
 | A6 | 运行状态/事件持久化，重启后可查询 | 集成测试 |
 | A7 | `approval` 暂停/恢复/拒绝 | 集成测试 |
 | A8 | 取消能终止 Agent/命令 | 集成测试 |
-| A9 | 运行预算（steps/tokens/time）生效 | 集成测试 |
+| A9 | 运行预算（steps/tokens/time/fork 并发）生效 | 集成测试 |
 | A10 | 现有聊天/工具/TODO/评估行为不回归 | 现有 vitest + 手工冒烟 |
 | A11 | 2+ Worker 并行执行不同 run，互不阻塞 | Electron 冒烟测试 |
 | A12 | Worker 崩溃后标记 interrupted，其他 run 不受影响 | Electron 冒烟测试 |
@@ -1829,7 +1837,7 @@ flowchart TD
 | 多 Worker 并发写同一文件 | 数据损坏 | `maxConcurrentRunsPerWorkflow=1`；写型 workflow `concurrencyGroup` 串行；原子写 |
 | Telemetry/TODO 并发写 | 状态污染 | Worker 只回传 usage；TODO 工具禁用；主进程统一写 |
 
-### 7.6 实施记录（Phase 0 + Phase 1 + Phase 1.5，已完成）
+### 7.6 实施记录（MVP、Worker 与 Phase 2 主要能力）
 
 本轮已按报告落地“可运行的 MVP”，不修改聊天/文件/工具/评估的既有行为。
 
@@ -1844,13 +1852,15 @@ flowchart TD
 | 运行存储 | `server/src/workflow/WorkflowRunStore.ts` / `WorkflowRunSession.ts`：`.workflow/.runs/<runId>/run.json`、`events.jsonl`、原子写、脱敏、保留最近 N 次 |
 | 执行引擎 | `server/src/workflow/InProcessWorkflowEngine.ts`：队列、`maxWorkers` 并发、同 workflow 串行、取消、审批恢复、重启 reconcile、多 run 并行；standalone server 使用 |
 | 进程 Worker 引擎 | `server/src/workflow/ProcessWorkerWorkflowEngine.ts`：主进程调度、worker-per-run、队列/准入、心跳/取消/崩溃恢复、主进程单写者；`utilityProcess` 通过可注入 `WorkflowWorkerSpawner` 端口接入；跨 Worker provider permit 限流 |
-| 限流 | `run.permit` / `run.permit.granted` / `run.permit.release` 协议 + `ProviderConcurrencyLimiter`；按 `provider:model` 限制 agent/evaluator 并发（默认 2） |
+| 限流 | `run.permit` 协议按 `provider:model` 限制 agent/evaluator 并发（默认 2）；可选主进程请求令牌桶覆盖每次模型请求及重试，默认关闭 |
 | Worker 协议/运行时 | `server/src/workflow/workerProtocol.ts` + `WorkerHost.ts` + `RemoteWorkflowRunSession.ts`：`worker.init`/`run.start`/`run.event`/`run.step`/`run.checkpoint`/`run.result`/`run.cancel`/heartbeat；Worker 内只跑 `WorkflowRunner` |
 | Electron Worker 适配 | `electron/src/workers/workflowWorker.ts`、`electron/src/main/workflow/utility-process-spawner.ts`：`utilityProcess.fork`、`serviceName`、`stdio:pipe`、堆上限、stdout/stderr 排空、`taskkill /T /F`、`app.getAppMetrics()` |
 | Worker 构建/打包 | `electron/scripts/build-workflow-worker.mjs`（CJS 单文件 + `import.meta.url` 兼容 banner）、`build:workflow-worker`、dev 自动构建、`extraResources: dist/workers → resources/workers` |
-| 检查点/恢复 | Runner 顶层步骤完成后回调 checkpoint；`interrupted` 与 `waiting_approval` 均可通过 `resume_workflow` 从 checkpoint 继续 |
+| 检查点/恢复 | 顶层步骤 checkpoint 与嵌套审批重放；校验定义哈希及脱敏/截断数据；审批/取消串行化，敏感输入重启后可重新提供 |
 | 工具面 | `server/src/tools/WorkflowTools.ts`：`list_workflows`/`get_workflow`/`validate_workflow`/`run_workflow`/`get_workflow_run`/`list_workflow_runs`/`cancel_workflow`/`resume_workflow` |
-| 客户端面板 | `client/src/components/WorkflowPanel.tsx`：侧边栏工作流列表、输入表单、运行、运行记录/步骤时间线、取消/审批/中断恢复；`workflow:listRuns` IPC |
+| 客户端面板 | `client/src/components/WorkflowPanel.tsx`：侧边栏工作流列表、输入表单、运行、时间线、取消/审批/中断恢复、Mermaid 图预览及恢复输入 |
+| REST/SSE | standalone 默认关闭；启用必须配置服务级 Bearer 凭据，按用户工作区校验，支持运行管理、事件重放和断流清理 |
+| 触发器 | `x-workflow-triggers` 支持 interval 和显式文件路径；默认关闭，工作区初始化后启动，切换/退出时停止，运行记录标识来源 |
 | 提示词 | `server/src/services/WorkflowIndexSection.ts`：只注入工作流索引；无 `.workflow` 时零影响 |
 | IPC/Electron | `workflow:*` 已接真实引擎；`WorkflowRuntime` 优先注入 `ProcessWorkerWorkflowEngine`，Worker bundle 缺失时回退 `InProcessWorkflowEngine`；workspace reset 取消 run；`before-quit` 关闭引擎/Worker |
 | standalone | `server/src/index.ts` 注入进程内引擎，SIGINT/SIGTERM 时关闭 |
@@ -1860,29 +1870,32 @@ flowchart TD
 
 - 未引入 `@serverlessworkflow/sdk`，改用内置轻量解析/校验；`WorkflowRegistry` 保持同一返回结构，后续可替换为 SDK。
 - `fork` 已启用：分支在同一 Worker 内并行，分支上下文隔离后按序合并；`fork.compete` 取最先成功分支并取消其他分支。
-- 子工作流已启用（`call: workflow` / `run.workflow`）：支持输入默认值、循环/深度限制；审批仍只支持顶层 `do`，子工作流内审批会报错。
-- 子工作流步骤预算/wall-clock 与父 run 共享；崩溃恢复以父 run 顶层 checkpoint 为准，恢复时整个子工作流重新执行。
-- HTTP 步骤已启用（`call: http` / `run.http`），默认阻止私网/localhost，限制重定向/响应大小/超时；DNS rebinding 仍是已知窗口。
-- `run.script` / `run.container` / `emit` / `listen` 仍未启用。
-- Agent/evaluator 步骤已按 `provider:model` 做跨 Worker 的步骤级并发限制（默认 2）；不是 token bucket，单步内部的 API 重试仍由 `ApiRetryUtils` 退避。
-- `run.shell.environment` 已支持；shell 取消通过 `AbortSignal` 传播（POSIX 进程树清理弱于 Windows）。
+- 子工作流已启用（`call: workflow` / `run.workflow`），支持输入默认值、循环/深度限制和嵌套审批；非审批崩溃恢复仍以父 run 最后一个顶层 checkpoint 为准。
+- HTTP 步骤默认阻止私网/localhost，固定使用已验证的 DNS 结果，逐跳检查重定向并限制解压后响应大小和超时。
+- `run.script` / `run.container` / `emit` / `listen` 不支持并在运行时明确报错，不会静默降级为 no-op。
+- Agent/evaluator 按 `provider:model` 做跨 Worker 并发限制；可选请求令牌桶覆盖步骤内模型调用与重试；token 用量预算默认关闭，仅能限制供应商已报告的用量。
+- `run.shell.environment` 已支持；取消通过 `AbortSignal` 传播，Windows 清理进程树，POSIX 使用进程组终止（真实 POSIX 集成尚需目标平台验证）。
 - Phase 1.5 采用 **worker-per-run 冷启动**，不做热池；`maxRunsPerWorker`/`maxWorkerRestarts` 暂未启用（保留给热池）。
 - Worker 只通过 `WorkflowRunChannel` 抽象上报状态；主进程独占写 `run.json`/`events.jsonl`，避免多进程写冲突。
 - Worker bundle 选择 CJS 单文件（server 依赖是 CJS），并用 banner 提供 `import.meta.url` 兼容值；未引入新的 npm 依赖。
 - `workflow:event` 只推送 run/step 级事件，不逐 token 推送，避免事件日志膨胀。
 
-**验证**：
+**最新验证记录（本轮）**：
 
-- server `tsc --noEmit` 通过；
-- 37 个测试文件 / 330 个用例全绿（新增表达式、RunStore、Runner、InProcessEngine、ProcessWorkerEngine、WorkerHost、workerProtocol、HTTP 步骤、ProviderLimiter、StepExecutor、WorkflowTools、Registry 契约测试）；
-- Electron 运行时冒烟：
-  - `workflow:run`（`set` 流程）→ `workflow:getRun` → 审批流程 `waiting_approval` → `workflow:resume` → `succeeded`，run.json/events.jsonl 持久化正确；
-  - 真实 `utilityProcess` Worker 执行 `set` 流程成功，事件含 `step.output`/`run.completed`；
-  - 2 个真实 Worker 并行（PID 不同，`app.getAppMetrics()` 可见 `memMB/cpu`）；`taskkill` 杀掉其中一个后，另一个继续运行，被杀 run 标记 `interrupted`；
-  - 审批 run 在真实 Worker 中暂停并写出 checkpoint。
-- Electron main/preload/worker 构建通过；client `tsc -b` 与生产构建通过（含工作流面板）。
+- server `tsc --noEmit` 通过；`npm test` 全绿：**42 个测试文件 / 388 个用例**。
+- Electron `tsc --noEmit`（`--ignoreDeprecations 5.0`）通过；`build:preload` / `build:workflow-worker` / `build:main` 均成功。
+- client `tsc -b` + `vite build` 通过（工作流面板 + Mermaid 懒加载分包）。
+- 真实 Electron `utilityProcess` 冒烟（本地 mock OpenAI 兼容流式接口）：
+  - 顶层 agent 步骤 + `for` 内嵌套审批 → 暂停 → 恢复后跳过已完成叶子步骤 → `succeeded`；
+  - 两次模型请求的 token 用量跨审批累计为 10，且与 token 预算共享；
+  - 跨 Worker 请求令牌桶在 Worker 进程内生效（Worker 通过 IPC 申请令牌）；
+  - 2 个真实 Worker 并行（PID 不同）；`process.kill` 一个 Worker 后该 run 变 `interrupted`、另一个 `succeeded`；被中断 run 可直接 resume 恢复成功；
+  - 文件触发器在真实 Worker 中自动运行并完成。
+- 浏览器（headless Edge + Playwright）冒烟：Mermaid 图预览、同名定义按路径区分、自动触发来源标签、运行与审批。
 
-**下一步**：Phase 2 剩余项：嵌套审批、Worker 热池/健康回收、provider token bucket、REST/SSE。Phase 3：Mermaid 图预览、触发器与模板市场。使用说明见 [`docs/workflow-usage.md`](./workflow-usage.md)。
+> 历史记录（早期版本，保留背景）：37 个测试文件 / 330 个用例；`workflow:run`/`getRun`/审批/`resume` 冒烟；2 Worker 并行与 `taskkill` 隔离。
+
+**仍属可选范围**：Worker 热池、cron 表达式、`emit`/`listen` 事件语义、模板市场、图形编辑、分布式持久化后端。使用说明见 [workflow-usage.md](./workflow-usage.md)。
 
 ---
 

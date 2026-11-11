@@ -216,6 +216,11 @@ export class WorkflowTools {
                             enum: ['approve', 'reject'],
                             description: '批准继续或拒绝取消；interrupted 运行可省略',
                         },
+                        inputs: {
+                            type: 'object',
+                            description: '重启后恢复包含脱敏输入的运行时，重新提供工作流输入',
+                            additionalProperties: true,
+                        },
                     },
                     required: ['runId'],
                     additionalProperties: false,
@@ -231,7 +236,15 @@ export class WorkflowTools {
                     if (decision !== undefined && decision !== 'approve' && decision !== 'reject') {
                         throw new Error('decision 必须是 approve 或 reject');
                     }
-                    const resumed = await service().resume({ userId, root, runId, decision });
+                    const inputs = params?.inputs;
+                    if (inputs !== undefined && (!inputs || typeof inputs !== 'object' || Array.isArray(inputs))) {
+                        throw new Error('inputs 必须是对象');
+                    }
+                    const resumed = await service().resume({ userId, root, runId, decision, ...(inputs ? { inputs } : {}) });
+                    if (!resumed) {
+                        const run = await service().getRun({ userId, root, runId });
+                        throw new Error(run?.error || '工作流当前无法恢复，请检查状态和审批决策');
+                    }
                     return { resumed };
                 },
             },

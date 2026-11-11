@@ -67,6 +67,21 @@ describe('WorkflowService', () => {
         expect(publish).toHaveBeenCalledWith(event);
     });
 
+    it('supports independent event subscribers without replacing the existing bus', () => {
+        const service = new WorkflowService();
+        const publish = vi.fn();
+        const listener = vi.fn();
+        const event: WorkflowEvent = { runId: 'run-1', seq: 1, type: 'step.output', timestamp: 1 };
+        service.setEventBus({ publish });
+        const unsubscribe = service.subscribe(listener);
+        service.publish(event);
+        unsubscribe();
+        service.publish(event);
+        expect(publish).toHaveBeenCalledTimes(2);
+        expect(listener).toHaveBeenCalledOnce();
+        expect(listener).toHaveBeenCalledWith(event);
+    });
+
     it('rejects runs when the workflow feature is disabled', async () => {
         const service = new WorkflowService();
         const engine = createEngine();

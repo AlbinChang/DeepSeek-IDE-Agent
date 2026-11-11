@@ -196,6 +196,7 @@ export function registerWorkflowIpc(ipcMain: IpcMain) {
     ipcMain.handle('workflow:resume', async (_event, params: WorkflowIpcBaseParams & {
         runId: string;
         decision?: unknown;
+        inputs?: Record<string, unknown>;
     }) => {
         try {
             const root = resolveWorkspaceRoot(params?.userId, params?.root);
@@ -209,7 +210,16 @@ export function registerWorkflowIpc(ipcMain: IpcMain) {
                 root,
                 runId: params.runId,
                 decision: params.decision,
+                inputs: params.inputs,
             });
+            if (!resumed) {
+                const current = await service.getRun({ userId: params.userId, root, runId: params.runId });
+                return {
+                    success: false,
+                    resumed: false,
+                    error: current?.error || 'Workflow cannot be resumed in its current state',
+                };
+            }
             return { success: true, resumed };
         } catch (error: any) {
             return { success: false, error: toErrorMessage(error) };

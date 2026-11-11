@@ -331,6 +331,7 @@ describe("AgentTurnEngine request recovery", () => {
                 .mockImplementationOnce(async () => (async function* () {
                     yield { choices: [{ delta: { content: "recovered" } }] };
                 })());
+            const beforeApiRequest = vi.fn().mockResolvedValue(undefined);
             const agentService = {
                 toolManager: { executeTool: vi.fn() },
                 updateSessionHistory: vi.fn(),
@@ -354,6 +355,7 @@ describe("AgentTurnEngine request recovery", () => {
                 skipJournal: true,
                 skipPersist: true,
                 skipTelemetry: true,
+                beforeApiRequest,
             });
 
             const retryIndex = emitted.findIndex(
@@ -365,9 +367,45 @@ describe("AgentTurnEngine request recovery", () => {
             expect(retryIndex).toBeGreaterThanOrEqual(0);
             expect(clearIndex).toBeGreaterThan(retryIndex);
             expect(result.finalAssistantContent).toBe("recovered");
+            expect(beforeApiRequest).toHaveBeenCalledTimes(2);
+            expect(create).toHaveBeenCalledTimes(2);
         } finally {
             setTimeoutSpy.mockRestore();
         }
+    });
+
+    it("does not retry a successful model response when usage validation fails", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const create = vi.fn().mockImplementation(async () => (async function* () {
+            yield { choices: [{ delta: { content: "output" } }] };
+        })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+        await expect(AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "budget-user",
+            currentTraceId: "trace-budget",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "test" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+            afterApiRequest: (usage) => {
+                if (!usage) throw new Error("usage missing");
+            },
+        })).rejects.toThrow("usage missing");
+        expect(create).toHaveBeenCalledTimes(1);
     });
 
     it("skips telemetry writes and forwards usage to the sink", async () => {

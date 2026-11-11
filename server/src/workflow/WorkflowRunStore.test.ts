@@ -1,8 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { WorkflowRunStore, sanitizeForStore } from '@/workflow/WorkflowRunStore.js';
 import type { WorkflowEvent, WorkflowRunInfo } from '@/workflow/types.js';
@@ -33,6 +34,7 @@ describe('WorkflowRunStore', () => {
     });
 
     afterEach(async () => {
+        vi.restoreAllMocks();
         await rm(root, { recursive: true, force: true });
     });
 
@@ -50,6 +52,17 @@ describe('WorkflowRunStore', () => {
         const updated = await store.read(runId);
         expect(updated?.status).toBe('running');
         expect(updated?.startedAt).toBe(2000);
+    });
+
+    it('preserves the previous snapshot when atomic replacement fails', async () => {
+        const runId = store.newRunId();
+        const original = createRun(runId);
+        await store.create(original);
+        vi.spyOn(fs, 'rename').mockRejectedValue(Object.assign(new Error('access denied'), { code: 'EACCES' }));
+        await expect(store.save({ ...original, status: 'running' })).rejects.toThrow('access denied');
+        expect((await store.read(runId))?.status).toBe('queued');
+        const files = await fs.readdir(store.getRunDirectory(runId));
+        expect(files.some((name) => name.startsWith('run.json.tmp-'))).toBe(false);
     });
 
     it('appends and reads events, keeping the latest limit', async () => {
@@ -107,6 +120,22 @@ describe('WorkflowRunStore', () => {
         expect(await store.read(terminalIds[2])).not.toBeNull();
     });
 
+    it('prunes interrupted runs beyond the retention limit but never active ones', async () => {
+        const interruptedId = store.newRunId();
+        await store.create(createRun(interruptedId, { status: 'interrupted', createdAt: 100 }));
+        const waitingId = store.newRunId();
+        await store.create(createRun(waitingId, { status: 'waiting_approval', createdAt: 200 }));
+        const newestId = store.newRunId();
+        await store.create(createRun(newestId, { status: 'failed', createdAt: 300 }));
+
+        const removed = await store.prune(2);
+
+        expect(removed).toBe(1);
+        expect(await store.read(interruptedId)).toBeNull();
+        expect(await store.read(waitingId)).not.toBeNull();
+        expect(await store.read(newestId)).not.toBeNull();
+    });
+
     it('masks secrets and truncates large strings', () => {
         expect(sanitizeForStore({ apiKey: 'sk-abc', text: 'sk-1234567890abcdef' }, 100)).toEqual({
             apiKey: '******',
@@ -115,6 +144,9 @@ describe('WorkflowRunStore', () => {
         expect(sanitizeForStore({ accessToken: 'x', usage: { inputTokens: 12, outputTokens: 3 } }, 100)).toEqual({
             accessToken: '******',
             usage: { inputTokens: 12, outputTokens: 3 },
+        });
+        expect(sanitizeForStore({ headers: { 'set-cookie': 'session=secret' } }, 100)).toEqual({
+            headers: { 'set-cookie': '******' },
         });
         const truncated = sanitizeForStore('x'.repeat(20), 5) as string;
         expect(truncated.startsWith('xxxxx')).toBe(true);

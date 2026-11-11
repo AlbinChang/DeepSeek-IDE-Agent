@@ -57,4 +57,16 @@ describe('workflow worker protocol', () => {
             step: { name: 'a' },
         })).toBe(false);
     });
+
+    it('validates request rate grant, request and cancellation messages', () => {
+        expect(isMainToWorkerMessage({ type: 'run.rate.granted', requestId: 'rate-1' })).toBe(true);
+        expect(isMainToWorkerMessage({ type: 'run.rate.granted' })).toBe(false);
+        expect(isWorkerToMainMessage({
+            type: 'run.rate', runId: 'wf-1', requestId: 'rate-1', provider: 'p', model: 'm',
+        })).toBe(true);
+        expect(isWorkerToMainMessage({
+            type: 'run.rate', runId: 'wf-1', requestId: 'rate-1', provider: 'p',
+        })).toBe(false);
+        expect(isWorkerToMainMessage({ type: 'run.rate.cancel', runId: 'wf-1', requestId: 'rate-1' })).toBe(true);
+    });
 });

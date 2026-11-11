@@ -514,4 +514,52 @@ describe('WorkflowRunner', () => {
 
         expect(executor.calls).toHaveLength(0);
     });
+
+    it('rejects emit/listen steps instead of silently skipping them', async () => {
+        const executor = new FakeExecutor();
+        const runner = createRunner([
+            { publish: { emit: { event: { with: { type: 'demo' } } } } },
+            { never: { call: 'agent', with: { prompt: 'never' } } },
+        ], executor);
+
+        await expect(runner.run()).rejects.toThrow(/emit\/listen/);
+        expect(executor.calls).toHaveLength(0);
+        expect(snapshot.steps.find((step) => step.name === 'publish')?.status).toBe('failed');
+    });
+
+    it('queues fork branches beyond the configured parallelism and still runs them all', async () => {
+        const executor = new FakeExecutor();
+        let started = 0;
+        let active = 0;
+        let maxActive = 0;
+        executor.handler = async (kind, definition) => {
+            if (kind !== 'agent') return { output: `${kind}-output` };
+            active++;
+            started++;
+            maxActive = Math.max(maxActive, active);
+            // 等前 4 个分支都进入运行态再结束，避免依赖调度时序
+            const deadline = Date.now() + 2000;
+            while (started < 4 && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+            active--;
+            return { output: definition.with?.prompt };
+        };
+        const runner = createRunner([
+            {
+                wide: {
+                    fork: {
+                        branches: Array.from({ length: 6 }, (_, index) => ({
+                            do: [{ [`work${index}`]: { call: 'agent', with: { prompt: `p${index}` } } }],
+                        })),
+                    },
+                },
+            },
+        ], executor);
+
+        await runner.run();
+
+        expect(maxActive).toBe(4);
+        expect((snapshot.steps.find((step) => step.name === 'wide')?.output as unknown[]).length).toBe(6);
+    });
 });

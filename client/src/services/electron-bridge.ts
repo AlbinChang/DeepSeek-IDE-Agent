@@ -115,6 +115,7 @@ export interface WorkflowDetail {
     summary: WorkflowSummary;
     yaml: string;
     validation: WorkflowValidationResult;
+    graph?: { mermaid: string; truncated: boolean };
 }
 
 export interface WorkflowStepInfo {
@@ -142,10 +143,12 @@ export interface WorkflowRunInfo {
     };
     workflowName: string;
     workflowPath?: string;
+    trigger?: { type: 'interval' | 'file'; id: string };
     userId: string;
     root: string;
     status: WorkflowRunStatus;
     inputs: Record<string, unknown>;
+    resumeInputsRequired?: boolean;
     createdAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -178,6 +181,8 @@ export interface WorkflowCheckpoint {
     nextStepIndex: number;
     context: Record<string, unknown>;
     completedPaths: string[];
+    replayFromStep?: boolean;
+    resumeError?: string;
 }
 
 export interface WorkflowEvent {
@@ -500,7 +505,7 @@ export const workflowBridge = {
     async cancel(params: { userId: string; root?: string; runId: string }): Promise<{ success: boolean; cancelled?: boolean; error?: string }> {
         return getWorkflowApi().cancel(params);
     },
-    async resume(params: { userId: string; root?: string; runId: string; decision?: unknown }): Promise<{ success: boolean; resumed?: boolean; error?: string }> {
+    async resume(params: { userId: string; root?: string; runId: string; decision?: unknown; inputs?: Record<string, unknown> }): Promise<{ success: boolean; resumed?: boolean; error?: string }> {
         return getWorkflowApi().resume(params);
     },
     async workers(params?: { userId?: string; root?: string }): Promise<{

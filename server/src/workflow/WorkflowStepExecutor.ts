@@ -4,7 +4,7 @@ import { AIProviderFactory } from '@/services/AIProviderFactory.js';
 import { EvaluationAgentService } from '@/services/EvaluationAgentService.js';
 import { ProviderConfigResolver, type ResolvedProviderConfig } from '@/services/ProviderConfigResolver.js';
 import { config as globalConfig } from '@/config/index.js';
-import { WorkflowError } from '@/workflow/errors.js';
+import { WorkflowBudgetExceededError, WorkflowError } from '@/workflow/errors.js';
 import { executeWorkflowHttp } from '@/workflow/httpStep.js';
 import { parseDurationMs } from '@/workflow/expressions.js';
 import { validateJsonSchema } from '@/workflow/schema.js';
@@ -68,6 +68,10 @@ export interface WorkflowStepExecutionContext {
     reasoningEffort?: 'default' | 'low' | 'high' | 'max';
     locale?: string;
     log: (message: string, data?: Record<string, unknown>) => Promise<void>;
+    checkTokenBudget?: () => void;
+    verifyTokenBudget?: () => void;
+    recordUsage?: (usage: WorkflowUsage) => void;
+    requireTokenUsage?: boolean;
 }
 
 export interface WorkflowStepExecutionResult {
@@ -104,6 +108,12 @@ export interface DefaultWorkflowStepExecutorOptions {
         model: string | undefined,
         signal: AbortSignal,
     ) => Promise<() => void>;
+    /** 对每次实际模型请求申请速率令牌。 */
+    acquireRequestToken?: (
+        provider: string,
+        model: string,
+        signal: AbortSignal,
+    ) => Promise<void>;
 }
 
 function mergeUsage(current: WorkflowUsage | undefined, next: TokenUsage | null | undefined): WorkflowUsage | undefined {
@@ -113,6 +123,57 @@ function mergeUsage(current: WorkflowUsage | undefined, next: TokenUsage | null 
         inputTokens: base.inputTokens + (next.inputTokens || 0),
         outputTokens: base.outputTokens + (next.outputTokens || 0),
         totalTokens: base.totalTokens + (next.totalTokens || 0),
+    };
+}
+
+function trackStepLogs(ctx: WorkflowStepExecutionContext) {
+    let pending = Promise.resolve();
+    let failed = false;
+    let failure: unknown;
+    return {
+        write(message: string) {
+            pending = pending.then(() => ctx.log(message)).catch((error: unknown) => {
+                if (!failed) failure = error;
+                failed = true;
+            });
+        },
+        async flush() {
+            await pending;
+            if (failed) throw failure;
+        },
+    };
+}
+
+async function flushStepLogs(
+    logs: ReturnType<typeof trackStepLogs>,
+    hasPrimaryError: boolean,
+): Promise<void> {
+    try {
+        await logs.flush();
+    } catch (logError) {
+        // 已有原始错误时不能把它掩盖掉，只记录日志写入失败
+        if (!hasPrimaryError) throw logError;
+        console.warn('[WorkflowStepExecutor] 步骤日志持久化失败，保留原始错误:', logError);
+    }
+}
+
+function buildRequestHooks(
+    ctx: WorkflowStepExecutionContext,
+    resolved: ResolvedProviderConfig,
+    acquireRequestToken: DefaultWorkflowStepExecutorOptions['acquireRequestToken'],
+) {
+    return {
+        beforeApiRequest: async () => {
+            ctx.checkTokenBudget?.();
+            await acquireRequestToken?.(resolved.provider, resolved.modelId, ctx.abortSignal);
+            ctx.checkTokenBudget?.();
+        },
+        afterApiRequest: (reported: TokenUsage | null) => {
+            if (ctx.requireTokenUsage && !reported) {
+                throw new WorkflowBudgetExceededError('模型未返回 token 用量，无法执行工作流预算', ctx.stepPath);
+            }
+            ctx.verifyTokenBudget?.();
+        },
     };
 }
 
@@ -172,6 +233,7 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
     private readonly httpMaxResponseBytes: number;
     private readonly httpTimeoutMs: number;
     private readonly acquirePermit?: DefaultWorkflowStepExecutorOptions['acquirePermit'];
+    private readonly acquireRequestToken?: DefaultWorkflowStepExecutorOptions['acquireRequestToken'];
 
     constructor(options: DefaultWorkflowStepExecutorOptions = {}) {
         this.agentService = options.agentService || null;
@@ -182,6 +244,7 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
         this.httpMaxResponseBytes = options.httpMaxResponseBytes ?? globalConfig.workflow.httpMaxResponseBytes;
         this.httpTimeoutMs = options.httpTimeoutMs ?? globalConfig.workflow.httpTimeoutMs;
         this.acquirePermit = options.acquirePermit;
+        this.acquireRequestToken = options.acquireRequestToken;
     }
 
     private getAgentService(): AgentService {
@@ -253,6 +316,9 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
         const releasePermit = this.acquirePermit
             ? await this.acquirePermit('agent', resolved.provider, resolved.modelId, ctx.abortSignal)
             : undefined;
+        const logs = trackStepLogs(ctx);
+        const requestHooks = buildRequestHooks(ctx, resolved, this.acquireRequestToken);
+        let failed = false;
 
         try {
             const turnResult = await AgentTurnEngine.runTurns({
@@ -269,9 +335,10 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
                 lastUserMsgRecord: userMessage,
                 prepareMessages: async (history) => history,
                 abortSignal: ctx.abortSignal,
+                ...requestHooks,
                 emit: (chunk) => {
                     if (chunk?.type === 'stage' && typeof chunk.content === 'string' && chunk.content.trim()) {
-                        void ctx.log(chunk.content);
+                        logs.write(chunk.content);
                     }
                 },
                 startTimeStamp: Date.now(),
@@ -282,6 +349,7 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
                 skipTelemetry: true,
                 telemetrySink: (turnUsage) => {
                     usage = mergeUsage(usage, turnUsage);
+                    ctx.recordUsage?.(turnUsage);
                 },
                 agentStage: '工作流步骤',
                 allowedToolNames,
@@ -321,8 +389,15 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
             }
 
             return { output, usage };
+        } catch (error) {
+            failed = true;
+            throw error;
         } finally {
-            releasePermit?.();
+            try {
+                await flushStepLogs(logs, failed);
+            } finally {
+                releasePermit?.();
+            }
         }
     }
 
@@ -366,14 +441,12 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
         if (typeof command !== 'string' || !command.trim()) {
             throw new WorkflowError('run.shell 步骤缺少 command', 'validation', ctx.stepPath);
         }
-        const environment = (shellConfig.environment
-            && typeof shellConfig.environment === 'object'
-            && !Array.isArray(shellConfig.environment))
-            ? Object.fromEntries(
-                Object.entries(shellConfig.environment as Record<string, unknown>)
-                    .filter(([, value]) => typeof value === 'string'),
-            ) as Record<string, string>
-            : undefined;
+        const environment = shellConfig.environment;
+        if (environment !== undefined && (!environment || typeof environment !== 'object'
+            || Array.isArray(environment)
+            || Object.values(environment).some((value) => typeof value !== 'string'))) {
+            throw new WorkflowError('run.shell.environment 必须是字符串键值对象', 'validation', ctx.stepPath);
+        }
 
         const timeoutMs = parseDurationMs(definition.timeout?.after)
             ?? parseDurationMs(definition.with?.timeout)
@@ -475,6 +548,9 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
         const releasePermit = this.acquirePermit
             ? await this.acquirePermit('evaluator', resolved.provider, resolved.modelId, ctx.abortSignal)
             : undefined;
+        const logs = trackStepLogs(ctx);
+        const requestHooks = buildRequestHooks(ctx, resolved, this.acquireRequestToken);
+        let failed = false;
 
         try {
             const result = await EvaluationAgentService.getInstance().runEvaluation({
@@ -484,9 +560,11 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
                 traceId: ctx.traceId,
                 locale: ctx.locale,
                 abortSignal: ctx.abortSignal,
+                ...requestHooks,
+                telemetrySink: (usage) => ctx.recordUsage?.(usage),
                 emit: (chunk) => {
                     if (chunk?.type === 'stage' && typeof chunk.content === 'string' && chunk.content.trim()) {
-                        void ctx.log(chunk.content);
+                        logs.write(chunk.content);
                     }
                 },
                 providerConfig: resolved.providerConfig,
@@ -517,8 +595,15 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
                 },
                 usage: result.usage || undefined,
             };
+        } catch (error) {
+            failed = true;
+            throw error;
         } finally {
-            releasePermit?.();
+            try {
+                await flushStepLogs(logs, failed);
+            } finally {
+                releasePermit?.();
+            }
         }
     }
 

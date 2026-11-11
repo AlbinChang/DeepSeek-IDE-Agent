@@ -251,6 +251,7 @@ interface WorkflowDetail {
     summary: WorkflowSummary;
     yaml: string;
     validation: WorkflowValidationResult;
+    graph?: { mermaid: string; truncated: boolean };
 }
 
 interface WorkflowStepInfo {
@@ -282,6 +283,7 @@ interface WorkflowRunInfo {
     root: string;
     status: WorkflowRunStatus;
     inputs: Record<string, unknown>;
+    resumeInputsRequired?: boolean;
     createdAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -314,6 +316,8 @@ interface WorkflowCheckpoint {
     nextStepIndex: number;
     context: Record<string, unknown>;
     completedPaths: string[];
+    replayFromStep?: boolean;
+    resumeError?: string;
 }
 
 interface WorkflowEvent {
@@ -360,7 +364,7 @@ interface WorkflowApi {
     getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }>;
     listRuns: (params: { userId: string; root?: string; status?: WorkflowRunStatus }) => Promise<{ success: boolean; runs?: WorkflowRunInfo[]; error?: string }>;
     cancel: (params: { userId: string; root?: string; runId: string }) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
-    resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => Promise<{ success: boolean; resumed?: boolean; error?: string }>;
+    resume: (params: { userId: string; root?: string; runId: string; decision?: unknown; inputs?: Record<string, unknown> }) => Promise<{ success: boolean; resumed?: boolean; error?: string }>;
     workers: (params?: { userId?: string; root?: string }) => Promise<{
         success: boolean;
         active?: number;
@@ -479,7 +483,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => ipcRenderer.invoke('workflow:getRun', params),
         listRuns: (params: { userId: string; root?: string; status?: string }) => ipcRenderer.invoke('workflow:listRuns', params),
         cancel: (params: { userId: string; root?: string; runId: string }) => ipcRenderer.invoke('workflow:cancel', params),
-        resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => ipcRenderer.invoke('workflow:resume', params),
+        resume: (params: { userId: string; root?: string; runId: string; decision?: unknown; inputs?: Record<string, unknown> }) => ipcRenderer.invoke('workflow:resume', params),
         workers: (params?: { userId?: string; root?: string }) => ipcRenderer.invoke('workflow:workers', params),
     },
     onWorkflowEvent: (callback: (event: WorkflowEvent) => void) => {

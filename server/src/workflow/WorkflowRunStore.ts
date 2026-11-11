@@ -19,7 +19,7 @@ const SECRET_PATTERN = /\bsk-[A-Za-z0-9_-]{8,}\b/g;
 const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
 function isSecretKey(key: string): boolean {
-    if (/api[-_]?key|authorization|password|secret/i.test(key)) return true;
+    if (/api[-_]?key|authorization|password|secret|cookie/i.test(key)) return true;
     const normalized = key.replace(/[-_]/g, '').toLowerCase();
     return ['token', 'accesstoken', 'refreshtoken', 'authtoken', 'idtoken', 'bearertoken'].includes(normalized);
 }
@@ -155,15 +155,16 @@ export class WorkflowRunStore {
     }
 
     /**
-     * 只清理终态 run；运行中/等待审批的记录保留。
+     * 清理已结束的 run：排队/运行中/等待审批的记录永不删除；
+     * failed/cancelled/succeeded/interrupted 只保留最新的 maxRuns 条，避免中断记录无限增长。
      */
     public async prune(maxRuns: number): Promise<number> {
         const runs = await this.list();
-        const terminal: WorkflowRunStatus[] = ['succeeded', 'failed', 'cancelled'];
+        const active: WorkflowRunStatus[] = ['queued', 'running', 'waiting_approval'];
         const removable = runs
-            .filter((run) => terminal.includes(run.status))
+            .filter((run) => !active.includes(run.status))
             .sort((left, right) => right.createdAt - left.createdAt);
-        const keep = new Set(runs.filter((run) => !terminal.includes(run.status)).map((run) => run.runId));
+        const keep = new Set(runs.filter((run) => active.includes(run.status)).map((run) => run.runId));
         for (const run of removable.slice(0, Math.max(0, maxRuns - keep.size))) {
             keep.add(run.runId);
         }
@@ -171,7 +172,6 @@ export class WorkflowRunStore {
         let removed = 0;
         for (const run of runs) {
             if (keep.has(run.runId)) continue;
-            if (!terminal.includes(run.status)) continue;
             await fs.rm(this.getRunDirectory(run.runId), { recursive: true, force: true });
             removed++;
         }
@@ -187,11 +187,23 @@ export class WorkflowRunStore {
         const temporary = `${target}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
         await fs.writeFile(temporary, JSON.stringify(snapshot, null, 2), 'utf8');
         try {
-            await fs.rename(temporary, target);
-        } catch {
-            // Windows 不允许 rename 覆盖已存在文件
-            await fs.rm(target, { force: true });
-            await fs.rename(temporary, target);
+            for (let attempt = 0; ; attempt++) {
+                try {
+                    await fs.rename(temporary, target);
+                    break;
+                } catch (error) {
+                    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+                    if (attempt >= 2 || !['EPERM', 'EBUSY', 'EACCES'].includes(String(code))) throw error;
+                    await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+                }
+            }
+        } catch (error) {
+            try {
+                await fs.rm(temporary, { force: true });
+            } catch (cleanupError) {
+                console.warn('[WorkflowRunStore] Failed to remove temporary snapshot:', cleanupError);
+            }
+            throw error;
         }
     }
 }

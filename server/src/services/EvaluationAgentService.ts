@@ -49,6 +49,10 @@ export interface EvaluationAgentInput {
     skipTelemetry?: boolean;
     /** 最大轮次上限（默认不限制；workflow 步骤建议传入） */
     maxTurns?: number;
+    /** 可选模型请求门控，失败时向调用方传播。 */
+    beforeApiRequest?: () => Promise<void>;
+    afterApiRequest?: (usage: TokenUsage | null) => void;
+    telemetrySink?: (usage: TokenUsage, modelId: string) => void;
 }
 
 export interface EvaluationAgentOutput {
@@ -97,6 +101,9 @@ export class EvaluationAgentService {
             skipJournal,
             skipTelemetry,
             maxTurns,
+            beforeApiRequest,
+            afterApiRequest,
+            telemetrySink,
         } = input;
 
         const evaluationTask = [
@@ -177,6 +184,7 @@ export class EvaluationAgentService {
         let issueCount = 1;
         let p0p1IssueCount = 1;
 
+        let requestGateFailed = false;
         try {
             const turnResult = await AgentTurnEngine.runTurns({
                 client,
@@ -203,6 +211,23 @@ export class EvaluationAgentService {
                 skipJournal,
                 skipTelemetry,
                 maxTurns,
+                beforeApiRequest: beforeApiRequest && (async () => {
+                    try {
+                        await beforeApiRequest();
+                    } catch (error) {
+                        requestGateFailed = true;
+                        throw error;
+                    }
+                }),
+                afterApiRequest: afterApiRequest && ((usage) => {
+                    try {
+                        afterApiRequest(usage);
+                    } catch (error) {
+                        requestGateFailed = true;
+                        throw error;
+                    }
+                }),
+                telemetrySink,
                 recoveryContext: {
                     userInstruction,
                     pinnedUserMessage,
@@ -223,6 +248,7 @@ export class EvaluationAgentService {
                 decision = "continue_main_agent";
             }
         } catch (err: any) {
+            if (requestGateFailed) throw err;
             const errMsg = String(err?.message || err || "未知异常").trim();
             decision = "continue_main_agent";
             issueCount = 1;

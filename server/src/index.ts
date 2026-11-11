@@ -50,6 +50,7 @@ import { PathUtils } from '@/utils/PathUtils.js';
 import { config as globalConfig } from '@/config/index.js';
 import { InProcessWorkflowEngine } from '@/workflow/InProcessWorkflowEngine.js';
 import { WorkflowService } from '@/workflow/WorkflowService.js';
+import { registerWorkflowHttpRoutes } from '@/workflow/WorkflowHttpRoutes.js';
 import { performance } from 'perf_hooks';
 import * as os from 'os';
 import * as v8 from 'v8';
@@ -70,11 +71,10 @@ const agentService = AgentService.getInstance();
 // Workflow：standalone 路径使用进程内引擎（无 Electron utilityProcess）
 const workflowService = WorkflowService.getInstance();
 workflowService.setEngine(new InProcessWorkflowEngine({ agentService }));
-WorkspaceRegistry.getInstance().onWorkspaceChange(({ userId, previousRoot }) => {
+WorkspaceRegistry.getInstance().onWorkspaceChange(async ({ userId, previousRoot }) => {
     // 工作区切换/重置后取消旧工作区的 workflow run（A17）
-    void workflowService.cancelUserRuns(userId, previousRoot).catch((error) => {
-        console.warn('[Workflow] Failed to cancel runs on workspace change:', error);
-    });
+    await workflowService.deactivateTriggers(userId, previousRoot);
+    await workflowService.cancelUserRuns(userId, previousRoot);
 });
 
 async function bootstrap() {
@@ -123,6 +123,11 @@ async function bootstrap() {
             const duration = (request as any).startTime ? (performance.now() - (request as any).startTime) : 0;
             const isSuccess = reply.statusCode < 400;
             TelemetryService.recordRequest(isSuccess, duration);
+        });
+
+        await registerWorkflowHttpRoutes(server, workflowService, WorkspaceRegistry.getInstance(), {
+            enabled: globalConfig.workflow.httpApiEnabled,
+            token: globalConfig.workflow.httpApiToken,
         });
 
         // 注册 SSE 与网关推送子系统 (对齐 43.1 节)
@@ -205,7 +210,9 @@ async function bootstrap() {
             try {
                 const workspaceRoot = await runWorkspaceMutation(userId, async () => {
                     await agentService.initializeWorkspace(userId, newPath);
-                    return agentService.getWorkspaceRoot(userId) || newPath;
+                    const root = agentService.getWorkspaceRoot(userId) || newPath;
+                    await workflowService.activateTriggers(userId, root);
+                    return root;
                 });
 
                 // 若此前在未初始化 Workspace 时已保存过设置（memory_synced），此处补持久化到 .llm。

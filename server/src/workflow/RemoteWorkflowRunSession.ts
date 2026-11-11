@@ -17,6 +17,7 @@ import type {
 export interface RemoteWorkflowRunSessionOptions {
     config: WorkflowWorkerRunConfig;
     steps: WorkflowStepInfo[];
+    usage?: WorkflowUsage;
     lastSeq?: number;
     maxOutputChars: number;
     send: (message: WorkerToMainMessage) => void;
@@ -50,6 +51,7 @@ export class RemoteWorkflowRunSession implements WorkflowRunChannel {
             inputs: {},
             createdAt: Date.now(),
             steps: options.steps,
+            usage: options.usage,
             lastSeq: options.lastSeq || 0,
         };
     }

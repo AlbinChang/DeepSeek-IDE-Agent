@@ -1,7 +1,7 @@
 ﻿import * as os from 'os';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { EventDistributor } from '@/services/EventDistributor.js';
 import { GitService } from '@/services/GitService.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
@@ -11,6 +11,18 @@ export interface CommandResult {
     stderr: string;
     status: 'success' | 'error';
     code: number | string | null;
+}
+
+export function terminatePosixCommandGroup(child: Pick<ChildProcess, 'pid' | 'kill'>, toolName: string): void {
+    if (child.pid) {
+        try {
+            process.kill(-child.pid, 'SIGKILL');
+            return;
+        } catch (error) {
+            console.warn(`[${toolName}] Failed to terminate command process group:`, error);
+        }
+    }
+    child.kill('SIGKILL');
 }
 
 export class SystemTools {
@@ -227,6 +239,7 @@ export class SystemTools {
         if (!timeout || timeout <= 0) {
             throw new Error(`[${toolName}] timeout 为必填项且必须 > 0，请在调用时明确指定超时时间（ms），例如：简单命令 30000，构建/测试 120000~300000，依赖安装 600000`);
         }
+        if (abortSignal?.aborted) throw new Error(`[${toolName}] 命令已被取消`);
         if (this.startsWithShellWrapper(command)) {
             throw new Error(`[${toolName}] command 中禁止再嵌套 shell 启动器（如 cmd /c、powershell -Command、bash -c）。本工具已指定了执行 shell，command 请直接写该 shell 的原生命令体。`);
         }
@@ -269,6 +282,7 @@ export class SystemTools {
         //   - 检测目标 PID 是否为系统关键服务进程
         //   - 跨平台支持：Windows (netstat/tasklist) + Linux/macOS (ss/lsof/proc)
         await ProcessSafetyGuard.getInstance().guard(command);
+        if (abortSignal?.aborted) throw new Error(`[${toolName}] 命令已被取消`);
 
         // 1.5 指令回显 (对齐 Terminal.md Section 4.0)
         if (userId) {
@@ -353,6 +367,8 @@ export class SystemTools {
 
             const child = spawn(selectedShell, args, {
                 cwd,
+                // A separate POSIX process group lets cancellation stop the shell and its descendants.
+                detached: !isWin,
                 env: { 
                     ...process.env, 
                     // 不强制覆盖 NODE_ENV，尊重系统已有配置；未设置时默认 development
@@ -382,11 +398,19 @@ export class SystemTools {
             const killProc = () => {
                 if (isWin && child.pid) {
                     try {
-                        spawn('taskkill', ['/F', '/T', '/PID', String(child.pid)],
-                            { stdio: 'ignore', detached: true }).unref();
-                    } catch {}
+                        const killer = spawn('taskkill', ['/F', '/T', '/PID', String(child.pid)],
+                            { stdio: 'ignore', detached: true });
+                        killer.on('error', (error) => {
+                            console.warn(`[${toolName}] Failed to terminate command process tree:`, error);
+                            child.kill();
+                        });
+                        killer.unref();
+                    } catch (error) {
+                        console.warn(`[${toolName}] Failed to start process tree termination:`, error);
+                        child.kill();
+                    }
                 } else {
-                    child.kill();
+                    terminatePosixCommandGroup(child, toolName);
                 }
             };
 
@@ -606,4 +630,3 @@ export class SystemTools {
         });
     }
 }
-

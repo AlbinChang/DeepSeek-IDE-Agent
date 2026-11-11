@@ -33,10 +33,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function normalizeCommandEnvironment(value: unknown): Record<string, string> | undefined {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    if (value === undefined) return undefined;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('environment 必须是字符串键值对象');
+    }
     const env: Record<string, string> = {};
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-        if (!key.trim() || typeof entry !== 'string') continue;
+        if (!key.trim() || /[=\0]/.test(key) || typeof entry !== 'string' || entry.includes('\0')) {
+            throw new Error(`无效的 environment 变量: ${key}`);
+        }
         env[key.trim()] = entry;
     }
     return Object.keys(env).length > 0 ? env : undefined;

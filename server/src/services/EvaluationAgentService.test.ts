@@ -1,6 +1,40 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { EvaluationAgentService } from "./EvaluationAgentService.js";
+import { AgentService } from "./AgentService.js";
+import { AgentTurnEngine } from "./AgentTurnEngine.js";
+import { AIProviderFactory } from "./AIProviderFactory.js";
+import { HistoryOptimizerService } from "./HistoryOptimizerService.js";
+import { SettingsService } from "./SettingsService.js";
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("EvaluationAgentService request gate", () => {
+    it("propagates a gate failure instead of returning a successful evaluation", async () => {
+        const agentService = AgentService.getInstance();
+        vi.spyOn(agentService, "buildSystemPrompt").mockResolvedValue("system");
+        vi.spyOn(HistoryOptimizerService.getInstance(), "optimizeHistory").mockResolvedValue({ messages: [] });
+        vi.spyOn(AIProviderFactory, "getClient").mockReturnValue({} as ReturnType<typeof AIProviderFactory.getClient>);
+        vi.spyOn(AgentTurnEngine, "runTurns").mockImplementation(async (options) => {
+            await options.beforeApiRequest?.();
+            throw new Error("unreachable");
+        });
+        await expect(new EvaluationAgentService().runEvaluation({
+            agentService,
+            root: process.cwd(),
+            userId: "workflow-evaluator-test",
+            traceId: "trace",
+            emit: vi.fn(),
+            providerConfig: SettingsService.getDefaultSettings().providers[0],
+            modelId: "model",
+            thinkingOptions: {},
+            userInstruction: "test",
+            mainAgentFinalReply: "result",
+            persistReport: false,
+            beforeApiRequest: async () => { throw new Error("gate failed"); },
+        })).rejects.toThrow("gate failed");
+    });
+});
 
 describe("EvaluationAgentService.parseIssueCount", () => {
     const service = new EvaluationAgentService() as any;

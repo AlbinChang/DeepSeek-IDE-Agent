@@ -54,6 +54,7 @@ export interface WorkflowDetail {
     summary: WorkflowSummary;
     yaml: string;
     validation: WorkflowValidationResult;
+    graph?: { mermaid: string; truncated: boolean };
 }
 
 /** 已解析、可直接交给 WorkflowRunner 的定义 */
@@ -98,6 +99,8 @@ export interface WorkflowStepInfo {
     output?: unknown;
     /** 面向 UI 的输出预览 */
     outputPreview?: string;
+    /** 持久化时输出被脱敏或截断，不能作为嵌套恢复的精确输入。 */
+    replayOutputUnavailable?: boolean;
     error?: string;
     usage?: WorkflowUsage;
 }
@@ -110,11 +113,17 @@ export interface WorkflowApprovalState {
 }
 
 export interface WorkflowCheckpoint {
-    /** 顶层 do 数组的下一个索引（Phase 1 仅支持顶层审批暂停） */
+    /** 恢复时从该顶层步骤开始 */
     nextStepIndex: number;
     /** set 步骤写入的上下文 */
     context: Record<string, unknown>;
     completedPaths: string[];
+    /** 嵌套审批恢复时重建当前顶层容器，并跳过已完成的叶子步骤。 */
+    replayFromStep?: boolean;
+    /** 检查点包含无法精确恢复的数据时，禁止继续而不是静默改变语义。 */
+    resumeError?: string;
+    /** 本次暂停涉及的子工作流定义版本。 */
+    definitionHashes?: Record<string, string>;
 }
 
 export interface WorkflowRunInfo {
@@ -131,10 +140,21 @@ export interface WorkflowRunInfo {
     workflowName: string;
     /** 兼容字段：等价于 workflow.path */
     workflowPath?: string;
+    workflowDefinitionHash?: string;
     userId: string;
     root: string;
     status: WorkflowRunStatus;
     inputs: Record<string, unknown>;
+    /** 输入未原样持久化时，重启后恢复必须重新提供输入。 */
+    resumeInputsRequired?: boolean;
+    trigger?: { type: 'interval' | 'file'; id: string };
+    execution?: {
+        provider?: string;
+        model?: string;
+        reasoningEffort?: 'default' | 'low' | 'high' | 'max';
+        locale?: string;
+        concurrencyGroup?: string;
+    };
     createdAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -192,6 +212,8 @@ export interface WorkflowRunRequest {
     wait?: boolean;
     timeoutSeconds?: number;
     concurrencyGroup?: string;
+    /** 仅由本地自动触发器填充，用于运行来源追踪。 */
+    trigger?: { type: 'interval' | 'file'; id: string };
 }
 
 export interface WorkflowRunStartResult {
@@ -225,6 +247,8 @@ export interface WorkflowRunCancelRequest {
 
 export interface WorkflowRunResumeRequest extends WorkflowRunCancelRequest {
     decision?: unknown;
+    /** 原始输入未保存在磁盘时，允许调用方重新提供。 */
+    inputs?: Record<string, unknown>;
 }
 
 /**

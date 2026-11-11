@@ -63,6 +63,31 @@ function createHost(executor: WorkflowStepExecutor) {
 }
 
 describe('WorkflowWorkerHost', () => {
+    it('continues a token budget from the persisted usage after worker restart', async () => {
+        const { messages, result, getHost } = createHost({
+            execute: async (_kind, _definition, ctx) => {
+                ctx.checkTokenBudget?.();
+                const usage = { inputTokens: 5, outputTokens: 0, totalTokens: 5 };
+                ctx.recordUsage?.(usage);
+                ctx.verifyTokenBudget?.();
+                return { output: 'ok', usage };
+            },
+        });
+        const host = getHost();
+        host.handleMessage({
+            type: 'worker.init', protocolVersion: WORKFLOW_WORKER_PROTOCOL_VERSION, workerId: 'test-worker',
+        });
+        const start = startMessage(definition([{ action: { call: 'agent', with: { prompt: 'test' } } }]));
+        start.config.maxTokens = 10;
+        start.usage = { inputTokens: 6, outputTokens: 0, totalTokens: 6 };
+        host.handleMessage(start);
+        const final = await result;
+        expect(final.status).toBe('failed');
+        expect(final.error).toContain('token');
+        expect(messages.filter((message) => message.type === 'run.usage')).toHaveLength(1);
+        expect(final.usage?.totalTokens).toBe(11);
+    });
+
     it('executes a definition and reports step/checkpoint/result messages', async () => {
         const { messages, result, getHost } = createHost({
             execute: async () => ({ output: { unused: true } }),
@@ -123,6 +148,66 @@ describe('WorkflowWorkerHost', () => {
         expect(final.status).toBe('waiting_approval');
         expect(final.approval?.stepPath).toContain('/approve');
         expect(final.checkpoint?.nextStepIndex).toBe(1);
+    });
+
+    it('replays a nested approval from its checkpoint without repeating completed work', async () => {
+        const calls: string[] = [];
+        const executor: WorkflowStepExecutor = {
+            execute: async (kind, definition, ctx) => {
+                if (kind === 'approval') {
+                    return { approval: { stepPath: ctx.stepPath, requestedAt: Date.now() } };
+                }
+                calls.push(String(definition.with?.prompt));
+                return { output: definition.with?.prompt };
+            },
+        };
+        const def = definition([{
+            container: {
+                switch: [{
+                    when: true,
+                    do: [
+                        { before: { call: 'agent', with: { prompt: 'before' } } },
+                        { approval: { call: 'approval' } },
+                        { after: { call: 'agent', with: { prompt: 'after' } } },
+                    ],
+                }],
+            },
+        }]);
+        const first = createHost(executor);
+        first.getHost().handleMessage({
+            type: 'worker.init',
+            protocolVersion: WORKFLOW_WORKER_PROTOCOL_VERSION,
+            workerId: 'test-worker',
+        });
+        first.getHost().handleMessage(startMessage(def));
+        const paused = await first.result;
+        expect(paused.status).toBe('waiting_approval');
+        expect(paused.checkpoint?.nextStepIndex).toBe(0);
+        expect(paused.checkpoint?.replayFromStep).toBe(true);
+
+        const stepsByPath = new Map(
+            first.messages
+                .filter((message) => message.type === 'run.step')
+                .map((message) => [message.step.path, structuredClone(message.step)]),
+        );
+        const approved = stepsByPath.get(paused.approval!.stepPath)!;
+        approved.status = 'succeeded';
+        approved.output = { approved: true };
+        const second = createHost(executor);
+        second.getHost().handleMessage({
+            type: 'worker.init',
+            protocolVersion: WORKFLOW_WORKER_PROTOCOL_VERSION,
+            workerId: 'test-worker',
+        });
+        second.getHost().handleMessage(startMessage(def, {
+            steps: [...stepsByPath.values()],
+            startIndex: paused.checkpoint!.nextStepIndex,
+            initialContext: paused.checkpoint!.context,
+            replayCompletedPaths: [...paused.checkpoint!.completedPaths, approved.path],
+        }));
+        const completed = await second.result;
+        expect(completed.status).toBe('succeeded');
+        expect(calls).toEqual(['before', 'after']);
     });
 
     it('cancels a running step through AbortSignal', async () => {

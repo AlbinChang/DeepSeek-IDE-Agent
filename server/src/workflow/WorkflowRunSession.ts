@@ -1,4 +1,5 @@
 import { sanitizeForStore, WorkflowRunStore } from '@/workflow/WorkflowRunStore.js';
+import { WorkflowPersistenceError } from '@/workflow/errors.js';
 import type {
     WorkflowEvent,
     WorkflowRunInfo,
@@ -48,6 +49,7 @@ export function previewOutputValue(value: unknown, maxOutputChars: number): stri
  */
 export class WorkflowRunSession implements WorkflowRunChannel {
     private writeChain: Promise<void> = Promise.resolve();
+    private eventChain: Promise<void> = Promise.resolve();
     private closed = false;
 
     constructor(
@@ -88,28 +90,42 @@ export class WorkflowRunSession implements WorkflowRunChannel {
 
     public async emit(type: string, data: Record<string, unknown> = {}): Promise<void> {
         if (this.closed) return;
-        const seq = (this.snapshot.lastSeq || 0) + 1;
-        this.snapshot.lastSeq = seq;
-        const sanitizedData = sanitizeForStore(data, EVENT_STRING_LIMIT) as Record<string, unknown>;
-        const event: WorkflowEvent = {
-            ...sanitizedData,
-            runId: this.snapshot.runId,
-            seq,
-            type,
-            timestamp: Date.now(),
-        };
-
+        const operation = this.eventChain.then(async () => {
+            const seq = (this.snapshot.lastSeq || 0) + 1;
+            this.snapshot.lastSeq = seq;
+            const sanitizedData = sanitizeForStore(data, EVENT_STRING_LIMIT) as Record<string, unknown>;
+            const event: WorkflowEvent = {
+                ...sanitizedData,
+                runId: this.snapshot.runId,
+                seq,
+                type,
+                timestamp: Date.now(),
+            };
+            try {
+                await this.store.appendEvent(this.snapshot.runId, event);
+            } catch (error) {
+                this.snapshot.lastSeq = seq - 1;
+                throw error;
+            }
+            try {
+                this.publish(event);
+            } catch (error) {
+                console.warn(`[WorkflowRun] Event bus publish failed for ${this.snapshot.runId}:`, error);
+            }
+            await this.persist();
+        });
+        this.eventChain = operation.catch((error) => {
+            console.warn(`[WorkflowRun] Failed to record event ${type} for ${this.snapshot.runId}:`, error);
+        });
         try {
-            await this.store.appendEvent(this.snapshot.runId, event);
+            await operation;
         } catch (error) {
-            console.warn(`[WorkflowRun] Failed to append event ${type} for ${this.snapshot.runId}:`, error);
+            if (error instanceof WorkflowPersistenceError) throw error;
+            throw new WorkflowPersistenceError(
+                `Failed to record workflow event: ${error instanceof Error ? error.message : String(error)}`,
+                error,
+            );
         }
-        try {
-            this.publish(event);
-        } catch (error) {
-            console.warn(`[WorkflowRun] Event bus publish failed for ${this.snapshot.runId}:`, error);
-        }
-        await this.persist();
     }
 
     public sanitizeOutput(value: unknown): unknown {
@@ -123,16 +139,22 @@ export class WorkflowRunSession implements WorkflowRunChannel {
     public async persist(): Promise<void> {
         if (this.closed) return;
         const snapshot = JSON.parse(JSON.stringify(this.snapshot)) as WorkflowRunInfo;
-        this.writeChain = this.writeChain
-            .catch(() => {})
-            .then(() => this.store.save(snapshot))
-            .catch((error) => {
-                console.warn(`[WorkflowRun] Failed to persist run ${this.snapshot.runId}:`, error);
-            });
-        await this.writeChain;
+        const operation = this.writeChain.then(() => this.store.save(snapshot));
+        this.writeChain = operation.catch((error) => {
+            console.warn(`[WorkflowRun] Failed to persist run ${this.snapshot.runId}:`, error);
+        });
+        try {
+            await operation;
+        } catch (error) {
+            throw new WorkflowPersistenceError(
+                `Failed to save workflow run: ${error instanceof Error ? error.message : String(error)}`,
+                error,
+            );
+        }
     }
 
     public async close(): Promise<void> {
+        await this.eventChain;
         await this.persist();
         this.closed = true;
     }

@@ -1,9 +1,10 @@
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ProcessWorkerWorkflowEngine } from '@/workflow/ProcessWorkerWorkflowEngine.js';
+import { WorkflowRunStore } from '@/workflow/WorkflowRunStore.js';
 import type { WorkflowRunInfo } from '@/workflow/types.js';
 import type {
     MainToWorkerMessage,
@@ -196,6 +197,7 @@ async function waitForStatus(
 const roots: string[] = [];
 
 afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(roots.splice(0).map((root) => fs.rm(root, {
         recursive: true,
         force: true,
@@ -259,6 +261,38 @@ describe('ProcessWorkerWorkflowEngine', () => {
             expect(events).toContain('step.output');
             expect(events).toContain('run.completed');
             expect(spawner.handles[0].messages.some((m) => m.type === 'run.start')).toBe(true);
+        } finally {
+            await engine.shutdown();
+        }
+    });
+
+    it('interrupts a run when worker state cannot be persisted', async () => {
+        const root = await createRoot();
+        roots.push(root);
+        await writeWorkflow(root, 'disk-error', 'document:\n  name: disk-error\ndo:\n  - first:\n      set:\n        value: 1\n');
+        const spawner = new FakeSpawner();
+        spawner.defaultBehavior = (handle, message) => {
+            const save = WorkflowRunStore.prototype.save;
+            vi.spyOn(WorkflowRunStore.prototype, 'save')
+                .mockRejectedValueOnce(new Error('disk full'))
+                .mockImplementation(save);
+            handle.emit({
+                type: 'run.step',
+                runId: message.config.runId,
+                step: { path: '/do/0/first', name: 'first', status: 'succeeded', attempts: 1 },
+            });
+        };
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const engine = new ProcessWorkerWorkflowEngine({ spawner, maxWorkers: 1 });
+        try {
+            const result = await engine.startRun({
+                userId: 'u1', root, name: 'disk-error', wait: true, timeoutSeconds: 5,
+            });
+            expect(result.run?.status).toBe('interrupted');
+            expect(result.run?.error).toContain('持久化失败');
+            expect((await new WorkflowRunStore(root).read(result.runId!))?.status).toBe('interrupted');
+            expect(engine.getStats().active).toBe(0);
         } finally {
             await engine.shutdown();
         }
@@ -441,6 +475,72 @@ describe('ProcessWorkerWorkflowEngine', () => {
         }
     });
 
+    it('lets cancellation win over a concurrently arriving approval result', async () => {
+        const root = await createRoot();
+        roots.push(root);
+        await writeWorkflow(root, 'approval-race', 'document:\n  name: approval-race\ndo:\n  - approve:\n      call: approval\n');
+        const spawner = new FakeSpawner();
+        const engine = new ProcessWorkerWorkflowEngine({ spawner, maxWorkers: 1 });
+        spawner.defaultBehavior = (handle, message) => {
+            void engine.cancelRun({ userId: 'u1', root, runId: message.config.runId });
+            handle.emit({
+                type: 'run.result', runId: message.config.runId, status: 'waiting_approval',
+                approval: { stepPath: '/do/0/approve', requestedAt: Date.now() },
+                checkpoint: { nextStepIndex: 1, context: {}, completedPaths: [] },
+            });
+        };
+        try {
+            const result = await engine.startRun({
+                userId: 'u1', root, name: 'approval-race', wait: true, timeoutSeconds: 5,
+            });
+            expect(result.run?.status).toBe('cancelled');
+            expect((await new WorkflowRunStore(root).read(result.runId!))?.status).toBe('cancelled');
+        } finally {
+            await engine.shutdown();
+        }
+    });
+
+    it('serializes approval and cancellation while respecting queue capacity', async () => {
+        const root = await createRoot();
+        roots.push(root);
+        await writeWorkflow(root, 'approval-race', 'document:\n  name: approval-race\ndo:\n  - approve:\n      call: approval\n');
+        const spawner = new FakeSpawner();
+        spawner.enqueue((handle, message) => {
+            handle.emit({
+                type: 'run.result', runId: message.config.runId, status: 'waiting_approval',
+                approval: { stepPath: '/do/0/approve', requestedAt: Date.now() },
+                checkpoint: { nextStepIndex: 1, context: {}, completedPaths: [] },
+            });
+        });
+        spawner.defaultBehavior = () => {};
+        const engine = new ProcessWorkerWorkflowEngine({
+            spawner, maxWorkers: 1, maxQueueSize: 1, maxConcurrentRunsPerWorkflow: 1,
+        });
+        try {
+            const paused = await engine.startRun({
+                userId: 'u1', root, name: 'approval-race', wait: true, timeoutSeconds: 5,
+            });
+            await engine.startRun({ userId: 'u1', root, name: 'approval-race' });
+            const attempts = await Promise.all([
+                engine.startRun({ userId: 'u1', root, name: 'approval-race' }),
+                engine.startRun({ userId: 'u1', root, name: 'approval-race' }),
+            ]);
+            expect(attempts.filter((result) => result.ok)).toHaveLength(1);
+            expect(attempts.find((result) => !result.ok)?.error).toBe('WORKFLOW_QUEUE_FULL');
+            const request = { userId: 'u1', root, runId: paused.runId! };
+            expect(await engine.resumeRun({ ...request, decision: 'approve' })).toBe(false);
+            expect((await engine.getRun(request))?.status).toBe('waiting_approval');
+            const [cancelled, resumed] = await Promise.all([
+                engine.cancelRun(request),
+                engine.resumeRun({ ...request, decision: 'approve' }),
+            ]);
+            expect([cancelled, resumed]).toEqual([true, false]);
+            expect((await engine.getRun(request))?.status).toBe('cancelled');
+        } finally {
+            await engine.shutdown();
+        }
+    });
+
     it('serializes runs in the same concurrency group', async () => {
         const root = await createRoot();
         roots.push(root);
@@ -523,6 +623,106 @@ describe('ProcessWorkerWorkflowEngine', () => {
             expect(first.run?.status).toBe('succeeded');
             expect(second.run?.status).toBe('succeeded');
             expect(maxPermitActive).toBe(1);
+        } finally {
+            await engine.shutdown();
+        }
+    });
+
+    it('does not remove another worker’s waiter when request IDs collide', async () => {
+        const root = await createRoot();
+        roots.push(root);
+        for (const name of ['holder', 'waiter', 'cancelled-waiter']) {
+            await writeWorkflow(root, name, `document:\n  name: ${name}\ndo:\n  - item:\n      set:\n        value: 1\n`);
+        }
+        const spawner = new FakeSpawner();
+        spawner.defaultBehavior = (handle, message) => {
+            handle.emit({
+                type: 'run.permit',
+                runId: message.config.runId,
+                requestId: 'permit-1',
+                kind: 'agent',
+                provider: 'shared',
+                model: 'model',
+            });
+        };
+        const engine = new ProcessWorkerWorkflowEngine({
+            spawner, maxWorkers: 3, agentConcurrencyPerProvider: 1,
+        });
+        const waitForStart = async (index: number) => {
+            const deadline = Date.now() + 3000;
+            while (Date.now() < deadline) {
+                const handle = spawner.handles[index];
+                const message = handle?.messages.find((entry) => entry.type === 'run.start');
+                if (handle && message?.type === 'run.start') return { handle, message };
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            throw new Error('Worker did not start');
+        };
+        try {
+            await engine.startRun({ userId: 'u1', root, name: 'holder' });
+            const holder = await waitForStart(0);
+            await waitForGrant(holder.handle, 'permit-1');
+            await engine.startRun({ userId: 'u1', root, name: 'waiter' });
+            const waiter = await waitForStart(1);
+            await engine.startRun({ userId: 'u1', root, name: 'cancelled-waiter' });
+            const cancelled = await waitForStart(2);
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            cancelled.handle.emit({
+                type: 'run.permit.release', runId: cancelled.message.config.runId, requestId: 'permit-1',
+            });
+            holder.handle.emit({
+                type: 'run.permit.release', runId: holder.message.config.runId, requestId: 'permit-1',
+            });
+            await waitForGrant(waiter.handle, 'permit-1');
+            expect(cancelled.handle.messages.some((message) => message.type === 'run.permit.granted')).toBe(false);
+        } finally {
+            await engine.shutdown();
+        }
+    });
+
+    it('shares model request rate limits across workers and removes cancelled waiters', async () => {
+        const root = await createRoot();
+        roots.push(root);
+        await writeWorkflow(root, 'rate', 'document:\n  name: rate\ndo:\n  - first:\n      set:\n        value: 1\n');
+        const spawner = new FakeSpawner();
+        const started: Array<{ handle: FakeWorkerHandle; message: WorkflowWorkerRunStartMessage }> = [];
+        spawner.defaultBehavior = (handle, message) => {
+            started.push({ handle, message });
+            handle.emit({
+                type: 'run.rate', runId: message.config.runId, requestId: 'rate-1',
+                provider: 'OpenAI', model: 'model',
+            });
+        };
+        const engine = new ProcessWorkerWorkflowEngine({
+            spawner, maxWorkers: 3, maxConcurrentRunsPerWorkflow: 3,
+            agentRequestsPerMinute: 60, agentRequestBurst: 1,
+        });
+        const waitUntil = async (condition: () => boolean, timeout = 2500) => {
+            const deadline = Date.now() + timeout;
+            while (!condition()) {
+                if (Date.now() >= deadline) throw new Error('Timed out waiting for rate request');
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+        };
+        const granted = (index: number) => started[index]?.handle.messages.some(
+            (message) => message.type === 'run.rate.granted' && message.requestId === 'rate-1',
+        );
+        try {
+            await engine.startRun({ userId: 'u1', root, name: 'rate' });
+            await waitUntil(() => started.length === 1 && Boolean(granted(0)));
+            await engine.startRun({ userId: 'u1', root, name: 'rate' });
+            await waitUntil(() => started.length === 2);
+            await engine.startRun({ userId: 'u1', root, name: 'rate' });
+            await waitUntil(() => started.length === 3);
+            expect(started.every(({ message }) => message.config.requestRateEnabled)).toBe(true);
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            expect(granted(1)).toBe(false);
+            expect(granted(2)).toBe(false);
+            started[1].handle.emit({
+                type: 'run.rate.cancel', runId: started[1].message.config.runId, requestId: 'rate-1',
+            });
+            await waitUntil(() => Boolean(granted(2)));
+            expect(granted(1)).toBe(false);
         } finally {
             await engine.shutdown();
         }

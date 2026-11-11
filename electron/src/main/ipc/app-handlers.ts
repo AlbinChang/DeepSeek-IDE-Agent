@@ -8,6 +8,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { WorkspaceRegistry } from '@/services/WorkspaceRegistry.js';
 import { PROJECT_ROOT, ELECTRON_ROOT } from '../index.js';
+import { WorkflowRuntime } from '../workflow/workflow-runtime.js';
 
 export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
     
@@ -38,6 +39,7 @@ export function registerAppIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
 
             // 记录用户工作区（与 AgentService/Workflow 共用同一真值源）
             await WorkspaceRegistry.getInstance().switchWorkspace(userId, root);
+            await WorkflowRuntime.getInstance().getService().activateTriggers(userId, root);
             const { LLMRequestJournal } = await import('@/services/LLMRequestJournal.js');
             LLMRequestJournal.getInstance().trackWorkspace(root);
 

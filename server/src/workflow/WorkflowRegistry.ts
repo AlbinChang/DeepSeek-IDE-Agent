@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import yaml from 'js-yaml';
 
 import { PathUtils } from '@/utils/PathUtils.js';
+import { buildWorkflowGraph } from '@/workflow/WorkflowGraph.js';
+import { parseWorkflowTriggers } from '@/workflow/WorkflowTriggers.js';
 import type {
     WorkflowDefinition,
     WorkflowDetail,
@@ -21,6 +23,7 @@ const MAX_SCAN_DEPTH = 3;
 interface ParsedDocumentResult {
     summary: WorkflowSummary;
     issues: WorkflowValidationIssue[];
+    steps?: unknown[];
 }
 
 /**
@@ -77,6 +80,7 @@ export class WorkflowRegistry {
                 issues,
                 validator: 'builtin',
             },
+            ...(parsed.steps ? { graph: buildWorkflowGraph(parsed.steps) } : {}),
         };
     }
 
@@ -270,6 +274,7 @@ export class WorkflowRegistry {
             issues.push({ path: '/', message: 'workflow 根节点必须是对象', severity: 'error' });
             return { summary: this.buildFallbackSummary(fallbackName), issues };
         }
+        issues.push(...parseWorkflowTriggers(data['x-workflow-triggers']).issues);
 
         const document = (data as any).document;
         if (!document || typeof document !== 'object' || Array.isArray(document)) {
@@ -354,6 +359,7 @@ export class WorkflowRegistry {
                 stepCount: Array.isArray(steps) ? steps.length : 0,
             },
             issues,
+            ...(Array.isArray(steps) ? { steps } : {}),
         };
     }
 

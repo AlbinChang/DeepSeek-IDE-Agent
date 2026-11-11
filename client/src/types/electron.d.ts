@@ -268,6 +268,7 @@ interface WorkflowDetail {
     summary: WorkflowSummary;
     yaml: string;
     validation: WorkflowValidationResult;
+    graph?: { mermaid: string; truncated: boolean };
 }
 
 interface WorkflowStepInfo {
@@ -295,10 +296,12 @@ interface WorkflowRunInfo {
     };
     workflowName: string;
     workflowPath?: string;
+    trigger?: { type: 'interval' | 'file'; id: string };
     userId: string;
     root: string;
     status: WorkflowRunStatus;
     inputs: Record<string, unknown>;
+    resumeInputsRequired?: boolean;
     createdAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -331,6 +334,8 @@ interface WorkflowCheckpoint {
     nextStepIndex: number;
     context: Record<string, unknown>;
     completedPaths: string[];
+    replayFromStep?: boolean;
+    resumeError?: string;
 }
 
 interface WorkflowEvent {
@@ -379,7 +384,7 @@ interface WorkflowApi {
     getRun: (params: { userId: string; root?: string; runId: string; includeEvents?: boolean }) => Promise<{ success: boolean; run?: WorkflowRunInfo; error?: string }>;
     listRuns: (params: { userId: string; root?: string; status?: WorkflowRunStatus }) => Promise<{ success: boolean; runs?: WorkflowRunInfo[]; error?: string }>;
     cancel: (params: { userId: string; root?: string; runId: string }) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
-    resume: (params: { userId: string; root?: string; runId: string; decision?: unknown }) => Promise<{ success: boolean; resumed?: boolean; error?: string }>;
+    resume: (params: { userId: string; root?: string; runId: string; decision?: unknown; inputs?: Record<string, unknown> }) => Promise<{ success: boolean; resumed?: boolean; error?: string }>;
     workers: (params?: { userId?: string; root?: string }) => Promise<{
         success: boolean;
         active?: number;

@@ -1,5 +1,6 @@
 import { config as globalConfig } from '@/config/index.js';
 import { WorkflowRegistry } from '@/workflow/WorkflowRegistry.js';
+import { WorkflowTriggerManager } from '@/workflow/WorkflowTriggerManager.js';
 import {
     NULL_WORKFLOW_EVENT_BUS,
     type WorkflowDetail,
@@ -29,7 +30,25 @@ export class WorkflowService {
     private static instance: WorkflowService | undefined;
 
     private engine: WorkflowEngine | null = null;
+    private triggers: WorkflowTriggerManager | null = null;
     private eventBus: WorkflowEventBus = NULL_WORKFLOW_EVENT_BUS;
+    private readonly subscribers = new Set<(event: WorkflowEvent) => void>();
+    private readonly dispatcher: WorkflowEventBus = {
+        publish: (event) => {
+            try {
+                this.eventBus.publish(event);
+            } catch (error) {
+                console.warn('[WorkflowService] Event bus failed:', error);
+            }
+            for (const listener of this.subscribers) {
+                try {
+                    listener(event);
+                } catch (error) {
+                    console.warn('[WorkflowService] Event subscriber failed:', error);
+                }
+            }
+        },
+    };
 
     public static getInstance(): WorkflowService {
         if (!WorkflowService.instance) {
@@ -44,7 +63,7 @@ export class WorkflowService {
 
     public setEngine(engine: WorkflowEngine | null): void {
         this.engine = engine;
-        engine?.setEventBus?.(this.eventBus);
+        engine?.setEventBus?.(this.dispatcher);
     }
 
     public getEngine(): WorkflowEngine | null {
@@ -53,11 +72,16 @@ export class WorkflowService {
 
     public setEventBus(eventBus: WorkflowEventBus): void {
         this.eventBus = eventBus;
-        this.engine?.setEventBus?.(eventBus);
+        this.engine?.setEventBus?.(this.dispatcher);
     }
 
     public publish(event: WorkflowEvent): void {
-        this.eventBus.publish(event);
+        this.dispatcher.publish(event);
+    }
+
+    public subscribe(listener: (event: WorkflowEvent) => void): () => void {
+        this.subscribers.add(listener);
+        return () => this.subscribers.delete(listener);
     }
 
     public async list(root: string): Promise<WorkflowSummary[]> {
@@ -113,7 +137,19 @@ export class WorkflowService {
         await this.engine?.cancelUserRuns?.(userId, root);
     }
 
+    public async activateTriggers(userId: string, root: string): Promise<void> {
+        if (!globalConfig.workflow.enabled || !globalConfig.workflow.triggersEnabled) return;
+        this.triggers ||= new WorkflowTriggerManager(this);
+        await this.triggers.activate(userId, root);
+    }
+
+    public async deactivateTriggers(userId: string, root?: string): Promise<void> {
+        await this.triggers?.deactivate(userId, root);
+    }
+
     public async shutdown(): Promise<void> {
+        await this.triggers?.shutdown();
+        this.triggers = null;
         await this.engine?.shutdown();
         this.engine = null;
     }

@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { SystemTools } from '@/tools/SystemTools.js';
+import { SystemTools, terminatePosixCommandGroup } from '@/tools/SystemTools.js';
+import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 
 describe('SystemTools.executePowerShellCommand validation', () => {
     it('rejects missing timeout', async () => {
@@ -17,6 +18,14 @@ describe('SystemTools.executePowerShellCommand validation', () => {
 });
 
 describe('SystemTools.executePowerShellCommand runtime options', () => {
+    it('does not spawn a command when already cancelled', async () => {
+        const controller = new AbortController();
+        controller.abort();
+        await expect(SystemTools.executePowerShellCommand(
+            'Write-Output not-run', process.cwd(), undefined, 30_000, null, undefined, undefined, controller.signal,
+        )).rejects.toThrow('命令已被取消');
+    });
+
     it('passes extra environment variables to the child shell', async () => {
         const result = await SystemTools.executePowerShellCommand(
             'Write-Output $env:WORKFLOW_TEST_ENV',
@@ -31,24 +40,43 @@ describe('SystemTools.executePowerShellCommand runtime options', () => {
         expect(result.stdout).toContain('env-ok');
     });
 
+    describe('POSIX command process groups', () => {
+        it('terminates the owned process group rather than only the shell', () => {
+            const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+            const child = { pid: 12345, kill: vi.fn() };
+            try {
+                terminatePosixCommandGroup(child, 'test');
+                expect(kill).toHaveBeenCalledWith(-12345, 'SIGKILL');
+                expect(child.kill).not.toHaveBeenCalled();
+            } finally {
+                kill.mockRestore();
+            }
+        });
+    });
+
     it('kills the command when the abort signal fires', async () => {
         const controller = new AbortController();
         const started = Date.now();
-        const pending = SystemTools.executePowerShellCommand(
-            'Start-Sleep -Seconds 30',
-            process.cwd(),
-            undefined,
-            60_000,
-            null,
-            undefined,
-            undefined,
-            controller.signal,
-        );
-        setTimeout(() => controller.abort(), 100);
-        const result = await pending;
-        expect(result.status).toBe('error');
-        expect(Date.now() - started).toBeLessThan(10_000);
-        expect(JSON.stringify(result)).toContain('取消');
+        const guard = vi.spyOn(ProcessSafetyGuard.getInstance(), 'guard').mockResolvedValue(undefined);
+        try {
+            const pending = SystemTools.executePowerShellCommand(
+                'Start-Sleep -Seconds 30',
+                process.cwd(),
+                undefined,
+                60_000,
+                null,
+                undefined,
+                undefined,
+                controller.signal,
+            );
+            setTimeout(() => controller.abort(), 100);
+            const result = await pending;
+            expect(result.status).toBe('error');
+            expect(Date.now() - started).toBeLessThan(10_000);
+            expect(JSON.stringify(result)).toContain('取消');
+        } finally {
+            guard.mockRestore();
+        }
     });
 });
 

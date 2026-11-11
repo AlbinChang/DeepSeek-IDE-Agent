@@ -32,6 +32,7 @@ interface RunningWorkflow {
     runId: string;
     controller: AbortController;
     session: RemoteWorkflowRunSession;
+    requestRateEnabled: boolean;
     heartbeatTimer?: ReturnType<typeof setInterval>;
 }
 
@@ -52,12 +53,15 @@ export class WorkflowWorkerHost {
     private running: RunningWorkflow | null = null;
     private initialized = false;
     private permitSeq = 0;
+    private rateSeq = 0;
     private readonly pendingPermits = new Map<string, PendingPermit>();
+    private readonly pendingRates = new Map<string, PendingPermit>();
 
     constructor(options: WorkflowWorkerHostOptions) {
         this.send = options.send;
         this.executor = options.executor || new DefaultWorkflowStepExecutor({
             acquirePermit: (kind, provider, model, signal) => this.acquirePermit(kind, provider, model, signal),
+            acquireRequestToken: (provider, model, signal) => this.acquireRequestToken(provider, model, signal),
         });
         this.workerId = options.workerId;
         this.pid = options.pid ?? process.pid;
@@ -100,6 +104,11 @@ export class WorkflowWorkerHost {
                 if (pending) pending.resolve();
                 return;
             }
+            case 'run.rate.granted': {
+                const pending = this.pendingRates.get(message.requestId);
+                if (pending) pending.resolve();
+                return;
+            }
             case 'ping':
                 this.send({ type: 'pong', seq: message.seq });
                 return;
@@ -131,6 +140,7 @@ export class WorkflowWorkerHost {
         const session = new RemoteWorkflowRunSession({
             config,
             steps: message.steps,
+            usage: message.usage,
             maxOutputChars: globalConfig.workflow.maxStepOutputChars,
             send: this.send,
         });
@@ -140,6 +150,7 @@ export class WorkflowWorkerHost {
             runId: config.runId,
             controller,
             session,
+            requestRateEnabled: config.requestRateEnabled === true,
         };
         this.running = running;
 
@@ -171,8 +182,10 @@ export class WorkflowWorkerHost {
             model: config.model,
             reasoningEffort: config.reasoningEffort,
             locale: config.locale,
+            maxTokens: config.maxTokens,
             startIndex: message.startIndex,
             initialContext: message.initialContext,
+            replayCompletedPaths: message.replayCompletedPaths,
             onCheckpoint: (checkpoint) => {
                 lastCheckpointIndex = checkpoint.nextStepIndex;
                 session.checkpoint(buildCheckpoint(
@@ -202,10 +215,12 @@ export class WorkflowWorkerHost {
                     status: 'waiting_approval',
                     approval: error.approval,
                     checkpoint: buildCheckpoint(
-                        error.topLevelIndex + 1,
-                        runner.getContextValues(),
+                        error.topLevelIndex + (error.replayFromStep ? 0 : 1),
+                        error.resumeContext ?? runner.getContextValues(),
                         session.snapshot.steps,
                         globalConfig.workflow.maxStepOutputChars,
+                        error.replayFromStep,
+                        error.definitionHashes,
                     ),
                     usage: session.snapshot.usage,
                 });
@@ -233,8 +248,60 @@ export class WorkflowWorkerHost {
         } finally {
             if (running.heartbeatTimer) clearInterval(running.heartbeatTimer);
             this.cancelPendingPermits('Workflow run finished');
+            this.cancelPendingRates('Workflow run finished');
             if (this.running === running) this.running = null;
         }
+    }
+
+    private acquireRequestToken(provider: string, model: string, signal: AbortSignal): Promise<void> {
+        const running = this.running;
+        if (!running) return Promise.reject(new WorkflowCancelledError('Workflow worker is not running'));
+        if (signal.aborted) return Promise.reject(this.abortReason(signal));
+        if (!running.requestRateEnabled) return Promise.resolve();
+
+        const requestId = `rate-${++this.rateSeq}`;
+        return new Promise<void>((resolve, reject) => {
+            let settled = false;
+            const cleanup = () => {
+                signal.removeEventListener('abort', onAbort);
+                this.pendingRates.delete(requestId);
+            };
+            const onAbort = () => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                try {
+                    this.send({ type: 'run.rate.cancel', runId: running.runId, requestId });
+                } catch (error) {
+                    console.warn('[WorkflowWorker] Failed to cancel rate request:', error);
+                }
+                reject(this.abortReason(signal));
+            };
+            this.pendingRates.set(requestId, {
+                resolve: () => {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    resolve();
+                },
+                reject: (error) => {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    reject(error);
+                },
+            });
+            signal.addEventListener('abort', onAbort, { once: true });
+            if (signal.aborted) {
+                onAbort();
+                return;
+            }
+            try {
+                this.send({ type: 'run.rate', runId: running.runId, requestId, provider, model });
+            } catch (error) {
+                this.pendingRates.get(requestId)?.reject(error);
+            }
+        });
     }
 
     private acquirePermit(
@@ -330,6 +397,20 @@ export class WorkflowWorkerHost {
         this.pendingPermits.clear();
     }
 
+    private cancelPendingRates(reason: string): void {
+        for (const [requestId, pending] of this.pendingRates) {
+            if (this.running) {
+                try {
+                    this.send({ type: 'run.rate.cancel', runId: this.running.runId, requestId });
+                } catch (error) {
+                    console.warn('[WorkflowWorker] Failed to cancel rate request:', error);
+                }
+            }
+            pending.reject(new WorkflowCancelledError(reason));
+        }
+        this.pendingRates.clear();
+    }
+
     private cancelRun(runId: string, reason?: string): void {
         if (!this.running || this.running.runId !== runId) return;
         this.running.controller.abort(new WorkflowCancelledError(reason || 'Workflow cancelled by user'));
@@ -338,6 +419,7 @@ export class WorkflowWorkerHost {
     public dispose(): void {
         this.cancelRun(this.running?.runId || '', 'Workflow worker disposed');
         this.cancelPendingPermits('Workflow worker disposed');
+        this.cancelPendingRates('Workflow worker disposed');
     }
 
     /** 仅供测试/诊断：Worker 当前是否有 run。 */

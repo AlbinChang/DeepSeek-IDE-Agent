@@ -1,13 +1,21 @@
 import { config as globalConfig } from '@/config/index.js';
 import {
     buildInitialSteps,
+    areResumeInputsCompatible,
+    clampTimerDelay,
+    isReplayValuePreserved,
     prepareWorkflowInputs,
     resolveApprovalDecision,
     samePath,
+    workflowDefinitionHash,
 } from '@/workflow/engineUtils.js';
 import { WorkflowRegistry } from '@/workflow/WorkflowRegistry.js';
+import { getResumeDefinitionError } from '@/workflow/WorkflowResume.js';
 import { WorkflowRunSession } from '@/workflow/WorkflowRunSession.js';
 import { WorkflowRunStore, sanitizeForStore } from '@/workflow/WorkflowRunStore.js';
+import { AsyncKeyedLock } from '@/workflow/AsyncKeyedLock.js';
+import { WorkflowQueueAdmission } from '@/workflow/WorkflowQueueAdmission.js';
+import { ProviderRequestRateLimiter } from '@/workflow/providerRateLimiter.js';
 import {
     NULL_WORKFLOW_EVENT_BUS,
     type WorkflowDefinition,
@@ -27,6 +35,8 @@ import type {
     WorkflowWorkerHandle,
     WorkflowWorkerPermitMessage,
     WorkflowWorkerPermitReleaseMessage,
+    WorkflowWorkerRateRequestMessage,
+    WorkflowWorkerRateCancelMessage,
     WorkflowWorkerSpawner,
     WorkflowWorkerResultMessage,
 } from '@/workflow/workerProtocol.js';
@@ -39,7 +49,10 @@ export interface ProcessWorkerWorkflowEngineOptions {
     maxConcurrentRunsPerWorkflow?: number;
     maxRunDurationMs?: number;
     maxStoredRuns?: number;
+    maxTokens?: number;
     agentConcurrencyPerProvider?: number;
+    agentRequestsPerMinute?: number;
+    agentRequestBurst?: number;
     heartbeatIntervalMs?: number;
     heartbeatTimeoutMs?: number;
     workerReadyTimeoutMs?: number;
@@ -58,6 +71,7 @@ interface QueuedRun {
     initialContext?: Record<string, unknown>;
     waitResolver?: (run: WorkflowRunInfo) => void;
     waitTimer?: ReturnType<typeof setTimeout>;
+    ready?: boolean;
 }
 
 interface ActiveRun {
@@ -80,10 +94,12 @@ interface ActiveRun {
     resultReceived: boolean;
     terminating: boolean;
     finalized: boolean;
+    finalizePromise?: Promise<void>;
     ready: boolean;
     readyResolver?: (ok: boolean) => void;
     initError?: string;
     heldPermits: Map<string, string>;
+    rateRequests: Map<string, AbortController>;
     durationTimer?: ReturnType<typeof setTimeout>;
     cancelTimer?: ReturnType<typeof setTimeout>;
 }
@@ -92,6 +108,14 @@ interface PermitWaiter {
     active: ActiveRun;
     requestId: string;
     key: string;
+}
+
+interface FinalizeOutcome {
+    status: 'succeeded' | 'failed' | 'cancelled' | 'waiting_approval' | 'interrupted';
+    error?: string;
+    eventType?: string;
+    eventData?: Record<string, unknown>;
+    runStatus?: WorkflowRunInfo['status'];
 }
 
 function concurrencyKeyFor(request: WorkflowRunRequest, workflowName: string): string {
@@ -121,7 +145,11 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
     private readonly maxConcurrentRunsPerWorkflow: number;
     private readonly maxRunDurationMs: number;
     private readonly maxStoredRuns: number;
+    private readonly maxTokens: number;
+    private readonly admission: WorkflowQueueAdmission;
     private readonly agentConcurrencyPerProvider: number;
+    private readonly rateLimiter: ProviderRequestRateLimiter;
+    private readonly requestRateEnabled: boolean;
     private readonly heartbeatIntervalMs: number;
     private readonly heartbeatTimeoutMs: number;
     private readonly workerReadyTimeoutMs: number;
@@ -133,6 +161,9 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
     private readonly active = new Map<string, ActiveRun>();
     private readonly sessions = new Map<string, WorkflowRunSession>();
     private readonly reconciledRoots = new Set<string>();
+    private readonly reconcilingRoots = new Map<string, Promise<void>>();
+    private readonly mutations = new AsyncKeyedLock();
+    private readonly volatileInputs = new Map<string, Record<string, unknown>>();
     private readonly permitActive = new Map<string, number>();
     private readonly permitWaiters = new Map<string, PermitWaiter[]>();
     private readonly monitorTimer: ReturnType<typeof setInterval>;
@@ -152,10 +183,18 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         );
         this.maxRunDurationMs = Math.max(1000, options.maxRunDurationMs ?? globalConfig.workflow.maxRunDurationMs);
         this.maxStoredRuns = Math.max(1, options.maxStoredRuns ?? globalConfig.workflow.maxStoredRuns);
+        this.maxTokens = Math.max(0, options.maxTokens ?? globalConfig.workflow.maxTokens);
+        this.admission = new WorkflowQueueAdmission(this.maxQueueSize, () => this.queue.length);
         this.agentConcurrencyPerProvider = Math.max(
             1,
             options.agentConcurrencyPerProvider ?? globalConfig.workflow.agentConcurrencyPerProvider,
         );
+        const requestsPerMinute = options.agentRequestsPerMinute ?? globalConfig.workflow.agentRequestsPerMinute;
+        this.rateLimiter = new ProviderRequestRateLimiter(
+            requestsPerMinute,
+            options.agentRequestBurst ?? globalConfig.workflow.agentRequestBurst,
+        );
+        this.requestRateEnabled = requestsPerMinute > 0;
         this.heartbeatIntervalMs = Math.max(500, options.heartbeatIntervalMs ?? globalConfig.workflow.heartbeatIntervalMs);
         this.heartbeatTimeoutMs = Math.max(1000, options.heartbeatTimeoutMs ?? globalConfig.workflow.heartbeatTimeoutMs);
         this.workerReadyTimeoutMs = Math.max(1000, options.workerReadyTimeoutMs ?? globalConfig.workflow.workerReadyTimeoutMs);
@@ -178,11 +217,21 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         if (this.closed) {
             return { ok: false, error: 'WORKFLOW_ENGINE_CLOSED' };
         }
-        if (this.queue.length >= this.maxQueueSize) {
+        const releaseAdmission = this.admission.reserve();
+        if (!releaseAdmission) {
             return { ok: false, error: 'WORKFLOW_QUEUE_FULL' };
         }
+        try {
+            return await this.startAdmittedRun(request, releaseAdmission);
+        } finally {
+            releaseAdmission();
+        }
+    }
 
+    private async startAdmittedRun(request: WorkflowRunRequest, releaseAdmission: () => void): Promise<WorkflowRunStartResult> {
         await this.reconcile(request.root);
+        if (this.closed) return { ok: false, error: 'WORKFLOW_ENGINE_CLOSED' };
+        if (this.queue.length >= this.maxQueueSize) return { ok: false, error: 'WORKFLOW_QUEUE_FULL' };
         const definition = await new WorkflowRegistry(request.root).loadDefinition(request.path || request.name);
         if (!definition) {
             return { ok: false, error: `Workflow not found: ${request.path || request.name}` };
@@ -203,6 +252,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
 
         const store = new WorkflowRunStore(request.root);
         const runId = store.newRunId();
+        const storedInputs = sanitizeForStore(inputs, globalConfig.workflow.maxStepOutputChars) as Record<string, unknown>;
         const snapshot: WorkflowRunInfo = {
             schemaVersion: 1,
             runId,
@@ -215,16 +265,36 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             },
             workflowName: definition.summary.name,
             workflowPath: definition.summary.path,
+            workflowDefinitionHash: workflowDefinitionHash(definition.yaml),
             userId: request.userId,
             root: request.root,
             status: 'queued',
-            inputs: sanitizeForStore(inputs, globalConfig.workflow.maxStepOutputChars) as Record<string, unknown>,
+            inputs: storedInputs,
+            resumeInputsRequired: !isReplayValuePreserved(inputs, storedInputs),
+            trigger: request.trigger,
+            execution: {
+                provider: request.provider,
+                model: request.model,
+                reasoningEffort: request.reasoningEffort,
+                locale: request.locale,
+                concurrencyGroup: request.concurrencyGroup,
+            },
             createdAt: Date.now(),
             steps: buildInitialSteps(definition.steps),
             lastSeq: 0,
         };
 
         await store.create(snapshot);
+        if (this.closed) {
+            snapshot.status = 'interrupted';
+            snapshot.finishedAt = Date.now();
+            snapshot.error = '引擎已关闭，无法启动工作流';
+            await store.save(snapshot);
+            return { ok: false, error: 'WORKFLOW_ENGINE_CLOSED' };
+        }
+        if (snapshot.resumeInputsRequired) {
+            this.volatileInputs.set(runId, structuredClone(inputs));
+        }
         const session = new WorkflowRunSession(
             store,
             snapshot,
@@ -254,15 +324,14 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                 item.waitResolver = undefined;
                 item.waitTimer = undefined;
                 resolve?.({ ...snapshot });
-            }, timeoutMs);
+            }, clampTimerDelay(timeoutMs));
         }
 
-        this.queue.push(item);
-        await session.emit('run.queued', {
+        await this.enqueue(item, 'run.queued', {
             workflow: definition.summary.name,
-            position: this.queue.length - 1,
-        });
-        this.pump();
+            position: this.queue.length,
+            trigger: snapshot.trigger,
+        }, releaseAdmission);
 
         if (waitPromise) {
             const run = await waitPromise;
@@ -271,7 +340,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         return {
             ok: true,
             runId,
-            status: 'queued',
+            status: snapshot.status,
             position: Math.max(0, this.queue.findIndex((entry) => entry.snapshot.runId === runId)),
         };
     }
@@ -295,6 +364,10 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
     }
 
     public async cancelRun(request: WorkflowRunCancelRequest): Promise<boolean> {
+        return this.mutations.run(request.runId, () => this.cancelRunLocked(request));
+    }
+
+    private async cancelRunLocked(request: WorkflowRunCancelRequest): Promise<boolean> {
         const queuedIndex = this.queue.findIndex((item) => item.snapshot.runId === request.runId);
         if (queuedIndex >= 0) {
             const [item] = this.queue.splice(queuedIndex, 1);
@@ -303,6 +376,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                 return false;
             }
             this.sessions.delete(request.runId);
+            this.volatileInputs.delete(request.runId);
             await this.markCancelled(item.session, '运行在排队阶段被取消');
             this.settleWait(item);
             return true;
@@ -311,9 +385,13 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         const active = this.active.get(request.runId);
         if (active) {
             if (active.userId !== request.userId || !samePath(active.root, request.root)) return false;
-            if (active.resultReceived || active.finalized) return false;
-            this.requestCancel(active, 'user');
-            return true;
+            if (active.resultReceived || active.finalized) {
+                await active.messageChain;
+                await active.finalizePromise;
+            } else {
+                this.requestCancel(active, 'user');
+                return true;
+            }
         }
 
         const store = new WorkflowRunStore(request.root);
@@ -326,6 +404,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         run.currentTask = undefined;
         run.worker = undefined;
         run.error = 'Workflow cancelled by user';
+        this.volatileInputs.delete(request.runId);
         await store.save(run);
         const cancelSession = new WorkflowRunSession(
             store,
@@ -338,7 +417,24 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
     }
 
     public async resumeRun(request: WorkflowRunResumeRequest): Promise<boolean> {
+        return this.mutations.run(request.runId, async () => {
+            if (resolveApprovalDecision(request.decision) === false) return this.resumeStoredRun(request);
+            const releaseAdmission = this.admission.reserve();
+            if (!releaseAdmission) return false;
+            try {
+                return await this.resumeStoredRun(request, releaseAdmission);
+            } finally {
+                releaseAdmission();
+            }
+        });
+    }
+
+    private async resumeStoredRun(request: WorkflowRunResumeRequest, releaseAdmission?: () => void): Promise<boolean> {
         if (this.closed) return false;
+        const active = this.active.get(request.runId);
+        if (active?.session.snapshot.status === 'waiting_approval') {
+            await active.messageChain;
+        }
         const store = new WorkflowRunStore(request.root);
         const run = await store.read(request.runId);
         if (!run || run.userId !== request.userId || !samePath(run.root, request.root)) return false;
@@ -347,6 +443,11 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         const previousStatus = run.status;
         const decision = resolveApprovalDecision(request.decision);
         if (previousStatus === 'waiting_approval' && decision === undefined) return false;
+        if (previousStatus === 'waiting_approval' && decision && run.checkpoint?.resumeError) {
+            run.error = run.checkpoint.resumeError;
+            await store.save(run);
+            return false;
+        }
 
         const approvalStep = run.steps.find((step) => step.path === run.approval?.stepPath);
         if (decision === false) {
@@ -361,6 +462,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             run.currentTask = undefined;
             run.worker = undefined;
             run.error = '审批被拒绝';
+            this.volatileInputs.delete(request.runId);
             await store.save(run);
             const session = new WorkflowRunSession(
                 store,
@@ -372,11 +474,55 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             return true;
         }
 
+        const suppliedInputs = request.inputs ?? this.volatileInputs.get(run.runId);
+        if (run.resumeInputsRequired && !suppliedInputs) {
+            run.error = '运行输入已脱敏，恢复前请重新提供原始输入';
+            await store.save(run);
+            return false;
+        }
+
+        const definition = await new WorkflowRegistry(request.root).loadDefinition(run.workflowPath || run.workflow.name);
+        if (!definition || !definition.validation.ok) {
+            run.error = '工作流定义在恢复时已不可用或校验失败';
+            await store.save(run);
+            return false;
+        }
+        const definitionError = await getResumeDefinitionError(request.root, run, definition);
+        if (definitionError) {
+            run.error = definitionError;
+            await store.save(run);
+            return false;
+        }
+        const prepared = prepareWorkflowInputs(definition, suppliedInputs ?? run.inputs);
+        if (!prepared.ok) {
+            run.error = prepared.error;
+            await store.save(run);
+            return false;
+        }
+        if (request.inputs && !areResumeInputsCompatible(
+            prepared.inputs,
+            run.inputs,
+            this.volatileInputs.get(run.runId),
+            globalConfig.workflow.maxStepOutputChars,
+        )) {
+            run.error = '恢复输入与原始运行输入不一致';
+            await store.save(run);
+            return false;
+        }
+        run.inputs = sanitizeForStore(prepared.inputs, globalConfig.workflow.maxStepOutputChars) as Record<string, unknown>;
+        run.resumeInputsRequired = !isReplayValuePreserved(prepared.inputs, run.inputs);
+        if (run.resumeInputsRequired) this.volatileInputs.set(run.runId, structuredClone(prepared.inputs));
+        else this.volatileInputs.delete(run.runId);
+
         if (approvalStep) {
             approvalStep.status = 'succeeded';
             approvalStep.finishedAt = Date.now();
             approvalStep.output = { approved: true, decision: request.decision };
             approvalStep.outputPreview = 'approved';
+            if (run.checkpoint?.replayFromStep
+                && !run.checkpoint.completedPaths.includes(approvalStep.path)) {
+                run.checkpoint.completedPaths.push(approvalStep.path);
+            }
         }
 
         run.status = 'queued';
@@ -387,15 +533,6 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         run.finishedAt = undefined;
         await store.save(run);
 
-        const definition = await new WorkflowRegistry(request.root).loadDefinition(run.workflowPath || run.workflow.name);
-        if (!definition || !definition.validation.ok) {
-            run.status = 'failed';
-            run.finishedAt = Date.now();
-            run.error = '工作流定义在恢复时已不可用或校验失败';
-            await store.save(run);
-            return false;
-        }
-
         const session = new WorkflowRunSession(
             store,
             run,
@@ -403,24 +540,23 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             globalConfig.workflow.maxStepOutputChars,
         );
         this.sessions.set(run.runId, session);
-        await session.emit('run.resumed', { decision: request.decision, previousStatus });
-
-        this.queue.push({
+        const item: QueuedRun = {
             request: {
                 userId: run.userId,
                 root: run.root,
                 name: run.workflow.name,
                 path: run.workflowPath || run.workflow.path,
-                inputs: run.inputs,
+                ...run.execution,
+                inputs: prepared.inputs,
             },
             definition,
             snapshot: run,
             session,
-            concurrencyKey: `workflow:${run.workflow.name}`,
+            concurrencyKey: concurrencyKeyFor({ ...run.execution, userId: run.userId, root: run.root, name: run.workflow.name }, run.workflow.name),
             startIndex: run.checkpoint?.nextStepIndex ?? 0,
             initialContext: run.checkpoint?.context,
-        });
-        this.pump();
+        };
+        await this.enqueue(item, 'run.resumed', { decision: request.decision, previousStatus }, releaseAdmission);
         return true;
     }
 
@@ -491,9 +627,14 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
 
         const running = Array.from(this.active.values());
         await Promise.all(running.map(async (item) => {
-            if (item.finalized) return;
+            if (item.finalized) {
+                await item.finalizePromise;
+                return;
+            }
             item.terminating = true;
             this.clearTimers(item);
+            item.offMessage?.();
+            item.offExit?.();
             try {
                 item.handle?.postMessage({
                     type: 'run.cancel',
@@ -503,12 +644,15 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             } catch {
                 // Worker 可能已退出
             }
+            await item.messageChain;
             await this.finalizeActive(item, {
                 status: 'interrupted',
                 error: '引擎关闭，运行被中断',
                 eventType: 'run.interrupted',
             });
         }));
+        this.volatileInputs.clear();
+        this.rateLimiter.shutdown();
 
         try {
             await this.spawner.shutdown?.();
@@ -520,8 +664,19 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
     /** 首次访问工作区时，把上次进程遗留的 running 标记 interrupted，并重新入队 queued。 */
     public async reconcile(root: string): Promise<void> {
         if (this.reconciledRoots.has(root)) return;
-        this.reconciledRoots.add(root);
+        const pending = this.reconcilingRoots.get(root);
+        if (pending) return pending;
+        const operation = this.reconcileRoot(root);
+        this.reconcilingRoots.set(root, operation);
+        try {
+            await operation;
+            this.reconciledRoots.add(root);
+        } finally {
+            this.reconcilingRoots.delete(root);
+        }
+    }
 
+    private async reconcileRoot(root: string): Promise<void> {
         const store = new WorkflowRunStore(root);
         const runs = await store.list({ root });
         for (const run of runs) {
@@ -545,6 +700,15 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
 
             if (run.status !== 'queued') continue;
             if (this.active.has(run.runId) || this.queue.some((item) => item.snapshot.runId === run.runId)) continue;
+            if (run.resumeInputsRequired && !this.volatileInputs.has(run.runId)) {
+                run.status = 'interrupted';
+                run.finishedAt = Date.now();
+                run.error = '运行输入已脱敏，恢复前请重新提供原始输入';
+                await store.save(run);
+                const session = new WorkflowRunSession(store, run, (event) => this.eventBus.publish(event), globalConfig.workflow.maxStepOutputChars);
+                await session.emit('run.interrupted', { error: run.error });
+                continue;
+            }
 
             const definition = await new WorkflowRegistry(root).loadDefinition(run.workflowPath || run.workflow.name);
             if (!definition || !definition.validation.ok) {
@@ -561,23 +725,23 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                 (event) => this.eventBus.publish(event),
                 globalConfig.workflow.maxStepOutputChars,
             );
-            this.sessions.set(run.runId, session);
-            this.queue.push({
+            const item: QueuedRun = {
                 request: {
                     userId: run.userId,
                     root: run.root,
                     name: run.workflow.name,
                     path: run.workflowPath || run.workflow.path,
-                    inputs: run.inputs,
+                    ...run.execution,
+                    inputs: this.volatileInputs.get(run.runId) ?? run.inputs,
                 },
                 definition,
                 snapshot: run,
                 session,
-                concurrencyKey: `workflow:${run.workflow.name}`,
+                concurrencyKey: concurrencyKeyFor({ ...run.execution, userId: run.userId, root: run.root, name: run.workflow.name }, run.workflow.name),
                 startIndex: run.checkpoint?.nextStepIndex ?? 0,
                 initialContext: run.checkpoint?.context,
-            });
-            await session.emit('run.requeued', {});
+            };
+            await this.enqueue(item, 'run.requeued', {});
         }
         this.pump();
     }
@@ -586,6 +750,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         if (this.closed) return;
         while (this.active.size < this.maxWorkers) {
             const index = this.queue.findIndex((item) => {
+                if (item.ready === false) return false;
                 const runningForKey = Array.from(this.active.values())
                     .filter((active) => active.concurrencyKey === item.concurrencyKey)
                     .length;
@@ -593,7 +758,55 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             });
             if (index < 0) return;
             const [item] = this.queue.splice(index, 1);
-            void this.startItem(item);
+            void this.startItem(item).catch(async (error: unknown) => {
+                const active = this.active.get(item.snapshot.runId);
+                if (!active) {
+                    console.error(`[WorkflowEngine] Failed to start ${item.snapshot.runId}:`, error);
+                    return;
+                }
+                await this.finalizeActive(active, {
+                    status: 'interrupted',
+                    error: `工作流启动失败: ${error instanceof Error ? error.message : String(error)}`,
+                    eventType: 'run.interrupted',
+                });
+            });
+        }
+    }
+
+    private async enqueue(
+        item: QueuedRun,
+        eventType: string,
+        data: Record<string, unknown>,
+        releaseAdmission?: () => void,
+    ): Promise<void> {
+        item.ready = false;
+        this.sessions.set(item.snapshot.runId, item.session);
+        this.queue.push(item);
+        releaseAdmission?.();
+        try {
+            await item.session.emit(eventType, data);
+        } catch (error) {
+            const index = this.queue.indexOf(item);
+            if (index >= 0) {
+                this.queue.splice(index, 1);
+                this.sessions.delete(item.snapshot.runId);
+                try {
+                    await item.session.patch({
+                        status: 'interrupted',
+                        finishedAt: Date.now(),
+                        error: `工作流入队持久化失败: ${error instanceof Error ? error.message : String(error)}`,
+                    });
+                } catch (persistError) {
+                    console.error(`[WorkflowEngine] Failed to persist interrupted run ${item.snapshot.runId}:`, persistError);
+                }
+                this.settleWait(item);
+                this.pump();
+            }
+            throw error;
+        }
+        if (this.queue.includes(item)) {
+            item.ready = true;
+            this.pump();
         }
     }
 
@@ -616,6 +829,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             finalized: false,
             ready: false,
             heldPermits: new Map(),
+            rateRequests: new Map(),
         };
         this.active.set(snapshot.runId, active);
         this.sessions.set(snapshot.runId, session);
@@ -653,7 +867,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             if (active.finalized || active.resultReceived) return;
             active.timedOut = true;
             this.requestCancel(active, 'timeout');
-        }, this.maxRunDurationMs);
+        }, clampTimerDelay(this.maxRunDurationMs));
 
         await session.patch({
             status: 'running',
@@ -705,6 +919,8 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                     reasoningEffort: item.request.reasoningEffort,
                     locale: item.request.locale,
                     heartbeatIntervalMs: this.heartbeatIntervalMs,
+                    requestRateEnabled: this.requestRateEnabled,
+                    maxTokens: this.maxTokens,
                 },
                 definition: {
                     summary: item.definition.summary,
@@ -712,8 +928,12 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                 },
                 inputs: item.request.inputs || {},
                 steps: snapshot.steps,
+                usage: snapshot.usage,
                 startIndex: item.startIndex,
                 initialContext: item.initialContext,
+                replayCompletedPaths: snapshot.checkpoint?.replayFromStep
+                    ? snapshot.checkpoint.completedPaths
+                    : undefined,
             });
         } catch (error: any) {
             await this.finalizeActive(active, {
@@ -777,8 +997,13 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         active.messageChain = active.messageChain
             .catch(() => undefined)
             .then(() => this.handleWorkerMessage(active, message))
-            .catch((error) => {
-                console.warn(`[WorkflowEngine] Worker message handling failed for ${active.runId}:`, error);
+            .catch(async (error: unknown) => {
+                console.error(`[WorkflowEngine] Worker message handling failed for ${active.runId}:`, error);
+                await this.finalizeActive(active, {
+                    status: 'interrupted',
+                    error: `工作流状态持久化失败: ${error instanceof Error ? error.message : String(error)}`,
+                    eventType: 'run.interrupted',
+                });
             });
     }
 
@@ -818,6 +1043,9 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                             globalConfig.workflow.maxStepOutputChars,
                         ) as Record<string, unknown>,
                         completedPaths: message.checkpoint.completedPaths,
+                        replayFromStep: message.checkpoint.replayFromStep,
+                        resumeError: message.checkpoint.resumeError,
+                        definitionHashes: message.checkpoint.definitionHashes,
                     },
                 });
                 return;
@@ -827,6 +1055,12 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             case 'run.permit.release':
                 this.handlePermitRelease(active, message);
                 return;
+            case 'run.rate':
+                this.handleRateRequest(active, message);
+                return;
+            case 'run.rate.cancel':
+                this.handleRateCancel(active, message);
+                return;
             case 'run.result':
                 await this.handleResult(active, message);
                 return;
@@ -835,9 +1069,40 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         }
     }
 
+    private handleRateRequest(active: ActiveRun, message: WorkflowWorkerRateRequestMessage): void {
+        if (active.finalized || active.terminating || active.cancelRequested
+            || active.rateRequests.has(message.requestId)) return;
+        const controller = new AbortController();
+        active.rateRequests.set(message.requestId, controller);
+        const key = `${message.provider.toLowerCase()}:${message.model}`;
+        void this.rateLimiter.acquire(key, controller.signal).then(() => {
+            active.rateRequests.delete(message.requestId);
+            if (!active.finalized && !active.terminating && !active.cancelRequested && !controller.signal.aborted) {
+                active.handle?.postMessage({ type: 'run.rate.granted', requestId: message.requestId });
+            }
+        }).catch(async (error: unknown) => {
+            active.rateRequests.delete(message.requestId);
+            if (controller.signal.aborted || active.finalized) return;
+            console.error(`[WorkflowEngine] Failed to grant rate request for ${active.runId}:`, error);
+            await this.finalizeActive(active, {
+                status: 'interrupted',
+                error: `模型请求限速失败: ${error instanceof Error ? error.message : String(error)}`,
+                eventType: 'run.interrupted',
+            });
+        });
+    }
+
+    private handleRateCancel(active: ActiveRun, message: WorkflowWorkerRateCancelMessage): void {
+        const controller = active.rateRequests.get(message.requestId);
+        active.rateRequests.delete(message.requestId);
+        controller?.abort();
+    }
+
     private handlePermitRequest(active: ActiveRun, message: WorkflowWorkerPermitMessage): void {
         if (active.finalized || !active.handle) return;
         if (active.heldPermits.has(message.requestId)) return;
+        if (Array.from(this.permitWaiters.values()).some((waiters) =>
+            waiters.some((waiter) => waiter.active === active && waiter.requestId === message.requestId))) return;
         const key = `${(message.provider || 'default').toLowerCase()}:${message.model || 'default'}`;
         const current = this.permitActive.get(key) || 0;
         if (current < this.agentConcurrencyPerProvider) {
@@ -862,7 +1127,8 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
             return;
         }
         for (const [waiterKey, waiters] of this.permitWaiters) {
-            const index = waiters.findIndex((waiter) => waiter.requestId === message.requestId);
+            const index = waiters.findIndex((waiter) =>
+                waiter.active === active && waiter.requestId === message.requestId);
             if (index >= 0) {
                 waiters.splice(index, 1);
                 if (waiters.length === 0) this.permitWaiters.delete(waiterKey);
@@ -877,7 +1143,8 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         while ((this.permitActive.get(key) || 0) < this.agentConcurrencyPerProvider) {
             const waiter = waiters.shift();
             if (!waiter) break;
-            if (waiter.active.finalized || !this.active.has(waiter.active.runId)) continue;
+            if (waiter.active.finalized || waiter.active.cancelRequested || waiter.active.terminating
+                || waiter.active.resultReceived || !this.active.has(waiter.active.runId)) continue;
             if (waiter.active.heldPermits.has(waiter.requestId)) continue;
             this.permitActive.set(key, (this.permitActive.get(key) || 0) + 1);
             waiter.active.heldPermits.set(waiter.requestId, key);
@@ -927,17 +1194,14 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
 
         let status = message.status;
         let error = message.error;
-        if (active.cancelRequested && status === 'succeeded') {
+        if (active.cancelRequested && !active.timedOut) {
             status = 'cancelled';
             error = 'Workflow cancelled by user';
         }
         if (active.timedOut && status !== 'waiting_approval') {
+            // 审批已就绪时保留等待态，避免超时覆盖掉可恢复的 checkpoint
             status = 'failed';
             error = `Workflow 运行超过最大时长 ${this.maxRunDurationMs}ms`;
-        }
-        if (active.cancelRequested && status === 'failed' && !active.timedOut) {
-            status = 'cancelled';
-            error = error || 'Workflow cancelled by user';
         }
 
         const finishedAt = Date.now();
@@ -970,10 +1234,18 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                                 globalConfig.workflow.maxStepOutputChars,
                             ) as Record<string, unknown>,
                             completedPaths: message.checkpoint.completedPaths,
+                            replayFromStep: message.checkpoint.replayFromStep,
+                            resumeError: message.checkpoint.resumeError,
+                            definitionHashes: message.checkpoint.definitionHashes,
                         }
                         : active.session.snapshot.checkpoint,
                     finishedAt: undefined,
                     error: undefined,
+                });
+                await active.session.emit('run.waiting_approval', {
+                    path: approval?.stepPath,
+                    message: approval?.message,
+                    risk: approval?.risk,
                 });
             } else if (status === 'cancelled') {
                 await active.session.patch({
@@ -999,13 +1271,22 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
                                 globalConfig.workflow.maxStepOutputChars,
                             ) as Record<string, unknown>,
                             completedPaths: message.checkpoint.completedPaths,
+                            replayFromStep: message.checkpoint.replayFromStep,
+                            resumeError: message.checkpoint.resumeError,
+                            definitionHashes: message.checkpoint.definitionHashes,
                         }
                         : active.session.snapshot.checkpoint,
                 });
                 await active.session.emit('run.failed', { error: safeError || 'Workflow failed' });
             }
         } catch (handlingError) {
-            console.warn(`[WorkflowEngine] Failed to finalize worker result for ${active.runId}:`, handlingError);
+            console.error(`[WorkflowEngine] Failed to finalize worker result for ${active.runId}:`, handlingError);
+            active.resultReceived = false;
+            await this.finalizeActive(active, {
+                status: 'interrupted',
+                error: '工作流结果持久化失败，请检查存储',
+                eventType: 'run.interrupted',
+            });
         } finally {
             await this.finishActive(active);
         }
@@ -1033,7 +1314,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         const tail = active.handle?.getLogTail?.();
         const suffix = tail ? `\n${tail.slice(-2000)}` : '';
         if (active.cancelRequested) {
-            void this.finalizeActive(active, {
+            await this.finalizeActive(active, {
                 status: 'cancelled',
                 error: active.timedOut
                     ? `Workflow 运行超过最大时长 ${this.maxRunDurationMs}ms`
@@ -1048,7 +1329,7 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         const reason = this.closed
             ? '引擎关闭，运行被中断'
             : `Workflow Worker 异常退出 (code=${String(code)})${suffix}`;
-        void this.finalizeActive(active, {
+        await this.finalizeActive(active, {
             status: 'interrupted',
             error: reason,
             eventType: 'run.interrupted',
@@ -1101,41 +1382,45 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         }
     }
 
-    private async finalizeActive(
-        active: ActiveRun,
-        outcome: {
-            status: 'succeeded' | 'failed' | 'cancelled' | 'waiting_approval' | 'interrupted';
-            error?: string;
-            eventType?: string;
-            eventData?: Record<string, unknown>;
-            runStatus?: WorkflowRunInfo['status'];
-        },
-    ): Promise<void> {
-        if (active.finalized) return;
+    private finalizeActive(active: ActiveRun, outcome: FinalizeOutcome): Promise<void> {
+        if (active.finalizePromise) return active.finalizePromise;
         active.finalized = true;
+        active.finalizePromise = Promise.resolve().then(() => this.finalizeActiveOnce(active, outcome));
+        return active.finalizePromise;
+    }
+
+    private async finalizeActiveOnce(active: ActiveRun, outcome: FinalizeOutcome): Promise<void> {
         this.clearTimers(active);
         this.releaseRunPermits(active);
+        for (const controller of active.rateRequests.values()) controller.abort();
+        active.rateRequests.clear();
         active.offMessage?.();
         active.offExit?.();
-        if (!active.resultReceived) {
-            active.resultReceived = true;
-            const status = outcome.runStatus || outcome.status;
-            await active.session.patch({
-                status,
-                finishedAt: Date.now(),
-                currentTask: undefined,
-                approval: undefined,
-                error: outcome.error ? String(sanitizeForStore(outcome.error, 4000)) : undefined,
-                worker: outcome.status === 'interrupted'
-                    ? active.session.snapshot.worker
-                    : undefined,
-            });
-            if (outcome.eventType) {
-                await active.session.emit(outcome.eventType, {
-                    ...(outcome.eventData || {}),
+        try {
+            if (!active.resultReceived) {
+                active.resultReceived = true;
+                const status = outcome.runStatus || outcome.status;
+                await active.session.patch({
+                    status,
+                    finishedAt: Date.now(),
+                    currentTask: undefined,
+                    approval: undefined,
                     error: outcome.error ? String(sanitizeForStore(outcome.error, 4000)) : undefined,
+                    worker: outcome.status === 'interrupted'
+                        ? active.session.snapshot.worker
+                        : undefined,
                 });
+                if (outcome.eventType) {
+                    await active.session.emit(outcome.eventType, {
+                        ...(outcome.eventData || {}),
+                        error: outcome.error ? String(sanitizeForStore(outcome.error, 4000)) : undefined,
+                    });
+                }
             }
+        } catch (error) {
+            active.session.snapshot.status = 'interrupted';
+            active.session.snapshot.error = '工作流状态持久化失败，请检查存储';
+            console.error(`[WorkflowEngine] Failed to persist interrupted run ${active.runId}:`, error);
         }
         try {
             active.terminating = true;
@@ -1158,6 +1443,10 @@ export class ProcessWorkerWorkflowEngine implements WorkflowEngine {
         }
         this.active.delete(active.runId);
         this.sessions.delete(active.runId);
+        if (active.session.snapshot.status !== 'waiting_approval'
+            && active.session.snapshot.status !== 'interrupted') {
+            this.volatileInputs.delete(active.runId);
+        }
         void new WorkflowRunStore(active.root).prune(this.maxStoredRuns).catch((error) => {
             console.warn('[WorkflowEngine] Failed to prune workflow runs:', error);
         });

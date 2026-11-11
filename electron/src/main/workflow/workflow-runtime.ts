@@ -74,6 +74,7 @@ export class WorkflowRuntime {
             this.unsubscribeWorkspace = WorkspaceRegistry.getInstance().onWorkspaceChange(
                 async ({ userId, previousRoot }) => {
                     // 工作区重置/切换后，旧工作区的 run 不应继续后台执行
+                    await this.service.deactivateTriggers(userId, previousRoot);
                     await this.service.cancelUserRuns(userId, previousRoot);
                 },
             );

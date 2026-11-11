@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
     AlertCircle,
     CheckCircle2,
@@ -6,6 +7,7 @@ import {
     ChevronRight,
     CircleStop,
     Loader2,
+    Network,
     Play,
     RefreshCw,
     RotateCcw,
@@ -22,6 +24,8 @@ import {
     type WorkflowRunStatus,
     type WorkflowSummary,
 } from '@/services/electron-bridge';
+
+const Mermaid = lazy(() => import('@/components/Mermaid').then((module) => ({ default: module.Mermaid })));
 
 const STATUS_STYLE: Record<WorkflowRunStatus, string> = {
     queued: 'text-white/50 border-white/15 bg-white/[0.03]',
@@ -63,27 +67,34 @@ export const WorkflowPanel: React.FC = () => {
     const { workspaceRoot } = useAgentContext();
     const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
     const [runs, setRuns] = useState<WorkflowRunInfo[]>([]);
-    const [selectedName, setSelectedName] = useState<string | null>(null);
+    const [selectedPath, setSelectedPath] = useState<string | null>(null);
     const [detail, setDetail] = useState<WorkflowDetail | null>(null);
     const [inputs, setInputs] = useState<Record<string, string>>({});
     const [expandedRun, setExpandedRun] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [graphOpen, setGraphOpen] = useState(false);
+    const [resumeInputs, setResumeInputs] = useState<Record<string, string>>({});
     const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const selectionVersion = useRef(0);
 
     const selected = useMemo(
-        () => workflows.find((workflow) => workflow.name === selectedName) || null,
-        [workflows, selectedName],
+        () => workflows.find((workflow) => workflow.path === selectedPath) || null,
+        [workflows, selectedPath],
     );
 
     const loadRuns = useCallback(async () => {
         if (!workspaceRoot) return;
-        const result = await workflowBridge.listRuns({ userId: USER_ID, root: workspaceRoot });
-        if (result.success) {
-            setRuns(result.runs || []);
-        } else {
-            setError(result.error || '加载运行记录失败');
+        try {
+            const result = await workflowBridge.listRuns({ userId: USER_ID, root: workspaceRoot });
+            if (result.success) {
+                setRuns(result.runs || []);
+            } else {
+                setError(result.error || '加载运行记录失败');
+            }
+        } catch (caught) {
+            setError(caught instanceof Error ? caught.message : String(caught));
         }
     }, [workspaceRoot]);
 
@@ -91,7 +102,7 @@ export const WorkflowPanel: React.FC = () => {
         if (!workspaceRoot) {
             setWorkflows([]);
             setRuns([]);
-            setSelectedName(null);
+            setSelectedPath(null);
             setDetail(null);
             return;
         }
@@ -105,6 +116,7 @@ export const WorkflowPanel: React.FC = () => {
             if (list.success) setWorkflows(list.workflows || []);
             else setError(list.error || '加载工作流失败');
             if (runList.success) setRuns(runList.runs || []);
+            else setError(runList.error || '加载运行记录失败');
         } catch (caught: any) {
             setError(caught?.message || String(caught));
         } finally {
@@ -113,9 +125,12 @@ export const WorkflowPanel: React.FC = () => {
     }, [workspaceRoot]);
 
     useEffect(() => {
-        setSelectedName(null);
+        selectionVersion.current++;
+        setSelectedPath(null);
         setDetail(null);
         setInputs({});
+        setResumeInputs({});
+        setGraphOpen(false);
         setExpandedRun(null);
     }, [workspaceRoot]);
 
@@ -137,13 +152,25 @@ export const WorkflowPanel: React.FC = () => {
         if (refreshTimer.current) clearTimeout(refreshTimer.current);
     }, []);
 
+    useEffect(() => {
+        if (!graphOpen) return;
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setGraphOpen(false);
+        };
+        window.addEventListener('keydown', closeOnEscape);
+        return () => window.removeEventListener('keydown', closeOnEscape);
+    }, [graphOpen]);
+
     const selectWorkflow = useCallback(async (workflow: WorkflowSummary) => {
         if (!workspaceRoot) return;
-        setSelectedName(workflow.name);
+        const version = ++selectionVersion.current;
+        setSelectedPath(workflow.path);
         setDetail(null);
+        setGraphOpen(false);
         setError(null);
         try {
-            const result = await workflowBridge.get({ userId: USER_ID, root: workspaceRoot, name: workflow.name });
+            const result = await workflowBridge.get({ userId: USER_ID, root: workspaceRoot, name: workflow.path });
+            if (version !== selectionVersion.current) return;
             if (result.success && result.workflow) {
                 setDetail(result.workflow);
                 const nextInputs: Record<string, string> = {};
@@ -157,8 +184,10 @@ export const WorkflowPanel: React.FC = () => {
             } else {
                 setError(result.error || '读取工作流详情失败');
             }
-        } catch (caught: any) {
-            setError(caught?.message || String(caught));
+        } catch (caught) {
+            if (version === selectionVersion.current) {
+                setError(caught instanceof Error ? caught.message : String(caught));
+            }
         }
     }, [workspaceRoot]);
 
@@ -182,7 +211,7 @@ export const WorkflowPanel: React.FC = () => {
             const result = await workflowBridge.run({
                 userId: USER_ID,
                 root: workspaceRoot,
-                name: selected.name,
+                name: selected.path,
                 inputs: payload,
             });
             if (!result.success) {
@@ -200,23 +229,59 @@ export const WorkflowPanel: React.FC = () => {
 
     const runAction = useCallback(async (run: WorkflowRunInfo, action: 'cancel' | 'approve' | 'reject' | 'resume') => {
         if (!workspaceRoot) return;
+        let replacementInputs: Record<string, unknown> | undefined;
+        const rawInputs = resumeInputs[run.runId]?.trim();
+        if (rawInputs && action !== 'cancel' && action !== 'reject') {
+            try {
+                const parsed: unknown = JSON.parse(rawInputs);
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    throw new Error('重新提供的输入必须是 JSON 对象');
+                }
+                replacementInputs = parsed as Record<string, unknown>;
+            } catch (caught) {
+                setError(caught instanceof Error ? caught.message : '输入 JSON 无效');
+                return;
+            }
+        }
         setBusy(`${action}:${run.runId}`);
         setError(null);
         try {
             if (action === 'cancel') {
                 const result = await workflowBridge.cancel({ userId: USER_ID, root: workspaceRoot, runId: run.runId });
-                if (!result.success) setError(result.error || '取消失败');
+                if (!result.success || !result.cancelled) {
+                    setError(result.error || '当前运行无法取消');
+                    await loadRuns();
+                    return;
+                }
             } else if (action === 'resume') {
-                const result = await workflowBridge.resume({ userId: USER_ID, root: workspaceRoot, runId: run.runId });
-                if (!result.success) setError(result.error || '恢复失败');
+                const result = await workflowBridge.resume({
+                    userId: USER_ID, root: workspaceRoot, runId: run.runId, inputs: replacementInputs,
+                });
+                if (!result.success || !result.resumed) {
+                    setError(result.error || '当前运行无法恢复');
+                    await loadRuns();
+                    return;
+                }
             } else {
                 const result = await workflowBridge.resume({
                     userId: USER_ID,
                     root: workspaceRoot,
                     runId: run.runId,
                     decision: action,
+                    inputs: replacementInputs,
                 });
-                if (!result.success) setError(result.error || '审批失败');
+                if (!result.success || !result.resumed) {
+                    setError(result.error || '审批未被接受');
+                    await loadRuns();
+                    return;
+                }
+            }
+            if (rawInputs) {
+                setResumeInputs((previous) => {
+                    const next = { ...previous };
+                    delete next[run.runId];
+                    return next;
+                });
             }
             await loadRuns();
         } catch (caught: any) {
@@ -224,7 +289,7 @@ export const WorkflowPanel: React.FC = () => {
         } finally {
             setBusy(null);
         }
-    }, [workspaceRoot, loadRuns]);
+    }, [workspaceRoot, loadRuns, resumeInputs]);
 
     if (!workspaceRoot) {
         return (
@@ -275,7 +340,7 @@ export const WorkflowPanel: React.FC = () => {
                                     key={workflow.path}
                                     onClick={() => void selectWorkflow(workflow)}
                                     className={`w-full text-left px-1.5 py-1 rounded-sm flex items-center gap-1.5 transition-colors ${
-                                        selectedName === workflow.name ? 'bg-white/[0.08] text-white' : 'hover:bg-white/[0.04] text-white/60'
+                                        selectedPath === workflow.path ? 'bg-white/[0.08] text-white' : 'hover:bg-white/[0.04] text-white/60'
                                     }`}
                                     title={workflow.path}
                                 >
@@ -294,6 +359,16 @@ export const WorkflowPanel: React.FC = () => {
                             <span className="text-[8px] font-bold text-white truncate">{selected.title || selected.name}</span>
                             <span className="text-[7px] font-mono text-white/25 truncate">{selected.path}</span>
                         </div>
+                        {detail?.graph && (
+                            <button
+                                type="button"
+                                onClick={() => setGraphOpen(true)}
+                                className="mb-1.5 flex items-center gap-1 text-[8px] text-white/55 hover:text-white"
+                                data-testid="workflow-open-graph"
+                            >
+                                <Network size={10} /> 查看流程图
+                            </button>
+                        )}
                         {detail?.validation.issues.length ? (
                             <div className="text-[7px] text-red-300/80 leading-relaxed mb-1">
                                 {detail.validation.issues.slice(0, 3).map((issue, index) => (
@@ -361,6 +436,11 @@ export const WorkflowPanel: React.FC = () => {
                                         >
                                             {expanded ? <ChevronDown size={9} className="text-white/35" /> : <ChevronRight size={9} className="text-white/35" />}
                                             <span className="text-[8px] font-medium text-white/80 truncate">{run.workflowName || run.workflow?.name}</span>
+                                            {run.trigger && (
+                                                <span className="text-[7px] text-sky-300/80" title={run.trigger.id}>
+                                                    {run.trigger.type === 'interval' ? '定时触发' : '文件触发'}
+                                                </span>
+                                            )}
                                             <span className={`ml-auto text-[7px] font-mono px-1 py-[1px] rounded-sm border ${STATUS_STYLE[run.status]}`}>
                                                 {statusLabel(run.status)}
                                             </span>
@@ -374,6 +454,23 @@ export const WorkflowPanel: React.FC = () => {
                                                     <div className="text-[7px] text-amber-300/80 break-all">审批: {run.approval.message}</div>
                                                 )}
                                                 {run.error && <div className="text-[7px] text-red-300/80 break-all">{run.error}</div>}
+                                                {run.resumeInputsRequired
+                                                    && (run.status === 'waiting_approval' || run.status === 'interrupted') && (
+                                                    <details className="text-[8px] text-white/50">
+                                                        <summary className="cursor-pointer hover:text-white">重新提供脱敏输入</summary>
+                                                        <p className="my-1 leading-relaxed">仅在重启后需要；请输入完整 JSON 对象，敏感值不会写入运行记录。</p>
+                                                        <textarea
+                                                            aria-label="重新提供工作流输入"
+                                                            value={resumeInputs[run.runId] ?? ''}
+                                                            onChange={(event) => setResumeInputs((previous) => ({
+                                                                ...previous,
+                                                                [run.runId]: event.target.value,
+                                                            }))}
+                                                            className="w-full min-h-[48px] bg-black border border-white/15 rounded-sm p-1 text-[8px] text-white outline-none focus:border-white/40"
+                                                            placeholder='{"token":"..."}'
+                                                        />
+                                                    </details>
+                                                )}
                                                 {run.usage && (
                                                     <div className="text-[7px] font-mono text-white/30">
                                                         tokens: {run.usage.totalTokens} (in {run.usage.inputTokens} / out {run.usage.outputTokens})
@@ -441,6 +538,42 @@ export const WorkflowPanel: React.FC = () => {
                     )}
                 </div>
             </div>
+            {graphOpen && detail?.graph && createPortal(
+                <div
+                    className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 p-6"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="workflow-graph-title"
+                >
+                    <div className="flex h-[min(80vh,760px)] w-[min(90vw,1100px)] flex-col border border-white/20 bg-[#080808] shadow-2xl">
+                        <div className="flex items-center gap-3 border-b border-white/10 px-4 py-3">
+                            <Network size={16} className="text-white/70" />
+                            <div className="min-w-0">
+                                <h2 id="workflow-graph-title" className="truncate text-xs font-bold tracking-wider text-white">
+                                    {detail.summary.title || detail.summary.name}
+                                </h2>
+                                <p className="mt-1 text-[10px] text-white/40">
+                                    静态结构预览{detail.graph.truncated ? ' · 图已截断（最多 200 个节点）' : ''}
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setGraphOpen(false)}
+                                className="ml-auto p-2 text-white/50 hover:bg-white/10 hover:text-white"
+                                aria-label="关闭流程图"
+                            >
+                                <XCircle size={16} />
+                            </button>
+                        </div>
+                        <div className="min-h-0 flex-1 overflow-auto p-4" data-testid="workflow-graph">
+                            <Suspense fallback={<div className="p-8 text-center text-xs text-white/40">正在加载流程图…</div>}>
+                                <Mermaid chart={detail.graph.mermaid} />
+                            </Suspense>
+                        </div>
+                    </div>
+                </div>,
+                document.body,
+            )}
         </div>
     );
 };

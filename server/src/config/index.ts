@@ -163,6 +163,8 @@ export const config = {
     workflow: {
         // 总开关；关闭后 workflow:run/cancel/resume 直接拒绝，只读接口仍可用
         enabled: parseBoolean(process.env.WORKFLOW_ENABLED, true),
+        // 定时和文件变更自动触发默认关闭
+        triggersEnabled: parseBoolean(process.env.WORKFLOW_TRIGGERS_ENABLED, false),
         // utilityProcess Worker 池大小
         maxWorkers: parsePositiveInt(process.env.WORKFLOW_MAX_WORKERS, defaultWorkflowMaxWorkers(), 1),
         // 排队 run 上限，超过后拒绝新 run
@@ -186,15 +188,25 @@ export const config = {
         // 运行记录保留数量与单 run 预算
         maxStoredRuns: parsePositiveInt(process.env.WORKFLOW_MAX_STORED_RUNS, 50, 1),
         maxSteps: parsePositiveInt(process.env.WORKFLOW_MAX_STEPS, 200, 1),
+        // 单个 fork 同时运行的分支数上限，避免大量分支同时占用资源
+        maxForkParallel: parsePositiveInt(process.env.WORKFLOW_MAX_FORK_PARALLEL, 4, 1),
+        // 已报告的模型 token 用量上限；0 表示关闭
+        maxTokens: parsePositiveInt(process.env.WORKFLOW_MAX_TOKENS, 0, 0),
         maxSubworkflowDepth: parsePositiveInt(process.env.WORKFLOW_MAX_SUBWORKFLOW_DEPTH, 3, 1),
         maxStepOutputChars: parsePositiveInt(process.env.WORKFLOW_MAX_STEP_OUTPUT_CHARS, 64 * 1024, 1024),
         defaultStepTimeoutMs: parsePositiveInt(process.env.WORKFLOW_DEFAULT_STEP_TIMEOUT_MS, 10 * 60 * 1000, 1000),
         agentStepMaxTurns: parsePositiveInt(process.env.WORKFLOW_AGENT_STEP_MAX_TURNS, 12, 1),
         // 全局限流：同一 provider:model 同时执行的 agent/evaluator 步骤上限
         agentConcurrencyPerProvider: parsePositiveInt(process.env.WORKFLOW_AGENT_CONCURRENCY_PER_PROVIDER, 2, 1),
+        // 每个 provider:model 的真实模型请求速率；0 表示关闭，不影响普通对话
+        agentRequestsPerMinute: parsePositiveInt(process.env.WORKFLOW_AGENT_REQUESTS_PER_MINUTE, 0, 0),
+        agentRequestBurst: parsePositiveInt(process.env.WORKFLOW_AGENT_REQUEST_BURST, 2, 1),
         // HTTP 步骤：默认禁止内网地址，限制响应大小与超时
         httpAllowPrivate: parseBoolean(process.env.WORKFLOW_HTTP_ALLOW_PRIVATE, false),
         httpMaxResponseBytes: parsePositiveInt(process.env.WORKFLOW_HTTP_MAX_RESPONSE_BYTES, 1024 * 1024, 1024),
         httpTimeoutMs: parsePositiveInt(process.env.WORKFLOW_HTTP_TIMEOUT_MS, 60_000, 1000),
+        // 独立服务的 workflow REST/SSE 默认关闭；启用时必须配置独立 Bearer token。
+        httpApiEnabled: parseBoolean(process.env.WORKFLOW_HTTP_API_ENABLED, false),
+        httpApiToken: process.env.WORKFLOW_HTTP_API_TOKEN || '',
     }
 };

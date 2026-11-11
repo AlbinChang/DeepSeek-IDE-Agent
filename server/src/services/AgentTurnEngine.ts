@@ -237,6 +237,10 @@ export interface AgentTurnEngineOptions {
     prepareMessages: (msgs: any[]) => Promise<any[]>;
     /** 用户发起取消时的 AbortSignal */
     abortSignal?: AbortSignal;
+    /** 可选请求门控：每次实际模型请求（包括重试）之前执行。 */
+    beforeApiRequest?: () => Promise<void>;
+    /** 成功请求后的 usage 校验；失败不会触发模型请求重试。 */
+    afterApiRequest?: (usage: TokenUsage | null) => void;
     /** 向客户端推送流式事件的函数 */
     emit: (chunk: any) => void;
     /** 整个请求的开始时间戳（用于计算每轮耗时并上报 Telemetry） */
@@ -531,6 +535,7 @@ export class AgentTurnEngine {
                     });
                 }
 
+                await options.beforeApiRequest?.();
                 try {
                     const response = await client.chat.completions.create(
                         requestPayload as any,
@@ -648,6 +653,7 @@ export class AgentTurnEngine {
                         throw error; // 不可重试错误，或超过对应分类的重试上限，向上抛出
                     }
                 }
+                if (apiSuccess) options.afterApiRequest?.(localUsage);
             }
 
             // ---------------------------------------------------------------

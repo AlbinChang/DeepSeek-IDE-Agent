@@ -14,7 +14,7 @@ import type {
     WorkflowUsage,
 } from '@/workflow/types.js';
 
-export const WORKFLOW_WORKER_PROTOCOL_VERSION = 1;
+export const WORKFLOW_WORKER_PROTOCOL_VERSION = 2;
 
 export type WorkflowWorkerReasoningEffort = 'default' | 'low' | 'high' | 'max';
 
@@ -30,6 +30,8 @@ export interface WorkflowWorkerRunConfig {
     locale?: string;
     /** Worker 心跳间隔；主进程按 3 倍超时判断失联 */
     heartbeatIntervalMs: number;
+    requestRateEnabled?: boolean;
+    maxTokens?: number;
 }
 
 export interface WorkflowWorkerRunStartMessage {
@@ -38,8 +40,10 @@ export interface WorkflowWorkerRunStartMessage {
     definition: WorkflowExecutableDefinition;
     inputs: Record<string, unknown>;
     steps: WorkflowStepInfo[];
+    usage?: WorkflowUsage;
     startIndex?: number;
     initialContext?: Record<string, unknown>;
+    replayCompletedPaths?: string[];
 }
 
 export interface WorkflowWorkerInitMessage {
@@ -84,13 +88,33 @@ export interface WorkflowWorkerPermitGrantedMessage {
     requestId: string;
 }
 
+export interface WorkflowWorkerRateRequestMessage {
+    type: 'run.rate';
+    runId: string;
+    requestId: string;
+    provider: string;
+    model: string;
+}
+
+export interface WorkflowWorkerRateCancelMessage {
+    type: 'run.rate.cancel';
+    runId: string;
+    requestId: string;
+}
+
+export interface WorkflowWorkerRateGrantedMessage {
+    type: 'run.rate.granted';
+    requestId: string;
+}
+
 export type MainToWorkerMessage =
     | WorkflowWorkerInitMessage
     | WorkflowWorkerRunStartMessage
     | WorkflowWorkerCancelMessage
     | WorkflowWorkerAckMessage
     | WorkflowWorkerPingMessage
-    | WorkflowWorkerPermitGrantedMessage;
+    | WorkflowWorkerPermitGrantedMessage
+    | WorkflowWorkerRateGrantedMessage;
 
 export interface WorkflowWorkerReadyMessage {
     type: 'worker.ready';
@@ -183,6 +207,8 @@ export type WorkerToMainMessage =
     | WorkflowWorkerHeartbeatMessage
     | WorkflowWorkerPermitMessage
     | WorkflowWorkerPermitReleaseMessage
+    | WorkflowWorkerRateRequestMessage
+    | WorkflowWorkerRateCancelMessage
     | WorkflowWorkerLogMessage
     | WorkflowWorkerPongMessage;
 
@@ -236,6 +262,7 @@ export function isMainToWorkerMessage(value: unknown): value is MainToWorkerMess
     if (type === 'run.cancel') return typeof (value as WorkflowWorkerCancelMessage).runId === 'string';
     if (type === 'run.ack') return typeof (value as WorkflowWorkerAckMessage).runId === 'string';
     if (type === 'run.permit.granted') return typeof (value as WorkflowWorkerPermitGrantedMessage).requestId === 'string';
+    if (type === 'run.rate.granted') return typeof (value as WorkflowWorkerRateGrantedMessage).requestId === 'string';
     if (type === 'ping') return Number.isFinite((value as WorkflowWorkerPingMessage).seq);
     return false;
 }
@@ -275,6 +302,17 @@ export function isWorkerToMainMessage(value: unknown): value is WorkerToMainMess
     }
     if (type === 'run.permit.release') {
         const message = value as WorkflowWorkerPermitReleaseMessage;
+        return typeof message.runId === 'string' && typeof message.requestId === 'string';
+    }
+    if (type === 'run.rate') {
+        const message = value as WorkflowWorkerRateRequestMessage;
+        return typeof message.runId === 'string'
+            && typeof message.requestId === 'string'
+            && typeof message.provider === 'string'
+            && typeof message.model === 'string';
+    }
+    if (type === 'run.rate.cancel') {
+        const message = value as WorkflowWorkerRateCancelMessage;
         return typeof message.runId === 'string' && typeof message.requestId === 'string';
     }
     return false;
