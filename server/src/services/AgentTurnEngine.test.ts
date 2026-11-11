@@ -473,4 +473,236 @@ describe("AgentTurnEngine request recovery", () => {
         );
         expect(result.finalAssistantContent).toBe("ok");
     });
+
+    it("retries once without showing control-token leakage, then returns clean content", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const emitted: any[] = [];
+            const create = vi.fn()
+                .mockImplementationOnce(async () => (async function* () {
+                    yield {
+                        model: "ernie-4.5-300b-a47b",
+                        choices: [{ delta: { content: "<|begin_of_sentence|>####下列判色丑 插件Combine" } }],
+                    };
+                })())
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { model: "test-model", choices: [{ delta: { content: "正常回答" } }] };
+                })());
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "guard-user",
+                currentTraceId: "trace-guard",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(create).toHaveBeenCalledTimes(2);
+            expect(result.finalAssistantContent).toBe("正常回答");
+            const streamedText = emitted
+                .filter((chunk) => chunk.type === "text")
+                .map((chunk) => String(chunk.content))
+                .join("");
+            expect(streamedText).not.toContain("begin_of_sentence");
+            expect(streamedText).toContain("正常回答");
+            expect(agentService.updateSessionHistory).not.toHaveBeenCalled();
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("fails the turn instead of persisting control-token garbage", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const emitted: any[] = [];
+            const garbage = {
+                model: "ernie-4.5-300b-a47b",
+                system_fingerprint: "fp-proxy-1",
+                choices: [{ delta: { content: "<|begin_of_sentence|>####异常输出<|end_of_sentence|>" } }],
+            };
+            const create = vi.fn(async () => (async function* () {
+                yield garbage;
+            })());
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            await expect(AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "deepseek-v4-flash",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "guard-user",
+                currentTraceId: "trace-guard-fail",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+                provider: { id: "proxy", name: "proxy", type: "openai-compatible", modelId: "deepseek-v4-flash", apiKey: "x", baseURL: "https://gateway.example.com/v1" },
+            })).rejects.toMatchObject({ code: "MODEL_OUTPUT_CORRUPTED" });
+
+            expect(create).toHaveBeenCalledTimes(2);
+            expect(emitted.some((chunk) => chunk.type === "text" && String(chunk.content).includes("begin_of_sentence")))
+                .toBe(false);
+            expect(agentService.updateSessionHistory).not.toHaveBeenCalled();
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("rejects duplicated control tokens appearing mid-answer without retrying", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const create = vi.fn(async () => (async function* () {
+            yield { choices: [{ delta: { content: "先给出结论。" } }] };
+            yield { choices: [{ delta: { content: "另外 <|end_of_sentence|> 与 <|end_of_sentence|> 重复出现" } }] };
+        })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        await expect(AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "guard-user",
+            currentTraceId: "trace-guard-body",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "检查代码" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        })).rejects.toMatchObject({ code: "MODEL_OUTPUT_CORRUPTED", detail: { phase: "body" } });
+        expect(create).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps answers that merely quote a control token inside code spans", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const create = vi.fn(async () => (async function* () {
+            yield { choices: [{ delta: { content: '"`<|begin_of_sentence|>` 是 ERNIE 的 BOS 标记。"' } }] };
+        })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "guard-user",
+            currentTraceId: "trace-guard-quote",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "解释特殊 token" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(result.finalAssistantContent).toContain("begin_of_sentence");
+    });
+
+    it("detects control-token leakage over a real SSE stream and never persists it", async () => {
+        const { createServer } = await import("node:http");
+        const OpenAI = (await import("openai")).default;
+        const server = createServer((_request, response) => {
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            const chunk = (content: string, model: string) => `data: ${JSON.stringify({
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                created: 0,
+                model,
+                choices: [{ index: 0, delta: { content }, finish_reason: null }],
+            })}\n\n`;
+            response.write(chunk("<|begin_of_sentence|>####下列判色丑 插件Combine<|end_of_sentence|>", "ernie-4.5-300b-a47b"));
+            response.end("data: [DONE]\n\n");
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        const client = new OpenAI({ apiKey: "test-key", baseURL: `http://127.0.0.1:${port}/v1`, maxRetries: 0 });
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+        const emitted: any[] = [];
+        try {
+            await expect(AgentTurnEngine.runTurns({
+                client,
+                finalModelId: "deepseek-v4-flash",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "guard-user",
+                currentTraceId: "trace-guard-sse",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+                provider: { id: "proxy", name: "proxy", type: "openai-compatible", modelId: "deepseek-v4-flash", apiKey: "test-key", baseURL: `http://127.0.0.1:${port}/v1` },
+            })).rejects.toMatchObject({ code: "MODEL_OUTPUT_CORRUPTED" });
+
+            expect(agentService.updateSessionHistory).not.toHaveBeenCalled();
+            expect(emitted.some((chunk) => chunk.type === "text" && String(chunk.content).includes("begin_of_sentence")))
+                .toBe(false);
+        } finally {
+            vi.restoreAllMocks();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
 });

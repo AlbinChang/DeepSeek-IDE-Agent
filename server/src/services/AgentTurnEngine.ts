@@ -37,8 +37,29 @@ import {
     type LLMRequestRecoveryContext,
 } from "@/services/LLMRequestJournal.js";
 import { extractReasoningText } from "../utils/ReasoningUtils.js";
+import {
+    buildCorruptionMessage,
+    detectRepeatedControlToken,
+    isModelMismatch,
+    ModelOutputCorruptionError,
+    probeLeadingContent,
+    type ControlTokenHit,
+    type ModelOutputDiagnostics,
+} from "@/services/ModelOutputGuard.js";
 
 const getTS = () => getBeijingLogTimePrefix();
+
+/** 首段正文至少攒够这么多字符再判定是否泄漏控制标记，避免把控制标记拆包后漏检。 */
+const PREFIX_PROBE_CHARS = 32;
+
+function resolveHost(baseURL?: string): string | undefined {
+    if (!baseURL) return undefined;
+    try {
+        return new URL(baseURL).host;
+    } catch {
+        return undefined;
+    }
+}
 
 /**
  * 最大流式重试次数（网络超时 / 连接错误 / DNS 失败等）。
@@ -380,6 +401,22 @@ export class AgentTurnEngine {
             ...(workerId ? { workerId } : {}),
             ...(allowedToolNames ? { allowedToolNames } : {}),
         };
+        const outputGuardEnabled = globalConfig.agent.modelOutputGuard;
+        const servedModels = new Set<string>();
+        const systemFingerprints = new Set<string>();
+        const buildCorruptionError = (hit: ControlTokenHit, phase: 'prefix' | 'body') => {
+            const diagnostics: ModelOutputDiagnostics = {
+                requestedModel: finalModelId,
+                servedModels: Array.from(servedModels),
+                systemFingerprints: Array.from(systemFingerprints),
+                providerId: options.provider?.id,
+                baseUrlHost: resolveHost(options.provider?.baseURL),
+            };
+            return new ModelOutputCorruptionError(
+                buildCorruptionMessage(hit, phase, diagnostics),
+                { phase, hit, diagnostics },
+            );
+        };
 
         while (true) {
             turns++;
@@ -423,6 +460,7 @@ export class AgentTurnEngine {
             let fullReasoning = "";
             let toolCalls: any[] = [];
             let localUsage: TokenUsage | null = null;
+            let corruptionRetryUsed = false;
             const replayPayload = turns === 1 ? options.resumeRequest?.payload : undefined;
 
             while (retryCount <= MAX_ALLOWED_RETRIES && !apiSuccess) {
@@ -430,6 +468,8 @@ export class AgentTurnEngine {
                 fullReasoning = "";
                 toolCalls = [];
                 localUsage = null;
+                let contentPrefixConfirmed = false;
+                let pendingContentPrefix = "";
 
                 const currentTurnId = turns * 100 + retryCount;
                 let toolArgumentChars = 0;
@@ -547,6 +587,14 @@ export class AgentTurnEngine {
                             if (chunk.usage) {
                                 localUsage = normalizeTokenUsage(chunk.usage) || localUsage;
                             }
+                            const servedModel = (chunk as any)?.model;
+                            if (typeof servedModel === "string" && servedModel.trim()) {
+                                servedModels.add(servedModel.trim());
+                            }
+                            const fingerprint = (chunk as any)?.system_fingerprint;
+                            if (typeof fingerprint === "string" && fingerprint.trim()) {
+                                systemFingerprints.add(fingerprint.trim());
+                            }
 
                             const delta = chunk.choices[0]?.delta as any;
                             if (!delta) continue;
@@ -567,13 +615,33 @@ export class AgentTurnEngine {
                                     : extractReasoningText(delta);
                             if (reasoningDelta) {
                                 fullReasoning += reasoningDelta;
+                                if (outputGuardEnabled && fullReasoning.length <= PREFIX_PROBE_CHARS + 8) {
+                                    const reasoningProbe = probeLeadingContent(fullReasoning);
+                                    if (reasoningProbe.state === 'suspect') {
+                                        throw buildCorruptionError(reasoningProbe.hit, 'prefix');
+                                    }
+                                }
                                 emitVisibleStreamDelta("reasoning", reasoningDelta, currentTurnId);
                                 emitStreamProgress("reasoning", reasoningDelta.length);
                             }
                             if (delta.content) {
                                 fullContent += delta.content;
-                                emitVisibleStreamDelta("text", delta.content, currentTurnId);
-                                emitStreamProgress("content", delta.content.length);
+                                if (!contentPrefixConfirmed && outputGuardEnabled) {
+                                    pendingContentPrefix += delta.content;
+                                    const probe = probeLeadingContent(pendingContentPrefix);
+                                    if (probe.state === 'suspect') {
+                                        throw buildCorruptionError(probe.hit, 'prefix');
+                                    }
+                                    if (probe.state === 'clean' || pendingContentPrefix.length >= PREFIX_PROBE_CHARS) {
+                                        contentPrefixConfirmed = true;
+                                        emitVisibleStreamDelta("text", pendingContentPrefix, currentTurnId);
+                                        emitStreamProgress("content", pendingContentPrefix.length);
+                                        pendingContentPrefix = "";
+                                    }
+                                } else {
+                                    emitVisibleStreamDelta("text", delta.content, currentTurnId);
+                                    emitStreamProgress("content", delta.content.length);
+                                }
                             }
                             if (delta.tool_calls) {
                                 delta.tool_calls.forEach((tc: any) => {
@@ -590,6 +658,25 @@ export class AgentTurnEngine {
                                 });
                             }
                         }
+                    }
+                    if (!contentPrefixConfirmed && pendingContentPrefix) {
+                        const finalProbe = probeLeadingContent(pendingContentPrefix);
+                        if (finalProbe.state === 'suspect') {
+                            throw buildCorruptionError(finalProbe.hit, 'prefix');
+                        }
+                        emitVisibleStreamDelta("text", pendingContentPrefix, currentTurnId);
+                        emitStreamProgress("content", pendingContentPrefix.length);
+                        pendingContentPrefix = "";
+                    }
+                    if (outputGuardEnabled) {
+                        const bodyHit = detectRepeatedControlToken(fullContent);
+                        if (bodyHit) throw buildCorruptionError(bodyHit, 'body');
+                    }
+                    if (isModelMismatch(finalModelId, Array.from(servedModels))) {
+                        console.warn(
+                            `${getTS()} [AgentTurnEngine] 供应商回报的模型与请求不一致：请求 ${finalModelId}，`
+                            + `实际 ${Array.from(servedModels).join(', ')}（请核查是否存在模型替换/代理降级）`,
+                        );
                     }
                     emitStreamProgress("complete", 0, undefined, true);
 
@@ -618,39 +705,55 @@ export class AgentTurnEngine {
                 } catch (error: any) {
                     if (abortSignal?.aborted) throw error;
 
-                    // ================================================================
-                    // 可重试错误分类（共享工具 ApiRetryUtils）：
-                    // - service_busy：HTTP 408/409/425/429/500/502/503/504（服务过载/临时故障）
-                    //   → 按 SERVICE_BUSY_RETRY_LIMIT（默认 100 次）重试，覆盖 DeepSeek
-                    //     「503 Service is too busy」等场景
-                    // - network：无 HTTP 响应（DNS 解析失败 / 连接被拒 / 流中断 / TLS 握手失败等）
-                    //   → 按 RETRY_LIMIT（默认 3 次）重试
-                    // 注意：error.status 有值（如 503）不代表不可重试，旧的「仅 status===undefined
-                    // 才重试」逻辑会漏掉服务过载类错误，这正是本处优化的关键。
-                    // ================================================================
-                    const verdict = classifyRetryableError(error);
-                    const maxRetries = verdict.category === 'service_busy' ? SERVICE_BUSY_RETRY_LIMIT : RETRY_LIMIT;
-
-                    if (verdict.retryable && retryCount < maxRetries) {
-                        retryCount++;
-                        const delayMs = computeRetryDelayMs(retryCount - 1, verdict.category);
-                        const errCode = error.cause?.code || error.code || (verdict.status > 0 ? `HTTP ${verdict.status}` : 'NETWORK');
-                        const label = verdict.category === 'service_busy' ? '服务过载' : '网络异常';
+                    if (error instanceof ModelOutputCorruptionError) {
                         console.warn(
-                            `${getTS()} [AgentTurnEngine] 遇到${label}错误 (${verdict.reason}, code=${errCode})，正在进行第 ${retryCount}/${maxRetries} 次重试...`
+                            `${getTS()} [AgentTurnEngine] 模型输出异常（${error.detail.phase}）：${error.message}`,
                         );
-                        emit({ type: "stage", content: `${label}（${verdict.reason}），正在自动进行第 ${retryCount} 次自动重试...` });
-                        retryStageVisible = true;
-                        // 制造视觉断层补偿
-                        emit({
-                            type: "text",
-                            content: `\n\n_[${label}，自动重新请求生成中（第 ${retryCount} 次）...]_ \n\n`,
-                            turn: turns * 100 + retryCount - 1,
-                        });
-                        // 指数退避 + 抖动（服务过载类退避更激进，避免惊群）
-                        await new Promise((resolve) => setTimeout(resolve, delayMs));
+                        // 前缀泄漏时还没有任何内容送到前端，可安全地重新请求一次；
+                        // 正文中途出现控制标记说明生成已经失控，直接失败，避免把垃圾写进历史。
+                        if (error.detail.phase === 'prefix' && !corruptionRetryUsed && !contentPrefixConfirmed) {
+                            corruptionRetryUsed = true;
+                            emit({ type: "stage", content: "检测到模型输出异常（控制标记泄漏），正在重新请求一次..." });
+                            retryStageVisible = true;
+                            await new Promise((resolve) => setTimeout(resolve, 500));
+                        } else {
+                            throw error;
+                        }
                     } else {
-                        throw error; // 不可重试错误，或超过对应分类的重试上限，向上抛出
+                        // ================================================================
+                        // 可重试错误分类（共享工具 ApiRetryUtils）：
+                        // - service_busy：HTTP 408/409/425/429/500/502/503/504（服务过载/临时故障）
+                        //   → 按 SERVICE_BUSY_RETRY_LIMIT（默认 100 次）重试，覆盖 DeepSeek
+                        //     「503 Service is too busy」等场景
+                        // - network：无 HTTP 响应（DNS 解析失败 / 连接被拒 / 流中断 / TLS 握手失败等）
+                        //   → 按 RETRY_LIMIT（默认 3 次）重试
+                        // 注意：error.status 有值（如 503）不代表不可重试，旧的「仅 status===undefined
+                        // 才重试」逻辑会漏掉服务过载类错误，这正是本处优化的关键。
+                        // ================================================================
+                        const verdict = classifyRetryableError(error);
+                        const maxRetries = verdict.category === 'service_busy' ? SERVICE_BUSY_RETRY_LIMIT : RETRY_LIMIT;
+
+                        if (verdict.retryable && retryCount < maxRetries) {
+                            retryCount++;
+                            const delayMs = computeRetryDelayMs(retryCount - 1, verdict.category);
+                            const errCode = error.cause?.code || error.code || (verdict.status > 0 ? `HTTP ${verdict.status}` : 'NETWORK');
+                            const label = verdict.category === 'service_busy' ? '服务过载' : '网络异常';
+                            console.warn(
+                                `${getTS()} [AgentTurnEngine] 遇到${label}错误 (${verdict.reason}, code=${errCode})，正在进行第 ${retryCount}/${maxRetries} 次重试...`
+                            );
+                            emit({ type: "stage", content: `${label}（${verdict.reason}），正在自动进行第 ${retryCount} 次自动重试...` });
+                            retryStageVisible = true;
+                            // 制造视觉断层补偿
+                            emit({
+                                type: "text",
+                                content: `\n\n_[${label}，自动重新请求生成中（第 ${retryCount} 次）...]_ \n\n`,
+                                turn: turns * 100 + retryCount - 1,
+                            });
+                            // 指数退避 + 抖动（服务过载类退避更激进，避免惊群）
+                            await new Promise((resolve) => setTimeout(resolve, delayMs));
+                        } else {
+                            throw error; // 不可重试错误，或超过对应分类的重试上限，向上抛出
+                        }
                     }
                 }
                 if (apiSuccess) options.afterApiRequest?.(localUsage);

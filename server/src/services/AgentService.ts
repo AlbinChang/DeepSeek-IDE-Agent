@@ -16,6 +16,7 @@ import { SystemTools } from '@/tools/SystemTools.js';
 import { CalculatorTool } from '@/tools/custom/CalculatorTool.js';
 import { WorkflowTools } from '@/tools/WorkflowTools.js';
 import { McpService } from '@/services/McpService.js';
+import { detectRepeatedControlToken, probeLeadingContent } from '@/services/ModelOutputGuard.js';
 import { SERVER_ROOT, CONFIG_ROOT } from '@/utils/PathUtils.js';
 import { BEIJING_TIME_ZONE, formatBeijingDate } from '@/utils/TimeUtils.js';
 import { WORKSPACE_SKILL_DIRECTORIES } from '@/utils/WorkspaceSkillPaths.js';
@@ -785,7 +786,50 @@ export class AgentService extends EventEmitter {
     }
 
     public getSessionHistory(userId: string, workspaceRoot?: string): any[] {
-        return this.userHistories.get(this.getWorkspaceStateKey(userId, workspaceRoot)) || [];
+        const key = this.getWorkspaceStateKey(userId, workspaceRoot);
+        const stored = this.userHistories.get(key) || [];
+        const sanitized = this.dropCorruptedHistory(stored);
+        if (sanitized !== stored) {
+            this.userHistories.set(key, sanitized);
+        }
+        return sanitized;
+    }
+
+    /**
+     * 丢弃历史上“模型控制标记被当成正文”的异常消息，避免继续回传给模型造成上下文污染。
+     * 对应 tool_calls 的 assistant 消息被丢弃时，一并丢弃其 tool 结果，保持消息序列合法。
+     */
+    private dropCorruptedHistory(history: any[]): any[] {
+        if (!globalConfig.agent.modelOutputGuard || history.length === 0) return history;
+        const kept: any[] = [];
+        const droppedToolCallIds = new Set<string>();
+        let dropped = 0;
+        for (const message of history) {
+            if (message?.role === 'tool' && droppedToolCallIds.has(message.tool_call_id)) {
+                continue;
+            }
+            if (message?.role === 'assistant' && typeof message.content === 'string') {
+                const leading = probeLeadingContent(message.content);
+                const hit = leading.state === 'suspect'
+                    ? leading.hit
+                    : detectRepeatedControlToken(message.content);
+                if (hit) {
+                    dropped++;
+                    for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+                        if (typeof call?.id === 'string') droppedToolCallIds.add(call.id);
+                    }
+                    continue;
+                }
+            }
+            kept.push(message);
+        }
+        if (dropped > 0) {
+            console.warn(
+                `[AgentService] 已丢弃 ${dropped} 条包含模型控制标记的历史消息（疑似模型输出异常），`
+                + '避免继续污染上下文',
+            );
+        }
+        return kept;
     }
 
     public updateSessionHistory(userId: string, history: any[], workspaceRoot?: string) {

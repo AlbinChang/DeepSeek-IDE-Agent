@@ -135,6 +135,8 @@ export const config = {
         apiServiceBusyRetryLimit: parsePositiveInt(process.env.AGENT_API_SERVICE_BUSY_RETRY_LIMIT, 100, 0),
         maxHistoryBytes: parsePositiveInt(process.env.AGENT_MAX_HISTORY_BYTES, 1024 * 1024, 1),
         lowWatermarkBytes: parsePositiveInt(process.env.AGENT_LOW_WATERMARK_BYTES, 128 * 1024, 1),
+        // 拦截“控制标记泄漏”的异常模型输出（BOS/EOS 等被当成正文），避免污染会话历史
+        modelOutputGuard: parseBoolean(process.env.AGENT_MODEL_OUTPUT_GUARD, true),
     },
 
     // read_file 工具限制
