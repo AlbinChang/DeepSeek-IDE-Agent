@@ -337,7 +337,8 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
                 abortSignal: ctx.abortSignal,
                 ...requestHooks,
                 emit: (chunk) => {
-                    if (chunk?.type === 'stage' && typeof chunk.content === 'string' && chunk.content.trim()) {
+                    if ((chunk?.type === 'stage' || chunk?.type === 'notice')
+                        && typeof chunk.content === 'string' && chunk.content.trim()) {
                         logs.write(chunk.content);
                     }
                 },
@@ -563,7 +564,8 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
                 ...requestHooks,
                 telemetrySink: (usage) => ctx.recordUsage?.(usage),
                 emit: (chunk) => {
-                    if (chunk?.type === 'stage' && typeof chunk.content === 'string' && chunk.content.trim()) {
+                    if ((chunk?.type === 'stage' || chunk?.type === 'notice')
+                        && typeof chunk.content === 'string' && chunk.content.trim()) {
                         logs.write(chunk.content);
                     }
                 },

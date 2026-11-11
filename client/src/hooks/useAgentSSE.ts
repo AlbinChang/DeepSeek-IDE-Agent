@@ -8,7 +8,7 @@ import { electronBridge, type AgentRecoveryInfo } from "@/services/electron-brid
 
 export interface MessagePart {
     id: string;
-    type: 'reasoning' | 'text' | 'stage' | 'annotation' | 'error' | 'meta';
+    type: 'reasoning' | 'text' | 'stage' | 'annotation' | 'error' | 'notice' | 'meta';
     content: string;
     method?: string;
     params?: any;
@@ -459,6 +459,7 @@ export function useAgentSSE() {
             | { kind: 'todo'; todos: any[] }
             | { kind: 'init'; traceId: string }
             | { kind: 'error'; content: string }
+            | { kind: 'notice'; content: string; method: string; params: any }
             | { kind: 'doneText'; content: string }
             | { kind: 'usage'; usage: TokenUsage }
             | { kind: 'done'; usage: TokenUsage | null }
@@ -473,7 +474,8 @@ export function useAgentSSE() {
         type PartOp =
             | { op: 'text'; content: string; turn?: number }
             | { op: 'reasoning'; content: string; turn?: number }
-            | { op: 'annotation'; content: string; method: string; params: any };
+            | { op: 'annotation'; content: string; method: string; params: any }
+            | { op: 'notice'; content: string; method: string; params: any };
 
         const pendingBufferRef: { current: PendingChunk[] } = { current: [] };
         let rafId: number | null = null;
@@ -521,6 +523,7 @@ export function useAgentSSE() {
                     case 'text': partOps.push({ op: 'text', content: chunk.content, turn: chunk.turn }); break;
                     case 'reasoning': partOps.push({ op: 'reasoning', content: chunk.content, turn: chunk.turn }); break;
                     case 'annotation': partOps.push({ op: 'annotation', content: chunk.content, method: chunk.method, params: chunk.params }); break;
+                    case 'notice': partOps.push({ op: 'notice', content: chunk.content, method: chunk.method, params: chunk.params }); break;
                     case 'stage': stages.push(chunk); break;
                     case 'progress': latestProgress = chunk.progress; break;
                     case 'todo': latestTodos = chunk.todos; break;
@@ -610,6 +613,15 @@ export function useAgentSSE() {
                             const contentLimited = appendLimitedLiveText(last.content || '', op.content, '回复正文', LIVE_TEXT_PART_LIMIT, (last as any).contentMeta);
                             last.content = contentLimited.content;
                             (last as any).contentMeta = contentLimited.meta;
+                        } else if (op.op === 'notice') {
+                            last.parts.push({
+                                id: createClientId(),
+                                type: 'notice',
+                                content: op.content,
+                                method: op.method,
+                                params: op.params,
+                                timestamp: Date.now(),
+                            });
                         } else {
                             // annotation：按到达顺序插入 parts，避免被后续正文“插队”
                             // 预计算工具参数 JSON 字符串，避免 JSX render 中每帧重复 JSON.stringify
@@ -731,6 +743,13 @@ export function useAgentSSE() {
                 pendingBufferRef.current.push({ kind: 'text', content: chunk.content || '', turn: chunk.turn });
             } else if (chunk.type === 'reasoning') {
                 pendingBufferRef.current.push({ kind: 'reasoning', content: chunk.content || '', turn: chunk.turn });
+            } else if (chunk.type === 'notice') {
+                pendingBufferRef.current.push({
+                    kind: 'notice',
+                    content: chunk.content || chunk.message || '',
+                    method: chunk.code || chunk.method || 'notice',
+                    params: chunk.params,
+                });
             } else if (chunk.type === 'annotation') {
                 const sanitized = sanitizeAnnotationParams(chunk.method, chunk.params);
                 pendingBufferRef.current.push({

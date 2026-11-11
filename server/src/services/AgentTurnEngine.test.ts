@@ -650,6 +650,93 @@ describe("AgentTurnEngine request recovery", () => {
         expect(result.finalAssistantContent).toContain("begin_of_sentence");
     });
 
+    it("emits a visible notice when the server returns a different model", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const emitted: any[] = [];
+        const create = vi.fn(async () => (async function* () {
+            yield {
+                model: "ernie-4.5-300b-a47b",
+                system_fingerprint: "fp-proxy-9",
+                choices: [{ delta: { content: "这是一个正常长度的回答，用于验证提示逻辑。" } }],
+            };
+        })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "deepseek-v4-flash",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "notice-user",
+            currentTraceId: "trace-notice",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "检查代码" },
+            prepareMessages: async (messages) => messages,
+            emit: (chunk) => emitted.push(chunk),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+            provider: { id: "proxy", name: "proxy", type: "openai-compatible", modelId: "deepseek-v4-flash", apiKey: "x", baseURL: "https://gateway.example.com/v1" },
+        });
+
+        const notices = emitted.filter((chunk) => chunk.type === "notice");
+        expect(notices).toHaveLength(1);
+        expect(notices[0]).toMatchObject({
+            code: "MODEL_SUBSTITUTION",
+            level: "warning",
+            params: {
+                requestedModel: "deepseek-v4-flash",
+                servedModels: ["ernie-4.5-300b-a47b"],
+                systemFingerprint: "fp-proxy-9",
+                baseUrlHost: "gateway.example.com",
+            },
+        });
+        expect(notices[0].content).toContain("ernie-4.5-300b-a47b");
+        expect(result.finalAssistantContent).toContain("正常长度");
+    });
+
+    it("does not emit substitution notices when the served model matches", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const emitted: any[] = [];
+        const create = vi.fn(async () => (async function* () {
+            yield { model: "deepseek-chat-0324", choices: [{ delta: { content: "正常回答内容足够长以确认前缀。" } }] };
+        })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "deepseek-chat",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "notice-user",
+            currentTraceId: "trace-notice-ok",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "检查代码" },
+            prepareMessages: async (messages) => messages,
+            emit: (chunk) => emitted.push(chunk),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(emitted.some((chunk) => chunk.type === "notice")).toBe(false);
+    });
+
     it("detects control-token leakage over a real SSE stream and never persists it", async () => {
         const { createServer } = await import("node:http");
         const OpenAI = (await import("openai")).default;

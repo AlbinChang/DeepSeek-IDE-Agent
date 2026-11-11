@@ -35,7 +35,7 @@ async function callIpc(method: string, args: any[]): Promise<any> {
 }
 
 // ── 事件类型 ──
-export type AgentSSEEventType = 'init' | 'stage' | 'reasoning' | 'text' | 'annotation' | 'progress' | 'usage' | 'error' | 'done' | 'heartbeat';
+export type AgentSSEEventType = 'init' | 'stage' | 'reasoning' | 'text' | 'annotation' | 'notice' | 'progress' | 'usage' | 'error' | 'done' | 'heartbeat';
 
 /** token 用量载荷（与 server/src/utils/TokenUsage.ts 的 TokenUsage 对齐） */
 export interface AgentTokenUsage {
@@ -50,6 +50,8 @@ export interface AgentSSEPayload {
     traceId?: string;
     model?: string;
     method?: string;
+    /** 结构化事件码（如 notice 的 MODEL_SUBSTITUTION） */
+    code?: string;
     params?: any;
     channel?: 'content' | 'reasoning' | 'tool_arguments' | 'complete';
     receivedChars?: number;
@@ -266,6 +268,7 @@ export const electronBridge = {
                     traceId: event.traceId,
                     model: event.model,
                     method: event.method,
+                    code: event.code,
                     params: event.params,
                     channel: event.channel,
                     receivedChars: event.receivedChars,

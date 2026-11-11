@@ -404,6 +404,32 @@ export class AgentTurnEngine {
         const outputGuardEnabled = globalConfig.agent.modelOutputGuard;
         const servedModels = new Set<string>();
         const systemFingerprints = new Set<string>();
+        let substitutionNotified = false;
+        const notifyModelSubstitution = () => {
+            if (substitutionNotified) return;
+            const served = Array.from(servedModels);
+            if (!isModelMismatch(finalModelId, served)) return;
+            substitutionNotified = true;
+            const systemFingerprint = Array.from(systemFingerprints)[0];
+            console.warn(
+                `${getTS()} [AgentTurnEngine] 供应商回报的模型与请求不一致：请求 ${finalModelId}，`
+                + `实际 ${served.join(', ')}（请核查是否存在模型替换/代理降级）`,
+            );
+            emit({
+                type: 'notice',
+                code: 'MODEL_SUBSTITUTION',
+                level: 'warning',
+                content: `服务端返回的模型与所选模型不一致：请求“${finalModelId}”，实际返回“${served.join(', ')}”。`
+                    + '本次回答可能来自被替换或降级的后端，请核对供应商、网关路由与模型配置。',
+                params: {
+                    requestedModel: finalModelId,
+                    servedModels: served,
+                    systemFingerprint,
+                    providerId: options.provider?.id,
+                    baseUrlHost: resolveHost(options.provider?.baseURL),
+                },
+            });
+        };
         const buildCorruptionError = (hit: ControlTokenHit, phase: 'prefix' | 'body') => {
             const diagnostics: ModelOutputDiagnostics = {
                 requestedModel: finalModelId,
@@ -673,10 +699,7 @@ export class AgentTurnEngine {
                         if (bodyHit) throw buildCorruptionError(bodyHit, 'body');
                     }
                     if (isModelMismatch(finalModelId, Array.from(servedModels))) {
-                        console.warn(
-                            `${getTS()} [AgentTurnEngine] 供应商回报的模型与请求不一致：请求 ${finalModelId}，`
-                            + `实际 ${Array.from(servedModels).join(', ')}（请核查是否存在模型替换/代理降级）`,
-                        );
+                        notifyModelSubstitution();
                     }
                     emitStreamProgress("complete", 0, undefined, true);
 
@@ -717,6 +740,8 @@ export class AgentTurnEngine {
                             retryStageVisible = true;
                             await new Promise((resolve) => setTimeout(resolve, 500));
                         } else {
+                            // 失败前先让用户看到“模型被替换”的明确提示
+                            notifyModelSubstitution();
                             throw error;
                         }
                     } else {

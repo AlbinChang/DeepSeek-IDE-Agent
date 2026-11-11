@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Virtuoso } from 'react-virtuoso';
 import { useAgentSSE } from '@/hooks/useAgentSSE';
-import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, XCircle, Brain, Copy, ClipboardCheck, ChevronDown, Bot, AlertCircle } from 'lucide-react';
+import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, XCircle, Brain, Copy, ClipboardCheck, ChevronDown, Bot, AlertCircle, AlertTriangle } from 'lucide-react';
 import { TodoList } from './TodoList';
 import { SettingsModal } from '@/components/SettingsModal';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
@@ -159,6 +159,23 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
                                 <div className='my-2 p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[8pt] flex items-center gap-2'>
                                     <div className='w-1 h-1 rounded-full bg-red-500' />
                                     {part.content}
+                                </div>
+                            )}
+                            {part.type === 'notice' && (
+                                <div className='my-2 p-2 rounded bg-amber-500/10 border border-amber-500/25 text-amber-200/90 text-[8pt] flex items-start gap-2'>
+                                    <AlertTriangle className='w-3 h-3 mt-0.5 shrink-0 text-amber-400/80' />
+                                    <div className='min-w-0 whitespace-pre-wrap break-words'>
+                                        <div className='font-bold text-amber-300/90 mb-0.5'>
+                                            {part.method === 'MODEL_SUBSTITUTION' ? '模型来源异常' : '提示'}
+                                        </div>
+                                        <div>{part.content}</div>
+                                        {Array.isArray(part.params?.servedModels) && part.params.servedModels.length > 0 && (
+                                            <div className='mt-1 font-mono text-[7pt] text-amber-200/60 break-all'>
+                                                请求模型：{part.params?.requestedModel || '-'}
+                                                {' → '}实际返回：{part.params.servedModels.join(', ')}
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
                             )}
                         </div>
@@ -728,6 +745,8 @@ export const AgentChat: React.FC = () => {
             }
             case 'error':
                 return `[ERROR]\n${part.content || 'Unknown error'}`;
+            case 'notice':
+                return `[NOTICE:${part.method || 'notice'}]\n${part.content || ''}`;
             case 'meta':
                 return `[META]\n${stringifyPayload(part.params ?? part.content)}`;
             default:

@@ -277,7 +277,11 @@ describe('WorkflowRunner', () => {
             if (kind !== 'agent') return { output: `${kind}-output` };
             active++;
             maxActive = Math.max(maxActive, active);
-            await new Promise((resolve) => setTimeout(resolve, 30));
+            // 等待两个分支都进入运行态再各自结束，避免依赖 30ms 窗口的时序抖动
+            const deadline = Date.now() + 2000;
+            while (active < 2 && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+            }
             active--;
             return { output: definition.with?.prompt };
         };
