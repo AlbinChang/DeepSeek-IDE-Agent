@@ -16,7 +16,7 @@ import { SystemTools } from '@/tools/SystemTools.js';
 import { CalculatorTool } from '@/tools/custom/CalculatorTool.js';
 import { WorkflowTools } from '@/tools/WorkflowTools.js';
 import { McpService } from '@/services/McpService.js';
-import { detectRepeatedControlToken, probeLeadingContent } from '@/services/ModelOutputGuard.js';
+import { detectRepeatedControlToken, findControlToken, probeLeadingContent } from '@/services/ModelOutputGuard.js';
 import { SERVER_ROOT, CONFIG_ROOT } from '@/utils/PathUtils.js';
 import { BEIJING_TIME_ZONE, formatBeijingDate } from '@/utils/TimeUtils.js';
 import { WORKSPACE_SKILL_DIRECTORIES } from '@/utils/WorkspaceSkillPaths.js';
@@ -796,7 +796,7 @@ export class AgentService extends EventEmitter {
     }
 
     /**
-     * 丢弃历史上“模型控制标记被当成正文”的异常消息，避免继续回传给模型造成上下文污染。
+     * 丢弃历史上“模型控制标记被当成正文/工具参数”的异常消息，避免继续回传给模型造成上下文污染。
      * 对应 tool_calls 的 assistant 消息被丢弃时，一并丢弃其 tool 结果，保持消息序列合法。
      */
     private dropCorruptedHistory(history: any[]): any[] {
@@ -808,12 +808,8 @@ export class AgentService extends EventEmitter {
             if (message?.role === 'tool' && droppedToolCallIds.has(message.tool_call_id)) {
                 continue;
             }
-            if (message?.role === 'assistant' && typeof message.content === 'string') {
-                const leading = probeLeadingContent(message.content);
-                const hit = leading.state === 'suspect'
-                    ? leading.hit
-                    : detectRepeatedControlToken(message.content);
-                if (hit) {
+            if (message?.role === 'assistant') {
+                if (this.hasCorruptedAssistantPayload(message)) {
                     dropped++;
                     for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
                         if (typeof call?.id === 'string') droppedToolCallIds.add(call.id);
@@ -830,6 +826,24 @@ export class AgentService extends EventEmitter {
             );
         }
         return kept;
+    }
+
+    private hasCorruptedAssistantPayload(message: any): boolean {
+        for (const field of ['content', 'reasoning_content'] as const) {
+            const value = message[field];
+            if (typeof value !== 'string' || !value) continue;
+            const leading = probeLeadingContent(value);
+            if (leading.state === 'suspect') return true;
+            if (detectRepeatedControlToken(value)) return true;
+        }
+        // 工具调用参数必须是 JSON，正常模型不会在其中输出控制标记；
+        // 这类消息会带着垃圾参数被回放给模型，并让历史里的 tool 结果永久残留。
+        for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+            if (findControlToken(call?.function?.name) || findControlToken(call?.function?.arguments)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public updateSessionHistory(userId: string, history: any[], workspaceRoot?: string) {

@@ -40,11 +40,13 @@ import { extractReasoningText } from "../utils/ReasoningUtils.js";
 import {
     buildCorruptionMessage,
     detectRepeatedControlToken,
+    findControlToken,
     isModelMismatch,
     ModelOutputCorruptionError,
     ModelSubstitutionError,
     probeLeadingContent,
     type ControlTokenHit,
+    type CorruptionPhase,
     type ModelOutputDiagnostics,
 } from "@/services/ModelOutputGuard.js";
 
@@ -53,8 +55,23 @@ const getTS = () => getBeijingLogTimePrefix();
 /** 首段正文至少攒够这么多字符再判定是否泄漏控制标记，避免把控制标记拆包后漏检。 */
 const PREFIX_PROBE_CHARS = 32;
 
+/**
+ * 工具参数增量检测的尾部重叠字符数：控制标记可能被拆到多个 delta 中，
+ * 检测时把已累积内容的尾部与本次增量拼接后再扫描。
+ */
+const TOOL_ARGUMENT_SCAN_OVERLAP_CHARS = 48;
+
 /** 丢弃被替换模型的回复后，重新请求前的短暂等待，避免连续冲撞网关。 */
 const SUBSTITUTION_RETRY_DELAY_MS = 300;
+
+/**
+ * 直接重试预算耗尽后，注入纠正指令再重试的轮数。
+ * 相同的请求容易被同一故障后端重复复现，改变请求内容（追加纠正指令）能提高恢复概率。
+ */
+const CORRUPTION_RECOVERY_ROUNDS = 1;
+
+/** 模型输出异常重试的退避基数（毫秒），随重试次数线性放大。 */
+const CORRUPTION_RETRY_BASE_DELAY_MS = 600;
 
 function resolveHost(baseURL?: string): string | undefined {
     if (!baseURL) return undefined;
@@ -407,6 +424,8 @@ export class AgentTurnEngine {
         };
         const outputGuardEnabled = globalConfig.agent.modelOutputGuard;
         const substitutionRetryLimit = globalConfig.agent.modelSubstitutionRetries;
+        // 模型输出异常（控制标记泄漏）时的丢弃重试预算，可通过 AGENT_MODEL_CORRUPTION_RETRIES 覆盖
+        const corruptionRetryLimit = globalConfig.agent.modelCorruptionRetries;
         const servedModels = new Set<string>();
         const systemFingerprints = new Set<string>();
         let substitutionNotified = false;
@@ -454,7 +473,7 @@ export class AgentTurnEngine {
                 },
             });
         };
-        const buildCorruptionError = (hit: ControlTokenHit, phase: 'prefix' | 'body') => {
+        const buildCorruptionError = (hit: ControlTokenHit, phase: CorruptionPhase) => {
             const diagnostics: ModelOutputDiagnostics = {
                 requestedModel: finalModelId,
                 servedModels: Array.from(servedModels),
@@ -510,7 +529,9 @@ export class AgentTurnEngine {
             let fullReasoning = "";
             let toolCalls: any[] = [];
             let localUsage: TokenUsage | null = null;
-            let corruptionRetryUsed = false;
+            // 本轮的“模型输出异常 → 丢弃响应并重试”计数；与网络/服务过载/模型替换的重试预算相互独立
+            let corruptionRetries = 0;
+            let corruptionRecoveryRounds = 0;
             // 本轮的“模型被替换 → 丢弃回复并重试”计数；与网络错误重试预算相互独立
             let substitutionRetries = 0;
             // 重试预算耗尽或已有内容送到前端时，接受该次回复，仅在结束时提示
@@ -524,6 +545,9 @@ export class AgentTurnEngine {
                 localUsage = null;
                 let contentPrefixConfirmed = false;
                 let pendingContentPrefix = "";
+                // 推理内容与正文同理：控制标记被拆包时先缓冲前缀，判定安全后再送出
+                let reasoningPrefixConfirmed = false;
+                let pendingReasoningPrefix = "";
 
                 const currentTurnId = turns * 100 + retryCount;
                 let toolArgumentChars = 0;
@@ -694,14 +718,24 @@ export class AgentTurnEngine {
                                     : extractReasoningText(delta);
                             if (reasoningDelta) {
                                 fullReasoning += reasoningDelta;
-                                if (outputGuardEnabled && fullReasoning.length <= PREFIX_PROBE_CHARS + 8) {
-                                    const reasoningProbe = probeLeadingContent(fullReasoning);
+                                // 与正文一致：先缓冲推理前缀，命中控制标记时整条响应丢弃，
+                                // 而不是把拆包的控制标记直接送给前端/写入历史。
+                                if (!reasoningPrefixConfirmed && outputGuardEnabled) {
+                                    pendingReasoningPrefix += reasoningDelta;
+                                    const reasoningProbe = probeLeadingContent(pendingReasoningPrefix);
                                     if (reasoningProbe.state === 'suspect') {
                                         throw buildCorruptionError(reasoningProbe.hit, 'prefix');
                                     }
+                                    if (reasoningProbe.state === 'clean' || pendingReasoningPrefix.length >= PREFIX_PROBE_CHARS) {
+                                        reasoningPrefixConfirmed = true;
+                                        emitVisibleStreamDelta("reasoning", pendingReasoningPrefix, currentTurnId);
+                                        emitStreamProgress("reasoning", pendingReasoningPrefix.length);
+                                        pendingReasoningPrefix = "";
+                                    }
+                                } else {
+                                    emitVisibleStreamDelta("reasoning", reasoningDelta, currentTurnId);
+                                    emitStreamProgress("reasoning", reasoningDelta.length);
                                 }
-                                emitVisibleStreamDelta("reasoning", reasoningDelta, currentTurnId);
-                                emitStreamProgress("reasoning", reasoningDelta.length);
                             }
                             if (delta.content) {
                                 fullContent += delta.content;
@@ -727,16 +761,40 @@ export class AgentTurnEngine {
                                     if (!toolCalls[tc.index]) {
                                         toolCalls[tc.index] = { id: tc.id, function: { name: "", arguments: "" } };
                                     }
-                                    if (tc.id) toolCalls[tc.index].id = tc.id;
-                                    if (tc.function?.name) toolCalls[tc.index].function.name = tc.function.name;
+                                    const toolCall = toolCalls[tc.index];
+                                    if (tc.id) toolCall.id = tc.id;
+                                    if (tc.function?.name) {
+                                        if (outputGuardEnabled) {
+                                            const nameHit = findControlToken(tc.function.name);
+                                            if (nameHit) throw buildCorruptionError(nameHit, 'tool_arguments');
+                                        }
+                                        toolCall.function.name = tc.function.name;
+                                    }
                                     if (tc.function?.arguments) {
-                                        toolCalls[tc.index].function.arguments += tc.function.arguments;
+                                        // 工具参数必须是 JSON：出现控制标记说明整条响应已损坏，
+                                        // 必须在执行工具/写入历史之前丢弃并重新请求。
+                                        const overlapStart = Math.max(0, toolCall.function.arguments.length - TOOL_ARGUMENT_SCAN_OVERLAP_CHARS);
+                                        const probeText = toolCall.function.arguments.slice(overlapStart) + tc.function.arguments;
+                                        if (outputGuardEnabled) {
+                                            const argumentHit = findControlToken(probeText);
+                                            if (argumentHit) throw buildCorruptionError(argumentHit, 'tool_arguments');
+                                        }
+                                        toolCall.function.arguments += tc.function.arguments;
                                         toolArgumentChars += tc.function.arguments.length;
-                                        emitStreamProgress("tool_arguments", tc.function.arguments.length, toolCalls[tc.index].function.name || undefined);
+                                        emitStreamProgress("tool_arguments", tc.function.arguments.length, toolCall.function.name || undefined);
                                     }
                                 });
                             }
                         }
+                    }
+                    if (!reasoningPrefixConfirmed && pendingReasoningPrefix) {
+                        const reasoningFinalProbe = probeLeadingContent(pendingReasoningPrefix);
+                        if (reasoningFinalProbe.state === 'suspect') {
+                            throw buildCorruptionError(reasoningFinalProbe.hit, 'prefix');
+                        }
+                        emitVisibleStreamDelta("reasoning", pendingReasoningPrefix, currentTurnId);
+                        emitStreamProgress("reasoning", pendingReasoningPrefix.length);
+                        pendingReasoningPrefix = "";
                     }
                     if (!contentPrefixConfirmed && pendingContentPrefix) {
                         const finalProbe = probeLeadingContent(pendingContentPrefix);
@@ -748,6 +806,8 @@ export class AgentTurnEngine {
                         pendingContentPrefix = "";
                     }
                     if (outputGuardEnabled) {
+                        const reasoningBodyHit = detectRepeatedControlToken(fullReasoning);
+                        if (reasoningBodyHit) throw buildCorruptionError(reasoningBodyHit, 'body');
                         const bodyHit = detectRepeatedControlToken(fullContent);
                         if (bodyHit) throw buildCorruptionError(bodyHit, 'body');
                     }
@@ -810,18 +870,73 @@ export class AgentTurnEngine {
                         console.warn(
                             `${getTS()} [AgentTurnEngine] 模型输出异常（${error.detail.phase}）：${error.message}`,
                         );
-                        // 前缀泄漏时还没有任何内容送到前端，可安全地重新请求一次；
-                        // 正文中途出现控制标记说明生成已经失控，直接失败，避免把垃圾写进历史。
-                        if (error.detail.phase === 'prefix' && !corruptionRetryUsed && !contentPrefixConfirmed) {
-                            corruptionRetryUsed = true;
-                            emit({ type: "stage", content: "检测到模型输出异常（控制标记泄漏），正在重新请求一次..." });
-                            retryStageVisible = true;
-                            await new Promise((resolve) => setTimeout(resolve, 500));
-                        } else {
-                            // 失败前先让用户看到“模型被替换”的明确提示
-                            notifyModelSubstitution({ retries: substitutionRetries, resolved: false });
-                            throw error;
+                        // 被丢弃的响应已真实消耗 token，仍需计入用量与预算
+                        if (localUsage) {
+                            usage = accumulateTokenUsage(usage, localUsage);
+                            telemetrySink?.(localUsage, finalModelId);
+                            localUsage = null;
                         }
+
+                        const phaseLabel = error.detail.phase === 'tool_arguments'
+                            ? '工具调用参数包含控制标记'
+                            : error.detail.phase === 'body'
+                                ? '正文包含控制标记'
+                                : '控制标记泄漏';
+                        // 异常响应一律不写入历史（工具也不会执行）。已送到前端的部分只影响展示，
+                        // 丢弃整条响应后重新请求即可恢复，不能因为一次异常输出就终止整个任务。
+                        if (corruptionRetries < corruptionRetryLimit) {
+                            corruptionRetries++;
+                            emit({
+                                type: "stage",
+                                content: `检测到模型输出异常（${phaseLabel}），已丢弃本次响应并重新请求`
+                                    + `（第 ${corruptionRetries}/${corruptionRetryLimit} 次）...`,
+                            });
+                            if (emittedClientContentChars > 0 || emittedClientReasoningChars > 0) {
+                                emit({
+                                    type: "text",
+                                    content: `\n\n_[模型输出异常，已丢弃本次回复并重新请求（第 ${corruptionRetries} 次）...]_ \n\n`,
+                                    turn: currentTurnId,
+                                });
+                            }
+                            retryStageVisible = true;
+                            await new Promise((resolve) => setTimeout(resolve, CORRUPTION_RETRY_BASE_DELAY_MS * corruptionRetries));
+                            continue;
+                        }
+
+                        // 相同请求容易被同一故障后端重复复现：注入纠正指令后再试一轮
+                        if (corruptionRetryLimit > 0 && corruptionRecoveryRounds < CORRUPTION_RECOVERY_ROUNDS) {
+                            corruptionRecoveryRounds++;
+                            corruptionRetries = 0;
+                            emit({
+                                type: "notice",
+                                code: "MODEL_OUTPUT_CORRUPTED",
+                                level: "warning",
+                                content: `模型连续 ${corruptionRetryLimit} 次返回异常输出（${phaseLabel}），这些响应已全部丢弃；`
+                                    + `现在注入纠正指令后重新请求（第 ${corruptionRecoveryRounds}/${CORRUPTION_RECOVERY_ROUNDS} 轮）。`,
+                                params: {
+                                    phase: error.detail.phase,
+                                    token: error.detail.hit.token,
+                                    requestedModel: finalModelId,
+                                    servedModels: Array.from(servedModels),
+                                    providerId: options.provider?.id,
+                                    baseUrlHost: resolveHost(options.provider?.baseURL),
+                                },
+                            });
+                            activeHistory.push(
+                                AIProviderFactory.buildMidConversationDirective(options.provider, [
+                                    '上一次请求的模型响应包含异常控制标记（BOS/EOS 等特殊 token），已被系统丢弃，不属于有效上下文。',
+                                    '请重新给出正常回答：只输出面向用户的有效内容，不要输出任何特殊 token 或控制标记。',
+                                    '如果需要调用工具，请给出完整的工具名与合法的 JSON 参数。',
+                                ].join('\n')),
+                            );
+                            retryStageVisible = true;
+                            await new Promise((resolve) => setTimeout(resolve, CORRUPTION_RETRY_BASE_DELAY_MS * 2));
+                            continue;
+                        }
+
+                        // 重试手段用尽仍然异常：先给出“模型被替换”的明确提示，再上抛
+                        notifyModelSubstitution({ retries: substitutionRetries, resolved: false });
+                        throw error;
                     } else {
                         // ================================================================
                         // 可重试错误分类（共享工具 ApiRetryUtils）：
@@ -907,13 +1022,33 @@ export class AgentTurnEngine {
                         continue;
                     }
 
-                    let parsedArgs = {};
-                    try {
-                        parsedArgs = JSON.parse(tc.function.arguments || "{}");
-                    } catch (e) {
-                        console.error(
-                            `${getTS()} [AgentTurnEngine] JSON parse error for tool ${tc.function.name}. argumentsLength=${tc.function.arguments?.length || 0}`
-                        );
+                    let parsedArgs: any = {};
+                    const rawArguments = typeof tc.function.arguments === "string" ? tc.function.arguments.trim() : "";
+                    if (rawArguments) {
+                        try {
+                            parsedArgs = JSON.parse(rawArguments);
+                        } catch (e: any) {
+                            // 参数被截断/污染时不要退化成空参数执行工具（可能造成误操作），
+                            // 把错误回传给模型，让它在下一轮重新发起合法调用。
+                            const errMessage = `工具参数不是合法 JSON（已跳过执行）：${String(e?.message || e)}`;
+                            console.error(
+                                `${getTS()} [AgentTurnEngine] JSON parse error for tool ${tc.function.name}. argumentsLength=${tc.function.arguments?.length || 0}`
+                            );
+                            emit({
+                                type: "annotation",
+                                method: "tool/error",
+                                params: { toolCallId: tc.id, toolName: tc.function.name, error: errMessage },
+                            });
+                            activeHistory.push({
+                                role: "tool",
+                                tool_call_id: tc.id,
+                                content: `Error: ${errMessage}`,
+                            });
+                            continue;
+                        }
+                    }
+                    if (parsedArgs === null || typeof parsedArgs !== "object") {
+                        parsedArgs = {};
                     }
 
                     emit({

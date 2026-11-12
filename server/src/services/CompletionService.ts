@@ -3,6 +3,10 @@ import { SettingsService } from "@/services/SettingsService.js";
 import { extractReasoningText } from "../utils/ReasoningUtils.js";
 import { withApiRetry } from "@/utils/ApiRetryUtils.js";
 import { config as globalConfig } from "@/config/index.js";
+import { findControlToken, probeLeadingContent } from "@/services/ModelOutputGuard.js";
+
+/** 补全流同样先缓冲前缀，避免把拆包的控制标记直接插入编辑器。 */
+const COMPLETION_PREFIX_PROBE_CHARS = 32;
 
 export class CompletionService {
     private static userRateLimits: Map<string, { count: number, resetTime: number }> = new Map();
@@ -70,7 +74,54 @@ export class CompletionService {
             }
         );
 
-        return stream;
+        return CompletionService.guardCompletionStream(stream);
+    }
+
+    /**
+     * 补全结果守卫：模型把 BOS/EOS 等控制标记当正文输出时，整条补全直接丢弃，
+     * 不把垃圾文本送进编辑器（与对话侧的 ModelOutputGuard 同一判定规则）。
+     */
+    private static async *guardCompletionStream(stream: any) {
+        if (!globalConfig.agent.modelOutputGuard) {
+            yield* stream;
+            return;
+        }
+        let pendingPrefix = "";
+        let prefixConfirmed = false;
+        for await (const chunk of stream) {
+            const delta = chunk?.choices?.[0]?.delta;
+            const text = typeof delta?.content === "string" ? delta.content : "";
+            if (!text) {
+                yield chunk;
+                continue;
+            }
+            if (prefixConfirmed) {
+                yield chunk;
+                continue;
+            }
+            pendingPrefix += text;
+            const probe = probeLeadingContent(pendingPrefix);
+            if (probe.state === "suspect") {
+                console.warn(`[CompletionService] 补全返回了 ${probe.hit.token} 控制标记，已丢弃本次补全`);
+                return;
+            }
+            if (probe.state === "clean" || pendingPrefix.length >= COMPLETION_PREFIX_PROBE_CHARS) {
+                prefixConfirmed = true;
+                yield {
+                    ...chunk,
+                    choices: [{ ...chunk.choices[0], delta: { ...delta, content: pendingPrefix } }],
+                };
+                pendingPrefix = "";
+            }
+        }
+        if (!prefixConfirmed && pendingPrefix) {
+            const probe = probeLeadingContent(pendingPrefix);
+            if (probe.state === "suspect") {
+                console.warn(`[CompletionService] 补全返回了 ${probe.hit.token} 控制标记，已丢弃本次补全`);
+                return;
+            }
+            yield { choices: [{ index: 0, delta: { content: pendingPrefix } }] } as any;
+        }
     }
 
     static async getCompletion(params: any) {
@@ -108,6 +159,14 @@ export class CompletionService {
             }
         );
         const message = response.choices[0]?.message;
-        return message?.content || extractReasoningText(message) || "";
+        const text = message?.content || extractReasoningText(message) || "";
+        if (globalConfig.agent.modelOutputGuard) {
+            const hit = findControlToken(text);
+            if (hit) {
+                console.warn(`[CompletionService] 补全返回了 ${hit.token} 控制标记，已丢弃本次补全`);
+                return "";
+            }
+        }
+        return text;
     }
 }

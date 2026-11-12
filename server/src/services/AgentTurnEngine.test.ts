@@ -532,11 +532,203 @@ describe("AgentTurnEngine request recovery", () => {
         }
     });
 
+    it("discards a response whose tool-call arguments leak control tokens and retries without executing the tool", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(console, "warn").mockImplementation(() => {});
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const emitted: any[] = [];
+            const executeTool = vi.fn().mockResolvedValue("should not run");
+            const create = vi.fn()
+                .mockImplementationOnce(async () => (async function* () {
+                    // 控制标记被拆到两个 delta 中，验证增量重叠窗口仍能命中
+                    yield {
+                        model: "test-model",
+                        choices: [{
+                            delta: {
+                                tool_calls: [{
+                                    index: 0,
+                                    id: "call-1",
+                                    type: "function",
+                                    function: { name: "read_file", arguments: '{"path":"</begin_of_sentence' },
+                                }],
+                            },
+                        }],
+                    };
+                    yield {
+                        model: "test-model",
+                        choices: [{
+                            delta: {
+                                tool_calls: [{ index: 0, function: { arguments: ' />ehoy3 documnt field"}' } }],
+                            },
+                        }],
+                    };
+                })())
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { model: "test-model", choices: [{ delta: { content: "正常回答" } }] };
+                })());
+            const agentService = {
+                toolManager: { executeTool },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [],
+                toolsMetadata: [{ type: "function", function: { name: "read_file", parameters: {} } }],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "guard-user",
+                currentTraceId: "trace-guard-arguments",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(create).toHaveBeenCalledTimes(2);
+            expect(executeTool).not.toHaveBeenCalled();
+            expect(result.finalAssistantContent).toBe("正常回答");
+            const streamedText = emitted
+                .filter((chunk) => chunk.type === "text")
+                .map((chunk) => String(chunk.content))
+                .join("");
+            expect(streamedText).not.toContain("begin_of_sentence");
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("discards control-token garbage that arrives as reasoning before emitting it", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(console, "warn").mockImplementation(() => {});
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const emitted: any[] = [];
+            const create = vi.fn()
+                .mockImplementationOnce(async () => (async function* () {
+                    yield {
+                        model: "test-model",
+                        choices: [{ delta: { reasoning_content: "<｜begin▁of▁sentence｜>异常推理内容" } }],
+                    };
+                })())
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { model: "test-model", choices: [{ delta: { content: "正常回答" } }] };
+                })());
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "guard-user",
+                currentTraceId: "trace-guard-reasoning",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(create).toHaveBeenCalledTimes(2);
+            expect(result.finalAssistantContent).toBe("正常回答");
+            const streamed = emitted
+                .filter((chunk) => chunk.type === "reasoning" || chunk.type === "text")
+                .map((chunk) => String(chunk.content))
+                .join("");
+            expect(streamed).not.toContain("of▁sentence");
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("skips executing a tool whose arguments are not valid JSON", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const emitted: any[] = [];
+        const executeTool = vi.fn().mockResolvedValue("ok");
+        const create = vi.fn()
+            .mockImplementationOnce(async () => (async function* () {
+                yield {
+                    model: "test-model",
+                    choices: [{
+                        delta: {
+                            tool_calls: [{
+                                index: 0,
+                                id: "call-1",
+                                type: "function",
+                                function: { name: "read_file", arguments: '{"path": "src/index.ts"' },
+                            }],
+                        },
+                    }],
+                };
+            })())
+            .mockImplementationOnce(async () => (async function* () {
+                yield { model: "test-model", choices: [{ delta: { content: "参数错误，已跳过执行" } }] };
+            })());
+        const agentService = {
+            toolManager: { executeTool },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [{ type: "function", function: { name: "read_file", parameters: {} } }],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "guard-user",
+            currentTraceId: "trace-guard-json",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "检查代码" },
+            prepareMessages: async (messages) => messages,
+            emit: (chunk) => emitted.push(chunk),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(create).toHaveBeenCalledTimes(2);
+        expect(executeTool).not.toHaveBeenCalled();
+        expect(result.finalAssistantContent).toBe("参数错误，已跳过执行");
+        expect(emitted.some((chunk) => chunk.type === "annotation"
+            && chunk.method === "tool/error"
+            && chunk.params?.toolCallId === "call-1")).toBe(true);
+    });
+
     it("fails the turn instead of persisting control-token garbage", async () => {
         const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
             handler();
             return 0 as any;
         }) as any);
+        const originalCorruptionLimit = globalConfig.agent.modelCorruptionRetries;
+        globalConfig.agent.modelCorruptionRetries = 3;
         vi.spyOn(console, "warn").mockImplementation(() => {});
         try {
             vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
@@ -576,47 +768,123 @@ describe("AgentTurnEngine request recovery", () => {
                 provider: { id: "proxy", name: "proxy", type: "openai-compatible", modelId: "deepseek-v4-flash", apiKey: "x", baseURL: "https://gateway.example.com/v1" },
             })).rejects.toMatchObject({ code: "MODEL_OUTPUT_CORRUPTED" });
 
-            expect(create).toHaveBeenCalledTimes(2);
+            expect(create).toHaveBeenCalledTimes(8);
             expect(emitted.some((chunk) => chunk.type === "text" && String(chunk.content).includes("begin_of_sentence")))
                 .toBe(false);
             expect(agentService.updateSessionHistory).not.toHaveBeenCalled();
+        } finally {
+            globalConfig.agent.modelCorruptionRetries = originalCorruptionLimit;
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("retries duplicated control tokens appearing mid-answer and returns the clean answer", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(console, "warn").mockImplementation(() => {});
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const create = vi.fn()
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { choices: [{ delta: { content: "先给出结论。" } }] };
+                    yield { choices: [{ delta: { content: "另外 <|end_of_sentence|> 与 <|end_of_sentence|> 重复出现" } }] };
+                })())
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { choices: [{ delta: { content: "正常的最终结论。" } }] };
+                })());
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "guard-user",
+                currentTraceId: "trace-guard-body",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: vi.fn(),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(create).toHaveBeenCalledTimes(2);
+            expect(result.finalAssistantContent).toBe("正常的最终结论。");
         } finally {
             setTimeoutSpy.mockRestore();
         }
     });
 
-    it("rejects duplicated control tokens appearing mid-answer without retrying", async () => {
-        vi.spyOn(console, "warn").mockImplementation(() => {});
-        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
-        const create = vi.fn(async () => (async function* () {
-            yield { choices: [{ delta: { content: "先给出结论。" } }] };
-            yield { choices: [{ delta: { content: "另外 <|end_of_sentence|> 与 <|end_of_sentence|> 重复出现" } }] };
-        })());
-        const agentService = {
-            toolManager: { executeTool: vi.fn() },
-            updateSessionHistory: vi.fn(),
-        } as unknown as AgentService;
+    it("injects a corrective directive when abnormal output survives the retry budget", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        const originalCorruptionLimit = globalConfig.agent.modelCorruptionRetries;
+        globalConfig.agent.modelCorruptionRetries = 3;
+        try {
+            vi.spyOn(console, "warn").mockImplementation(() => {});
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const emitted: any[] = [];
+            let call = 0;
+            const create = vi.fn(async (payload: any) => {
+                call += 1;
+                if (call <= 4) {
+                    return (async function* () {
+                        yield { choices: [{ delta: { content: "<|begin_of_sentence|>####异常输出" } }] };
+                    })();
+                }
+                return (async function* () {
+                    yield { choices: [{ delta: { content: "注入纠正指令后的正常回答。" } }] };
+                })();
+            });
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
 
-        await expect(AgentTurnEngine.runTurns({
-            client: { chat: { completions: { create } } },
-            finalModelId: "test-model",
-            activeHistory: [],
-            toolsMetadata: [],
-            thinkingOptions: {},
-            agentService,
-            root,
-            userId: "guard-user",
-            currentTraceId: "trace-guard-body",
-            optimizedMessages: [],
-            lastUserMsgRecord: { role: "user", content: "检查代码" },
-            prepareMessages: async (messages) => messages,
-            emit: vi.fn(),
-            startTimeStamp: Date.now(),
-            skipJournal: true,
-            skipPersist: true,
-            skipTelemetry: true,
-        })).rejects.toMatchObject({ code: "MODEL_OUTPUT_CORRUPTED", detail: { phase: "body" } });
-        expect(create).toHaveBeenCalledTimes(1);
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "guard-user",
+                currentTraceId: "trace-guard-recovery",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "检查代码" },
+                prepareMessages: async (messages) => messages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(create).toHaveBeenCalledTimes(5);
+            expect(result.finalAssistantContent).toBe("注入纠正指令后的正常回答。");
+            expect(emitted.some((chunk) => chunk.type === "notice" && chunk.code === "MODEL_OUTPUT_CORRUPTED"))
+                .toBe(true);
+            const recoveryMessages = create.mock.calls[4][0].messages as any[];
+            expect(recoveryMessages.some((message) => String(message.content || "").includes("异常控制标记")))
+                .toBe(true);
+        } finally {
+            globalConfig.agent.modelCorruptionRetries = originalCorruptionLimit;
+            setTimeoutSpy.mockRestore();
+        }
     });
 
     it("keeps answers that merely quote a control token inside code spans", async () => {
@@ -650,6 +918,45 @@ describe("AgentTurnEngine request recovery", () => {
         });
 
         expect(result.finalAssistantContent).toContain("begin_of_sentence");
+    });
+
+    it("accepts an abbreviated served model id without substitution retry or warning", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const emitted: any[] = [];
+        const create = vi.fn(async () => (async function* () {
+            yield {
+                model: "dsv4",
+                choices: [{ delta: { content: "这是来自 dsv4 的干净回答，长度足够确认前缀。" } }],
+            };
+        })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "deepseek-v4-flash",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "alias-user",
+            currentTraceId: "trace-alias",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "检查代码" },
+            prepareMessages: async (messages) => messages,
+            emit: (chunk) => emitted.push(chunk),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(emitted.some((chunk) => chunk.type === "notice")).toBe(false);
+        expect(result.finalAssistantContent).toContain("干净回答");
     });
 
     it("discards the substituted reply and retries until the requested model is served", async () => {
@@ -866,10 +1173,12 @@ describe("AgentTurnEngine request recovery", () => {
         expect(emitted.some((chunk) => chunk.type === "notice")).toBe(false);
     });
 
-    it("detects control-token leakage over a real SSE stream and never persists it", async () => {
+    it("detects control-token leakage over a real SSE stream, retries, and never persists it", async () => {
         const { createServer } = await import("node:http");
         const OpenAI = (await import("openai")).default;
+        let connections = 0;
         const server = createServer((_request, response) => {
+            connections += 1;
             response.writeHead(200, { "content-type": "text/event-stream" });
             const chunk = (content: string, model: string) => `data: ${JSON.stringify({
                 id: "chatcmpl-test",
@@ -878,7 +1187,11 @@ describe("AgentTurnEngine request recovery", () => {
                 model,
                 choices: [{ index: 0, delta: { content }, finish_reason: null }],
             })}\n\n`;
-            response.write(chunk("<|begin_of_sentence|>####下列判色丑 插件Combine<|end_of_sentence|>", "deepseek-v4-flash"));
+            if (connections === 1) {
+                response.write(chunk("<|begin_of_sentence|>####下列判色丑 插件Combine<|end_of_sentence|>", "deepseek-v4-flash"));
+            } else {
+                response.write(chunk("重试后返回的干净回答，长度足够确认前缀。", "deepseek-v4-flash"));
+            }
             response.end("data: [DONE]\n\n");
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -892,7 +1205,7 @@ describe("AgentTurnEngine request recovery", () => {
         } as unknown as AgentService;
         const emitted: any[] = [];
         try {
-            await expect(AgentTurnEngine.runTurns({
+            const result = await AgentTurnEngine.runTurns({
                 client,
                 finalModelId: "deepseek-v4-flash",
                 activeHistory: [],
@@ -911,11 +1224,95 @@ describe("AgentTurnEngine request recovery", () => {
                 skipPersist: true,
                 skipTelemetry: true,
                 provider: { id: "proxy", name: "proxy", type: "openai-compatible", modelId: "deepseek-v4-flash", apiKey: "test-key", baseURL: `http://127.0.0.1:${port}/v1` },
-            })).rejects.toMatchObject({ code: "MODEL_OUTPUT_CORRUPTED" });
+            });
 
+            expect(connections).toBe(2);
+            expect(result.finalAssistantContent).toContain("干净回答");
             expect(agentService.updateSessionHistory).not.toHaveBeenCalled();
             expect(emitted.some((chunk) => chunk.type === "text" && String(chunk.content).includes("begin_of_sentence")))
                 .toBe(false);
+        } finally {
+            vi.restoreAllMocks();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    });
+
+    it("discards a real SSE stream whose tool-call arguments leak control tokens", async () => {
+        const { createServer } = await import("node:http");
+        const OpenAI = (await import("openai")).default;
+        let connections = 0;
+        const server = createServer((_request, response) => {
+            connections += 1;
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            const send = (payload: any) => response.write(`data: ${JSON.stringify(payload)}\n\n`);
+            if (connections === 1) {
+                send({
+                    id: "chatcmpl-test",
+                    object: "chat.completion.chunk",
+                    created: 0,
+                    model: "test-model",
+                    choices: [{
+                        index: 0,
+                        delta: {
+                            tool_calls: [{
+                                index: 0,
+                                id: "call-1",
+                                type: "function",
+                                function: {
+                                    name: "read_file",
+                                    arguments: '{"path":"</begin_of_sentence />ehoy3 documnt field"}',
+                                },
+                            }],
+                        },
+                        finish_reason: null,
+                    }],
+                });
+            } else {
+                send({
+                    id: "chatcmpl-test",
+                    object: "chat.completion.chunk",
+                    created: 0,
+                    model: "test-model",
+                    choices: [{ index: 0, delta: { content: "正常回答" }, finish_reason: null }],
+                });
+            }
+            response.end("data: [DONE]\n\n");
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        const client = new OpenAI({ apiKey: "test-key", baseURL: `http://127.0.0.1:${port}/v1`, maxRetries: 0 });
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const executeTool = vi.fn().mockResolvedValue("should not run");
+        const agentService = {
+            toolManager: { executeTool },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+        try {
+            const result = await AgentTurnEngine.runTurns({
+                client,
+                finalModelId: "test-model",
+                activeHistory: [],
+                toolsMetadata: [{ type: "function", function: { name: "read_file", parameters: {} } }],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "guard-user",
+                currentTraceId: "trace-guard-sse-args",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "读取文件" },
+                prepareMessages: async (messages) => messages,
+                emit: vi.fn(),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(connections).toBe(2);
+            expect(executeTool).not.toHaveBeenCalled();
+            expect(result.finalAssistantContent).toBe("正常回答");
         } finally {
             vi.restoreAllMocks();
             await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -32,6 +32,33 @@ describe('AgentService session history guard', () => {
         expect(service.getSessionHistory(userId, root)).toHaveLength(3);
     });
 
+    it('drops assistant turns whose tool-call arguments carry control tokens', () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        service.updateSessionHistory(userId, [
+            { role: 'system', content: 'system prompt' },
+            { role: 'user', content: '读取项目文件' },
+            {
+                role: 'assistant',
+                content: '',
+                tool_calls: [{
+                    id: 'call-9',
+                    type: 'function',
+                    function: { name: 'read_file', arguments: '{"path":"</begin_of_sentence />ehoy3 documnt field"}' },
+                }],
+            },
+            {
+                role: 'tool',
+                tool_call_id: 'call-9',
+                content: 'Error: 文件不存在："</begin_of_sentence />ehoy3 documnt field"',
+            },
+            { role: 'assistant', content: '正常回答' },
+        ], root);
+
+        const history = service.getSessionHistory(userId, root);
+        expect(history.map((message) => message.role)).toEqual(['system', 'user', 'assistant']);
+        expect(history[2].content).toBe('正常回答');
+    });
+
     it('keeps normal conversations and quoted control tokens untouched', () => {
         const original = [
             { role: 'user', content: '解释 BOS' },

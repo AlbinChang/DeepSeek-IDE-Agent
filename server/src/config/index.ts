@@ -139,6 +139,8 @@ export const config = {
         modelOutputGuard: parseBoolean(process.env.AGENT_MODEL_OUTPUT_GUARD, true),
         // 检测到服务端返回的模型与所选不一致时，丢弃本次回复并重试的次数（0 = 不重试，仅提示）
         modelSubstitutionRetries: parsePositiveInt(process.env.AGENT_MODEL_SUBSTITUTION_RETRIES, 2, 0),
+        // 模型输出异常（控制标记泄漏等）时丢弃本次响应并重试的次数（0 = 不重试，直接失败）
+        modelCorruptionRetries: parsePositiveInt(process.env.AGENT_MODEL_CORRUPTION_RETRIES, 3, 0),
     },
 
     // read_file 工具限制

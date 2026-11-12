@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildCorruptionMessage,
     detectRepeatedControlToken,
+    findControlToken,
     isModelMismatch,
     probeLeadingContent,
 } from '@/services/ModelOutputGuard.js';
@@ -21,6 +22,10 @@ describe('probeLeadingContent', () => {
 
     it('flags DeepSeek and Qwen control tokens', () => {
         expect(probeLeadingContent('<｜begin▁of▁sentence｜>正文')).toMatchObject({
+            state: 'suspect',
+            hit: { family: 'deepseek' },
+        });
+        expect(probeLeadingContent('begin▁of▁sentence正文')).toMatchObject({
             state: 'suspect',
             hit: { family: 'deepseek' },
         });
@@ -57,6 +62,19 @@ describe('detectRepeatedControlToken', () => {
     });
 });
 
+describe('findControlToken', () => {
+    it('flags a single control token anywhere in tool-call arguments', () => {
+        expect(findControlToken('{"path":"</begin_of_sentence />ehoy3 documnt field"}')).toMatchObject({
+            family: 'ernie',
+            count: 1,
+        });
+        expect(findControlToken('{"q":"begin▁of▁sentence"}')).toMatchObject({ family: 'deepseek', count: 1 });
+        expect(findControlToken('{"path":"src/index.ts","depth":0}')).toBeUndefined();
+        expect(findControlToken('')).toBeUndefined();
+        expect(findControlToken(undefined)).toBeUndefined();
+    });
+});
+
 describe('buildCorruptionMessage', () => {
     it('surfaces requested vs served model and endpoint for poisoning triage', () => {
         const message = buildCorruptionMessage(
@@ -83,5 +101,16 @@ describe('buildCorruptionMessage', () => {
         expect(isModelMismatch('deepseek-v4-flash', ['ernie-4.5-300b-a47b'])).toBe(true);
         expect(isModelMismatch(undefined, ['ernie-4.5'])).toBe(false);
         expect(isModelMismatch('deepseek-chat', [])).toBe(false);
+    });
+
+    it('treats gateway abbreviations and org-prefixed ids as the same model', () => {
+        expect(isModelMismatch('deepseek-v4-flash', ['dsv4'])).toBe(false);
+        expect(isModelMismatch('deepseek-v4-flash', ['DS-V4-Flash'])).toBe(false);
+        expect(isModelMismatch('deepseek-v4-flash', ['dsv4-flash-0724'])).toBe(false);
+        expect(isModelMismatch('deepseek-v4-flash', ['deepseek-ai/deepseek-v4-flash'])).toBe(false);
+        expect(isModelMismatch('deepseek-v4', ['dsv4'])).toBe(false);
+        // 真正的替换仍要报出来：不同档位、不同家族
+        expect(isModelMismatch('deepseek-v4-flash', ['dsv4-pro'])).toBe(true);
+        expect(isModelMismatch('deepseek-v4-flash', ['deepseek-chat'])).toBe(true);
     });
 });
