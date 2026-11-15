@@ -2,9 +2,8 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
-import { EventDistributor } from '@/services/EventDistributor.js';
-import { GitService } from '@/services/GitService.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
+import { GitService } from '@/services/GitService.js';
 
 export interface CommandResult {
     stdout: string;
@@ -284,14 +283,6 @@ export class SystemTools {
         await ProcessSafetyGuard.getInstance().guard(command);
         if (abortSignal?.aborted) throw new Error(`[${toolName}] 命令已被取消`);
 
-        // 1.5 指令回显 (对齐 Terminal.md Section 4.0)
-        if (userId) {
-            const echoMsg = `\r\n\x1b[38;5;28m❯\x1b[0m \x1b[38;5;250mEXEC:\x1b[0m \x1b[38;5;244m${command}\x1b[0m\r\n`;
-            EventDistributor.broadcast('terminal:data', echoMsg, (client) => {
-                return client.userId === userId && (!workspaceRoot || client.workspaceRoot === workspaceRoot);
-            });
-        }
-
         return new Promise((resolve) => {
             const isWin = process.platform === 'win32';
             const requestedShell = String(shell).toLowerCase();
@@ -414,22 +405,6 @@ export class SystemTools {
                 }
             };
 
-            // [2026.03] 修复 (SSE 实时心跳策略)：针对长时任务，每 10s 发送一个 stage 信号，防止网关/代理超时逻辑杀死请求
-            const startTime = Date.now();
-            let heartbeatTimer: NodeJS.Timeout | null = null;
-            if (userId) {
-                heartbeatTimer = setInterval(() => {
-                    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                    EventDistributor.broadcast('chat:stream', { 
-                        type: 'stage', 
-                        workspaceRoot,
-                        content: `命令运行中 (${elapsed}s): ${command.substring(0, 30)}${command.length > 30 ? '...' : ''}` 
-                    }, (client) => {
-                        return client.userId === userId && (!workspaceRoot || client.workspaceRoot === workspaceRoot);
-                    });
-                }, 10000);
-            }
-
             // 强制关闭进程 Standard Input，防止某些命令进入交互模式等待输入 (Wait For Stdin - 对齐 33.1 节)
             if (child.stdin) {
                 child.stdin.end();
@@ -472,8 +447,7 @@ export class SystemTools {
                 killProc();
             };
             const cleanup = () => {
-                if (timer)          clearTimeout(timer);
-                if (heartbeatTimer) clearInterval(heartbeatTimer);
+                if (timer) clearTimeout(timer);
                 abortSignal?.removeEventListener('abort', onAbort);
             };
             if (abortSignal) {

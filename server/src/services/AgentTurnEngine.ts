@@ -268,9 +268,9 @@ export interface AgentTurnEngineOptions {
     userId: string;
     /** 当前请求的 Trace ID（透传给工具执行） */
     currentTraceId: string;
-    /** 经过优化压缩后的历史快照（用于最终回答时保存到 SessionStore） */
+    /** 经过优化压缩后的历史快照（用于最终回答时更新会话历史） */
     optimizedMessages: any[];
-    /** 最后一条用户消息记录（用于最终回答时保存到 SessionStore） */
+    /** 最后一条用户消息记录（用于最终回答时更新会话历史） */
     lastUserMsgRecord: any;
     /**
      * 重建 activeHistory 的函数（注入系统提示词 + 按字节裁剪）。

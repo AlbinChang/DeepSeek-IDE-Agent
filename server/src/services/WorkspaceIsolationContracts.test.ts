@@ -5,7 +5,6 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { AgentService } from '@/services/AgentService.js';
-import { EventDistributor } from '@/services/EventDistributor.js';
 import { LiveContextStore } from '@/services/LiveContextStore.js';
 import { BrowserMcpAdapter } from '@/services/BrowserMcpAdapter.js';
 
@@ -59,28 +58,6 @@ describe('workspace isolation contracts', () => {
         const text = typeof result === 'string' ? result : (result as any).content;
         expect(text).toContain('workspace A');
         expect(text).not.toContain('workspace B');
-    });
-
-    it('routes chat stream system messages only to matching workspace listeners', async () => {
-        const receivedA: any[] = [];
-        const receivedB: any[] = [];
-        const listenerA = (payload: any) => receivedA.push(payload);
-        const listenerB = (payload: any) => receivedB.push(payload);
-
-        EventDistributor.subscribeSysMessage(userId, listenerA, rootA);
-        EventDistributor.subscribeSysMessage(userId, listenerB, rootB);
-        await EventDistributor.broadcast(
-            'chat:stream',
-            { type: 'stage', content: 'only A', workspaceRoot: rootA },
-            (client) => client.userId === userId && client.workspaceRoot === rootA
-        );
-
-        EventDistributor.unsubscribeSysMessage(userId, listenerA, rootA);
-        EventDistributor.unsubscribeSysMessage(userId, listenerB, rootB);
-
-        expect(receivedA).toHaveLength(1);
-        expect(receivedA[0].content).toBe('only A');
-        expect(receivedB).toHaveLength(0);
     });
 
     it('keeps live editor context separate for the same user across workspaces', () => {

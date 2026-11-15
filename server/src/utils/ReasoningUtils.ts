@@ -54,12 +54,3 @@ export function extractReasoningText(payload: unknown): string {
 
     return "";
 }
-
-export function hasReasoningField(payload: unknown): boolean {
-    if (!payload || typeof payload !== "object") {
-        return false;
-    }
-
-    const source = payload as Record<string, unknown>;
-    return REASONING_KEYS.some((key) => Object.prototype.hasOwnProperty.call(source, key));
-}

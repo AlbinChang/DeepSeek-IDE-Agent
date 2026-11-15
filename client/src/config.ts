@@ -32,5 +32,3 @@ export const USER_ID = getBrowserUserId();
 
 // 事件总线标识
 export const GATEWAY_EVENT = 'ui:gateway:message';
-export const LEGACY_WS_EVENT = 'ui:ws:message';
-

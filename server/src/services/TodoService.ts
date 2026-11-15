@@ -2,7 +2,6 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { UserService } from '@/services/UserService.js';
 import { PathUtils } from '@/utils/PathUtils.js';
-import { EventDistributor } from '@/services/EventDistributor.js';
 
 export interface TodoItem {
     id: string;
@@ -48,8 +47,6 @@ export class TodoService {
         } catch (e) {
             // 文件不存在或已被删除则忽略
         }
-        // 关键修复：除了删除物理文件，必须广播空状态给所有端，确保同步更新
-        EventDistributor.broadcast('todo:sync', [], (client) => client.userId === userId);
     }
 
     /**
@@ -66,9 +63,6 @@ export class TodoService {
         const content = JSON.stringify(todos, null, 2);
 
         await fs.writeFile(filePath, content, 'utf8');
-        
-        // 对齐 Section 35.3：实时广播状态给前端展示 (保持原始线性顺序)
-        EventDistributor.broadcast('todo:sync', todos, (client) => client.userId === userId);
     }
 
     /**

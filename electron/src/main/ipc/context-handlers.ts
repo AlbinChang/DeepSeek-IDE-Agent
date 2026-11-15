@@ -1,13 +1,13 @@
 /**
  * Context & Completion IPC Handlers
- * 
- * 替换 /ws/context 和 /ws/completion WebSocket 路由。
+ *
  * 编辑器上下文同步 + AI 代码补全。
+ * 编辑器上下文统一写入 AgentService.contextStore（LiveContextStore），
+ * 主进程内不再维护第二份 userContexts 镜像，避免状态分叉。
  */
 import { IpcMain, BrowserWindow } from 'electron';
 import { CompletionService } from '@/services/CompletionService.js';
 
-// 上下文存储（内存中）
 interface EditorContext {
     userId: string;
     currentFile?: string | null;
@@ -21,18 +21,42 @@ interface EditorContext {
     timestamp: number;
 }
 
-const userContexts = new Map<string, EditorContext>();
+let agentServiceInstance: any = null;
+
+async function getAgentService(): Promise<any> {
+    if (agentServiceInstance) return agentServiceInstance;
+    const { AgentService } = await import('@/services/AgentService.js');
+    agentServiceInstance = AgentService.getInstance();
+    return agentServiceInstance;
+}
 
 export function registerContextIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
-    
+
     // ── 更新编辑器上下文 ──
     ipcMain.on('context:update', (_event, context: EditorContext) => {
-        const key = `${context.userId}:${context.workspaceRoot || 'default'}`;
-        userContexts.set(key, {
-            ...context,
-            timestamp: Date.now(),
+        void (async () => {
+            const agentService = await getAgentService();
+            const workspaceRoot = context.workspaceRoot || null;
+            agentService.contextStore.updateContext(
+                context.userId,
+                { currentFile: context.currentFile ?? null },
+                workspaceRoot,
+            );
+            if (context.selection) {
+                agentService.updateContextSelection(context.userId, {
+                    path: context.currentFile,
+                    workspaceRoot,
+                    startLine: context.selection.startLine,
+                    startChar: context.selection.startColumn,
+                    endLine: context.selection.endLine,
+                    endChar: context.selection.endColumn,
+                    text: '',
+                });
+            }
+        })().catch((error: unknown) => {
+            console.warn('[ContextIPC] Failed to update editor context:', error);
         });
-        
+
         // 广播给其他窗口（如果有）
         if (!mainWindow.isDestroyed()) {
             mainWindow.webContents.send('context:broadcast', context);
@@ -41,12 +65,30 @@ export function registerContextIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) 
 
     // ── 获取当前上下文 ──
     ipcMain.handle('context:get', async (_event, params: { userId: string; workspaceRoot?: string }) => {
-        const key = `${params.userId}:${params.workspaceRoot || 'default'}`;
-        const ctx = userContexts.get(key);
-        return {
-            success: true,
-            context: ctx || null,
-        };
+        try {
+            const agentService = await getAgentService();
+            const ctx = agentService.contextStore.getContext(params.userId, params.workspaceRoot);
+            if (!ctx) return { success: true, context: null };
+            return {
+                success: true,
+                context: {
+                    userId: params.userId,
+                    workspaceRoot: params.workspaceRoot,
+                    currentFile: ctx.currentFile,
+                    selection: ctx.selection
+                        ? {
+                            startLine: ctx.selection.startLine,
+                            startColumn: ctx.selection.startColumn,
+                            endLine: ctx.selection.endLine,
+                            endColumn: ctx.selection.endColumn,
+                        }
+                        : null,
+                    timestamp: Date.now(),
+                },
+            };
+        } catch (error: any) {
+            return { success: false, context: null, error: error?.message || String(error) };
+        }
     });
 
     console.log('[ContextIPC] Context IPC handlers registered');

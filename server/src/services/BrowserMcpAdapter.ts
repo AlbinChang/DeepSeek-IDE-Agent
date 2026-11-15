@@ -98,11 +98,6 @@ export function parsePlaywrightToolName(agentToolName: string): { nativeToolName
     };
 }
 
-/** 判断是否为 Playwright 桥接工具 */
-export function isPlaywrightBridgeTool(toolName: string): boolean {
-    return toolName.startsWith(`${PLAYWRIGHT_MCP_PREFIX}${TOOL_NAME_SEPARATOR}`);
-}
-
 // ============================================================
 // BrowserMcpAdapter
 // ============================================================

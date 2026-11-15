@@ -214,8 +214,5 @@ export const config = {
         httpAllowPrivate: parseBoolean(process.env.WORKFLOW_HTTP_ALLOW_PRIVATE, false),
         httpMaxResponseBytes: parsePositiveInt(process.env.WORKFLOW_HTTP_MAX_RESPONSE_BYTES, 1024 * 1024, 1024),
         httpTimeoutMs: parsePositiveInt(process.env.WORKFLOW_HTTP_TIMEOUT_MS, 60_000, 1000),
-        // 独立服务的 workflow REST/SSE 默认关闭；启用时必须配置独立 Bearer token。
-        httpApiEnabled: parseBoolean(process.env.WORKFLOW_HTTP_API_ENABLED, false),
-        httpApiToken: process.env.WORKFLOW_HTTP_API_TOKEN || '',
     }
 };

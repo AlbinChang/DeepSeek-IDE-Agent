@@ -57,7 +57,7 @@ export class AgentChatComponent {
             FileIO.deletePath(".evaluate/evl_result.md", root, false).catch((err) => {
                 console.warn(`${getTS()} [AgentChat] Failed to clear evaluator report file for user ${userId}:`, err);
             });
-            agentService.contextStore.updateContext(userId, { currentFile: null, selection: null, workspaceRoot: root }, root);
+            agentService.contextStore.updateContext(userId, { currentFile: null, selection: null }, root);
         }
         console.log(`${getTS()} [AgentChat] Session cleared for user: ${userId}`);
     }
@@ -97,9 +97,6 @@ export class AgentChatComponent {
         const currentTraceId = resumeRequest?.metadata.traceId || traceId;
         const recoveryContext = resumeRequest?.metadata.recoveryContext;
         const effectiveUserInstruct = recoveryContext?.userInstruction ?? userInstruct;
-
-        const isoKey = agentService.getIsolationKey(userId, root);
-        agentService.sessionLastAccess.set(isoKey, Date.now());
 
         const startTimeStamp = Date.now();
         console.log(`${getTS()} [AgentChat] Chat started for user: ${userId}, traceId: ${traceId}, requestId: ${effectiveRequestId}, model: ${finalModelId}`);

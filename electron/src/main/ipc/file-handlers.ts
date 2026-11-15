@@ -9,6 +9,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as zlib from 'node:zlib';
 import { compareFileSystemEntries, sortFileEntries } from '@/utils/FileOrdering.js';
+import { FileIO } from '@/utils/FileIO.js';
+import {
+    FILE_TREE_SKIP_RECURSION,
+    SEARCH_SKIP_DIRS,
+    shouldHideInFileTree,
+} from '@/utils/IgnorePaths.js';
 import { PROJECT_ROOT } from '../index.js';
 
 // ═══════════════════════════════════════════════════════════════
@@ -115,9 +121,18 @@ function readZipEntryContent(zipBuffer: Buffer, entry: ZipEntry): Buffer {
 }
 
 // 简单路径校验（对齐 PathUtils 的沙箱逻辑）
+/**
+ * 判断 child 是否位于 parent 目录之内。
+ * 用 path.relative 而非字符串前缀比较，避免 `/ws` 误判 `/ws-evil` 这类同名前缀兄弟目录。
+ */
+function isInsideDirectory(parent: string, child: string): boolean {
+    const rel = path.relative(parent, child);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 function resolveSafePath(userPath: string, root?: string): string {
     const base = root || PROJECT_ROOT;
-    
+
     // 处理相对路径
     let resolved: string;
     if (path.isAbsolute(userPath)) {
@@ -125,37 +140,19 @@ function resolveSafePath(userPath: string, root?: string): string {
     } else {
         resolved = path.resolve(base, userPath);
     }
-    
-    // 确保路径在 project root 内（可配置放宽）
-    // 在 Electron 桌面应用中，我们允许访问用户选择的任意工作区
-    if (root && !resolved.startsWith(path.resolve(root))) {
-        // 放宽限制：允许访问工作区外的文件（桌面应用有完整文件系统权限）
+
+    // 桌面应用授予完整文件系统权限（支持打开工作区外的文件），越界仅记录以便排查；
+    // 工作区隔离约束由 Agent 工具层强制执行，这里不做拦截。
+    if (root && !isInsideDirectory(path.resolve(root), resolved)) {
         console.warn(`[FileIPC] Path outside workspace root: ${resolved}`);
     }
-    
+
     return resolved;
 }
 
 // ═══════════════════════════════════════════════════════════════
 // 全局文件搜索优化配置与工具函数
 // ═══════════════════════════════════════════════════════════════
-
-/** 搜索时忽略的目录（依赖、构建产物、缓存、虚拟环境等） */
-const SEARCH_SKIP_DIRS = new Set([
-    // 版本控制
-    '.git', '.svn', '.hg', '.bzr', 'CVS',
-    // 依赖与包管理器
-    'node_modules', 'bower_components', 'jspm_packages', 'vendor', 'Pods', '.pnpm-store',
-    // 构建产物与缓存
-    'dist', 'build', 'out', 'target', '.next', '.nuxt', '.turbo', '.cache', '.output',
-    '.svelte-kit', '.parcel-cache', '.docusaurus', 'storybook-static', 'coverage', '.nyc_output',
-    // 虚拟环境
-    '.venv', 'venv', 'env', '.env', 'virtualenv', '.conda', 'conda-meta',
-    // IDE 与 Agent 内部目录
-    '.idea', '.vscode', '.vs', '.ide-agent', '.llm', '.tools', '.memory', '.cursor',
-    // 语言与框架缓存
-    '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.gradle', '.cargo', 'tmp', 'temp',
-]);
 
 /** 搜索文件内容时应跳过的二进制/巨型文件后缀 */
 const BINARY_EXTENSIONS = new Set([
@@ -204,20 +201,8 @@ function getMimeType(filePath: string): string {
     return mimeMap[ext] || 'application/octet-stream';
 }
 
-// 文件编码检测与转换（简化版）
-function detectEncoding(buffer: Buffer): string {
-    // 简单的 BOM 检测
-    if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) return 'utf-8';
-    if (buffer.length >= 2 && buffer[0] === 0xFE && buffer[1] === 0xFF) return 'utf-16be';
-    if (buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xFE) return 'utf-16le';
-    
-    // 检查是否为二进制文件
-    for (let i = 0; i < Math.min(buffer.length, 512); i++) {
-        if (buffer[i] === 0) return 'binary';
-    }
-    
-    return 'utf-8';
-}
+// 文件编码检测统一走 FileIO（jschardet + iconv，支持 GBK/UTF-16/BOM），
+// 保证编辑器打开的内容与 Agent 读取的内容一致。
 
 // ── 目录列表增量缓存 ──────────────────────────────────────────────
 // 文件树轮询/刷新调用非常频繁。原实现使用 fs.readdirSync 在 Electron 主进程
@@ -245,11 +230,6 @@ const DIRECTORY_LIST_CACHE_TTL_MS = 250;
 const DIRECTORY_LIST_CACHE_MAX_ENTRIES = 100;
 const DIRECTORY_LIST_CACHE_STALE_MS = 5 * 60 * 1000;
 const DIRECTORY_LIST_MAX_CACHED_FILES = 5000;
-const DIRECTORY_LIST_SKIP_DIRS = new Set([
-    '.git', 'node_modules', '.ide-agent', '.llm', '.tools',
-    '.memory', '__pycache__', '.vscode', 'dist', '.next',
-]);
-const DIRECTORY_LIST_SKIP_RECURSION = new Set(['node_modules']);
 
 const directoryListCache = new Map<string, DirectoryListSnapshot>();
 const directoryListPending = new Map<string, Promise<DirectoryListSnapshot>>();
@@ -291,7 +271,7 @@ async function readDirectorySnapshot(dir: string): Promise<DirectoryListSnapshot
 
     const files: DirectoryListEntry[] = [];
     for (const entry of entries) {
-        if (entry.name.startsWith('.') && DIRECTORY_LIST_SKIP_DIRS.has(entry.name)) continue;
+        if (shouldHideInFileTree(entry.name)) continue;
         const isDir = entry.isDirectory();
         files.push({
             name: entry.name,
@@ -355,7 +335,7 @@ async function walkDirectoryAsync(
     const results: DirectoryListEntry[] = [];
     let visitedDirs = 0;
     for (const entry of entries) {
-        if (entry.name.startsWith('.') && DIRECTORY_LIST_SKIP_DIRS.has(entry.name)) continue;
+        if (shouldHideInFileTree(entry.name)) continue;
 
         const fullPath = path.join(dir, entry.name);
         const isDir = entry.isDirectory();
@@ -367,7 +347,7 @@ async function walkDirectoryAsync(
             isFile: entry.isFile(),
         });
 
-        if (isDir && currentDepth < maxDepth && !DIRECTORY_LIST_SKIP_RECURSION.has(entry.name)) {
+        if (isDir && currentDepth < maxDepth && !FILE_TREE_SKIP_RECURSION.has(entry.name)) {
             results.push(...await walkDirectoryAsync(fullPath, currentDepth + 1, maxDepth));
             // 每遍历若干目录主动让出事件循环，保证 IPC/UI 事件不被长时间饿死。
             if (++visitedDirs % 10 === 0) {
@@ -401,16 +381,9 @@ export function registerFileIpc(ipcMain: IpcMain) {
             }
 
             const buffer = fs.readFileSync(resolvedPath);
-            const detectedEncoding = params.encoding || detectEncoding(buffer);
-            
-            let content: string;
-            try {
-                // 使用 iconv-lite 进行编码转换（如果可用）
-                const iconv = await import('iconv-lite');
-                content = iconv.default.decode(buffer, detectedEncoding);
-            } catch {
-                content = buffer.toString(detectedEncoding as BufferEncoding || 'utf-8');
-            }
+            const decoded = FileIO.decodeBuffer(buffer, params.encoding);
+            const detectedEncoding = decoded.encoding;
+            let content = decoded.content;
 
             const lines = content.split('\n');
             
@@ -450,14 +423,7 @@ export function registerFileIpc(ipcMain: IpcMain) {
             }
 
             const encoding = params.encoding || 'utf-8';
-            
-            try {
-                const iconv = await import('iconv-lite');
-                const encodedBuffer = iconv.default.encode(params.content, encoding);
-                fs.writeFileSync(resolvedPath, encodedBuffer);
-            } catch {
-                fs.writeFileSync(resolvedPath, params.content, encoding as BufferEncoding || 'utf-8');
-            }
+            fs.writeFileSync(resolvedPath, FileIO.encodeString(params.content, encoding));
 
             return {
                 success: true,

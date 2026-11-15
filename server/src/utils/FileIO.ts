@@ -1,6 +1,7 @@
 ﻿import * as fs from 'fs/promises';
 import { PathUtils } from '@/utils/PathUtils.js';
 import { sortFileEntries } from '@/utils/FileOrdering.js';
+import { shouldHideInFileTree } from '@/utils/IgnorePaths.js';
 import * as path from 'path';
 import iconv from 'iconv-lite';
 import jschardet from 'jschardet';
@@ -12,23 +13,23 @@ import jschardet from 'jschardet';
 export class FileIO {
     /** 置信度阈值：低于此值不信任 jschardet 的推断，回退到 UTF-8 */
     private static readonly CONFIDENCE_THRESHOLD = 0.7;
-    private static readonly UI_LIST_IGNORED_DIRS = new Set([
-        '.git',
-        '.ide-agent',
-        'node_modules',
-        'dist',
-        'build',
-        'coverage',
-        '.next',
-        '.turbo',
-    ]);
 
     /**
      * 智能解码 Buffer，支持 GBK、UTF-8、UTF-8-BOM 等多种编码。
      * 置信度低于 0.7 时安全回退至 UTF-8，避免短文件/纯ASCII头部误判。
      * UTF-8-BOM：读取时剥离 \uFEFF 前缀，但通过 encoding='UTF-8-BOM' 保留标记供写回时复原。
+     *
+     * @param forcedEncoding 指定编码（如调用方已持久化 encoding），命中时跳过探测直接解码
      */
-    public static decodeBuffer(buffer: Buffer): { content: string, encoding: string } {
+    public static decodeBuffer(buffer: Buffer, forcedEncoding?: string): { content: string, encoding: string } {
+        const forced = typeof forcedEncoding === 'string' ? forcedEncoding.trim() : '';
+        if (forced && iconv.encodingExists(forced)) {
+            const content = iconv.decode(buffer, forced);
+            const bomStripped = content.charCodeAt(0) === 0xFEFF ? content.slice(1) : content;
+            const isBomMarked = bomStripped !== content || /^utf-?8(-| )bom$/i.test(forced);
+            return { content: bomStripped, encoding: isBomMarked ? 'UTF-8-BOM' : forced };
+        }
+
         // UTF-16 BOM 优先检测（jschardet 对 UTF-16 识别率不稳定，提前拦截避免误判）
         if (buffer.length >= 2) {
             const b0 = buffer[0], b1 = buffer[1];
@@ -184,14 +185,6 @@ export class FileIO {
         }
     }
 
-    /**
-     * 探测指定文件的实际编码（采样 64KB 以确保 jschardet 推断精度）
-     * 新文件或无法读取时返回 'utf-8' 作为安全默认值。
-     * @deprecated 优先使用 detectFileProfile，可同时获得编码和 EOL 信息。
-     */
-    public static async detectEncoding(fullPath: string): Promise<string> {
-        return (await FileIO.detectFileProfile(fullPath)).encoding;
-    }
 
     /**
      * 将字符串按指定编码重新打包为 Buffer。
@@ -399,9 +392,9 @@ export class FileIO {
     static async listFiles(unsafePath: string, workspaceRoot: string) {
         const fullPath = PathUtils.resolveReadPath(unsafePath, workspaceRoot);
         const files = await fs.readdir(fullPath, { withFileTypes: true });
-        
+
         // 关键修复：返回规范化的绝对路径以支持后续 IO 操作 (Section 31.0 Absolute Path Enforcement)
-        const entries = files.filter(file => !(file.isDirectory() && FileIO.UI_LIST_IGNORED_DIRS.has(file.name))).map(file => ({
+        const entries = files.filter(file => !(file.isDirectory() && shouldHideInFileTree(file.name))).map(file => ({
             name: file.name,
             path: PathUtils.normalizePath(path.join(fullPath, file.name)),
             isDirectory: file.isDirectory(),
@@ -409,57 +402,6 @@ export class FileIO {
             size: 0
         }));
         return sortFileEntries(entries);
-    }
-
-    /**
-     * 全局路径模糊搜索 (返回绝对路径列表)
-     */
-    static async searchFiles(workspaceRoot: string, query: string, maxResults: number = 100): Promise<string[]> {
-        const normRoot = PathUtils.normalizePath(workspaceRoot);
-        const results: string[] = [];
-        const lowerQuery = query.toLowerCase().trim();
-        if (!lowerQuery) return [];
-
-        const skipDirs = new Set([
-            '.git', '.svn', '.hg', 'node_modules', 'bower_components', 'vendor', 'dist', 'build',
-            'out', 'target', '.next', '.nuxt', '.turbo', '.cache', '.output', '.venv', 'venv', 'env',
-            '.idea', '.vscode', '.ide-agent', '__pycache__', 'coverage', 'tmp', 'temp'
-        ]);
-
-        const queue: Array<{ dir: string; depth: number }> = [{ dir: normRoot, depth: 0 }];
-        const visited = new Set<string>();
-        const maxDepth = 15;
-        let scanned = 0;
-
-        while (queue.length > 0 && results.length < maxResults) {
-            const current = queue.shift()!;
-            if (visited.has(current.dir) || current.depth > maxDepth) continue;
-            visited.add(current.dir);
-
-            try {
-                const files = await fs.readdir(current.dir, { withFileTypes: true });
-                for (const file of files) {
-                    const fullPath = PathUtils.normalizePath(path.join(current.dir, file.name));
-                    if (file.isDirectory()) {
-                        if (!skipDirs.has(file.name) && !file.name.startsWith('.')) {
-                            queue.push({ dir: fullPath, depth: current.depth + 1 });
-                        }
-                    } else if (file.isFile()) {
-                        scanned++;
-                        if (file.name.toLowerCase().includes(lowerQuery)) {
-                            results.push(fullPath);
-                            if (results.length >= maxResults) break;
-                        }
-                    }
-                }
-            } catch {
-                // 忽略权限等异常
-            }
-
-            if (scanned > 5000) break;
-        }
-
-        return results;
     }
 
     public static checkBinaryHeader(buffer: Buffer) {

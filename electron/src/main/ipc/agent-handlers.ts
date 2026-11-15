@@ -1,8 +1,7 @@
 /**
  * Agent Chat IPC Handler
  * 
- * 替换 ChatSSERoute.ts，直接在 Main Process 中运行 AgentChatComponent，
- * 通过 IPC 事件流式推送结果到 Renderer。
+ * 在 Main Process 中直接运行 AgentChatComponent，通过 IPC 事件流式推送结果到 Renderer。
  */
 import { IpcMain, BrowserWindow } from 'electron';
 import * as crypto from 'node:crypto';

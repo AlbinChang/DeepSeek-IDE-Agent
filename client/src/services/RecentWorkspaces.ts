@@ -91,10 +91,3 @@ export function removeRecentWorkspace(workspacePath: string): void {
     );
     save(filtered);
 }
-
-/**
- * 清空所有最近工作区记录
- */
-export function clearRecentWorkspaces(): void {
-    localStorage.removeItem(STORAGE_KEY);
-}

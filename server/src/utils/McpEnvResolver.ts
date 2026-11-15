@@ -28,7 +28,7 @@ export function resolveEnvPlaceholder(
 }
 
 /**
- * 递归解析对象中所有字符串值的环境变量占位符
+ * 解析对象中所有字符串值的环境变量占位符（单层：值本身为字符串，不递归嵌套对象）。
  */
 export function resolveEnvPlaceholders(
     obj: Record<string, string>,

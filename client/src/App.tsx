@@ -14,7 +14,7 @@ import { Header } from '@/components/Header';
 import { StatusBar } from '@/components/StatusBar';
 import { switchWorkspace } from '@/services/WorkspaceSwitchService';
 import { useAgentContext, useProblemContext } from '@/providers/AgentContext';
-import { GATEWAY_EVENT, LEGACY_WS_EVENT } from '@/config';
+import { GATEWAY_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 import { getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspaceEntry } from '@/services/RecentWorkspaces';
 
@@ -268,7 +268,6 @@ function App() {
       const sysCleanup = electronBridge.onSystemEvent((event) => {
         if (!event) return;
         window.dispatchEvent(new CustomEvent(GATEWAY_EVENT, { detail: event }));
-        window.dispatchEvent(new CustomEvent(LEGACY_WS_EVENT, { detail: event }));
         const payload = (event as any).payload || {};
         switch (event.type) {
           case 'system:ready':

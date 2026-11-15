@@ -40,36 +40,7 @@ function normalizeRelPath(joined: string): string {
 }
 
 /**
- * 将 Markdown 链接解析为「相对于 workspaceRoot 的相对路径」。
- * @param rawSrc Markdown 链接中的原始 URL
- * @param filePath 当前 MD 文件的工作区相对路径（用于解析 ./ 与 ../）
- *
- * 旧语义（兼容文档间跨目录引用惯例）：
- * - / 开头 → 工作区根相对（去前导斜杠）
- * - ./ 或 ../ 开头 → 相对当前 MD 文件所在目录
- * - 裸相对路径 → 按工作区根相对处理
- *
- * 注意：新代码优先使用 resolveMarkdownLinkCandidates，
- * 它会在点击/加载时按「标准 Markdown 语义优先、工作区根兜底」做存在性校验。
- */
-export function resolveWorkspaceRelativePath(rawSrc: string, filePath?: string): string {
-  const raw = String(rawSrc || '').trim();
-  if (!raw) return '';
-  // / 开头 → 工作区根相对
-  if (raw.startsWith('/')) return raw.replace(/^\/+/, '');
-
-  // ./ 或 ../ 开头 → 相对当前 MD 文件所在目录；其余视为工作区根相对（base 为空）
-  let base = '';
-  if (raw.startsWith('./') || raw.startsWith('../')) {
-    base = filePath ? dirnameOf(filePath) : '';
-  }
-
-  const joined = (base ? `${base}/${raw}` : raw).replace(/\/+/g, '/');
-  return normalizeRelPath(joined);
-}
-
-/**
- * 解析 Markdown 链接的「候选路径」列表（均为相对于 workspaceRoot 的相对路径）。
+ * 将 Markdown 链接解析为「候选路径」列表（均为相对于 workspaceRoot 的相对路径）。
  * 按优先级排列，调用方可借助文件存在性检查选取第一个真实存在的候选：
  * 1. / 开头 → 工作区根相对（唯一候选）
  * 2. ./ 或 ../ 开头 → 标准 Markdown 语义：相对当前 MD 文件所在目录

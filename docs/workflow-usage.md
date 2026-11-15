@@ -29,7 +29,7 @@
 - Agent/evaluator 步骤按 `provider:model` 做跨 Worker 并发限制（默认 2），避免多 Worker 同时打爆模型 API。
 - 可选的请求令牌桶按 `provider:model` 限制每次实际模型请求，包括重试和 evaluator 请求；默认关闭，不影响普通聊天。
 - 同一 workflow 默认串行（`WORKFLOW_MAX_CONCURRENT_RUNS_PER_WORKFLOW=1`）；可用 `concurrencyGroup` 让不同 workflow 共享串行组。
-- standalone server 没有 Electron `utilityProcess`，继续使用进程内引擎；行为与 Worker 模式一致（队列/审批/取消/checkpoint）。
+- 无 Electron `utilityProcess` 时（例如单元测试或测试环境）使用进程内引擎；行为与 Worker 模式一致（队列/审批/取消/checkpoint）。
 
 ## 2. 最小示例
 
@@ -409,28 +409,26 @@ do:
 | `WORKFLOW_HTTP_ALLOW_PRIVATE` | `false` | 是否允许 HTTP 步骤访问私网/localhost |
 | `WORKFLOW_HTTP_MAX_RESPONSE_BYTES` | `1048576` | HTTP 响应体上限 |
 | `WORKFLOW_HTTP_TIMEOUT_MS` | `60000` | HTTP 请求超时 |
-| `WORKFLOW_HTTP_API_ENABLED` | `false` | 启用 standalone server 的 Workflow REST/SSE |
-| `WORKFLOW_HTTP_API_TOKEN` | 空 | API 启用时必填的独立 Bearer 凭据 |
 
 token 预算依据供应商返回的 usage 计算；开启预算后，成功响应未提供 usage 会失败。单次请求、已在途的并行请求和未返回 usage 的失败请求仍可能导致实际用量超过预算，因此不能将其当作严格计费上限。预算和已记录 usage 跨审批/重启恢复继续累计。
 
-## 8. 可选 REST / SSE
+## 8. 调用入口
 
-仅 standalone server 注册这些接口，默认关闭。启用时设置 `WORKFLOW_HTTP_API_ENABLED=true` 和足够随机、独立的 `WORKFLOW_HTTP_API_TOKEN`，然后重启服务。所有请求必须携带 `Authorization: Bearer <token>`；每次还需提供已初始化的 `userId`，可选 `root` 必须与该用户当前登记的工作区一致。此凭据是服务级共享凭据，并非每用户独立授权；不要将服务直接暴露给不可信网络，应结合 TLS、网络访问控制及密钥轮换。
+Workflow 只有一条传输通道：Electron 主进程的 IPC（渲染进程通过 `client/src/services/electron-bridge.ts` 的 `workflowBridge` 调用）。standalone Fastify REST/SSE 接口已随旧 HTTP 运行时一并移除。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/workflows?userId=...` | 列出定义 |
-| GET | `/api/workflows/definitions/:name?userId=...` | 定义、校验结果和 Mermaid 图 |
-| POST | `/api/workflows/validate` | `{ userId, name? }` |
-| POST | `/api/workflows/runs` | `{ userId, name, inputs?, wait?, timeoutSeconds?, provider?, model?, concurrencyGroup? }` |
-| GET | `/api/workflows/runs?userId=...&status=...` | 列出当前用户运行 |
-| GET | `/api/workflows/runs/:runId?userId=...&includeEvents=true` | 运行快照及最近事件 |
-| POST | `/api/workflows/runs/:runId/cancel` | `{ userId }` |
-| POST | `/api/workflows/runs/:runId/resume` | `{ userId, decision?, inputs? }` |
-| GET | `/api/workflows/runs/:runId/events?userId=...` | SSE 事件流 |
+| 通道 | 说明 |
+|---|---|
+| `workflow:list` | 列出定义 |
+| `workflow:get` | 定义、校验结果和 Mermaid 图 |
+| `workflow:validate` | 校验 `{ userId, name? }` |
+| `workflow:run` | `{ userId, name, inputs?, wait?, timeoutSeconds?, provider?, model?, concurrencyGroup? }` |
+| `workflow:listRuns` | 列出当前用户运行 |
+| `workflow:getRun` | 运行快照及最近事件 |
+| `workflow:cancel` | `{ userId, runId }` |
+| `workflow:resume` | `{ userId, runId, decision?, inputs? }` |
+| `workflow:workers` | Worker 池与队列诊断 |
 
-SSE 使用递增的事件 ID，重连可携带 `Last-Event-ID`；历史缺口、缓冲溢出或游标超前时会发送 `reset` 事件，客户端应重新读取运行快照。慢客户端会被断开并可重新连接；工作区切换、重置或服务关闭会结束流。浏览器原生 `EventSource` 不能自定义 Bearer 请求头，应使用支持自定义请求头的 SSE 客户端。
+运行事件通过主进程事件总线推送到渲染进程，由 `workflow:*` 事件订阅消费；审批暂停后由 `workflow:resume` 恢复。
 
 ## 9. 可选自动触发
 

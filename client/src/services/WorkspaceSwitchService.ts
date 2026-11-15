@@ -1,5 +1,4 @@
 import { USER_ID } from '@/config';
-import { disconnectWorkspaceConnections } from '@/services/WorkspaceConnectionService';
 import { electronBridge } from '@/services/electron-bridge';
 import { addRecentWorkspace } from '@/services/RecentWorkspaces';
 
@@ -68,16 +67,6 @@ export async function switchWorkspace(
     }
 
     const execute = async (): Promise<SwitchResult> => {
-        const disconnectResult = await disconnectWorkspaceConnections({
-            reason: forceRebind ? 'workspace-rebind' : (requestedPath ? 'workspace-switch' : 'workspace-reset'),
-            previousWorkspaceRoot: currentWorkspaceRoot
-        });
-
-        if (!disconnectResult.acknowledged) {
-            // Extra safety gap when backend ack was not confirmed.
-            await new Promise((resolve) => setTimeout(resolve, 120));
-        }
-
         if (requestedPath) {
             const result = await electronBridge.initWorkspace({ userId: USER_ID, root: requestedPath });
             if (!result.success) throw new Error(result.error || 'Workspace init failed');

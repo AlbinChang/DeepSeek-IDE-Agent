@@ -4,6 +4,7 @@
 > **本次更新**：新增“主进程调度 + `utilityProcess` 多 Worker 并行”与“现有接口全面核查 / workflow 友好度改造”（见 0.5/0.6、3.6.1、4.6、5.11、6.11、9.4）  
 > **适用项目**：DeepSeek IDE Agent（Electron + Fastify + React + TypeScript）  
 > **调研范围**：原始调研阶段仅做选型与可行性验证；此后已按本报告实施。下文的“现状”分析和阶段规划保留当时背景，当前实现以 0.7 和 7.6 为准。
+> **⚠️ 后续变更（2026-11）**：standalone Fastify HTTP 运行时已整体移除（`server/src/index.ts`、`ChatSSERoute`、`Context/CompletionWebSocket`、`WorkflowHttpRoutes`、`EventDistributor`）。本报告中涉及 `standardalone`、`/api/*`、`WORKFLOW_HTTP_API_*`、`EventDistributor` 的描述均为历史记录；当前 Workflow 只有 Electron IPC 一条通道，见 `docs/workflow-usage.md` 第 8 节。
 > **一句话结论**：当前项目最适合走「**Open Workflow DSL 1.0 子集 + 轻量自研执行器 + 复用现有 ToolManager / AgentTurnEngine**」的路线；不建议在 v1 直接嵌入 Mastra、LangGraph、Inngest、Temporal 等重型框架。
 
 ---

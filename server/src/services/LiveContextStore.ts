@@ -1,6 +1,5 @@
 export interface UserContext {
     currentFile: string | null;
-    workspaceRoot: string | null; // 对齐 Section 42.1: 战略工作区透传
     provider: string | null;      // 对齐 Section 4.4: 模型引擎透传
     modelId: string | null;       // 对齐 Section 32.2: 推理质量保障
     userName?: string;            // 用户身份
@@ -27,12 +26,14 @@ export interface UserContext {
 
 /**
  * 对应技术规范 3.2 节：动态上下文仓库 (Live Context Store)
- * 维护内存中的用户状态镜像，并在 Agent 发起对话前自动注入隐含上下文
+ * 维护内存中的用户状态镜像，并在 Agent 发起对话前自动注入隐含上下文。
+ *
+ * 工作区根路径不在本类中重复保存：它以「(userId, workspaceRoot) 复合键」的形式
+ * 体现在存储键上，真值来源统一由 WorkspaceRegistry 提供，避免多处状态分叉。
  */
 export class LiveContextStore {
     private static instance: LiveContextStore;
     private contexts: Map<string, UserContext> = new Map();
-    private staticInfo: any = null;
 
     private constructor() {}
 
@@ -47,20 +48,10 @@ export class LiveContextStore {
         return workspaceRoot ? `${userId}\u0000${workspaceRoot}` : userId;
     }
 
-    /**
-     * 设置全局静态上下文 (如 OS, Shell, Node 版本等)
-     * 避免后台服务（历史压缩等）重复获取 environment 信息
-     */
-    setStaticContext(info: any) {
-        this.staticInfo = info;
-    }
-
     updateContext(userId: string, update: Partial<UserContext>, workspaceRoot?: string | null) {
-        const root = workspaceRoot || update.workspaceRoot || null;
-        const key = this.contextKey(userId, root);
+        const key = this.contextKey(userId, workspaceRoot);
         const current = this.contexts.get(key) || {
             currentFile: null,
-            workspaceRoot: root,
             provider: null,
             modelId: null,
             selection: null,
@@ -69,7 +60,7 @@ export class LiveContextStore {
             isFocused: true,
             recentDiagnostics: []
         };
-        this.contexts.set(key, { ...current, ...update, workspaceRoot: root });
+        this.contexts.set(key, { ...current, ...update });
     }
 
     /**
@@ -78,7 +69,6 @@ export class LiveContextStore {
     updateSelection(userId: string, data: any) {
         this.updateContext(userId, {
             currentFile: data.path,
-            workspaceRoot: data.workspaceRoot || null,
             selection: {
                 startLine: data.startLine,
                 startColumn: data.startChar,
@@ -99,7 +89,6 @@ export class LiveContextStore {
     updateClick(userId: string, data: any) {
         this.updateContext(userId, {
             currentFile: data.path,
-            workspaceRoot: data.workspaceRoot || null,
             lastClick: {
                 line: data.line,
                 column: data.char
@@ -111,55 +100,10 @@ export class LiveContextStore {
      * 更新焦点状态
      */
     updateFocus(userId: string, focused: boolean, workspaceRoot?: string | null) {
-        this.updateContext(userId, { isFocused: focused, workspaceRoot: workspaceRoot || null }, workspaceRoot || null);
+        this.updateContext(userId, { isFocused: focused }, workspaceRoot || null);
     }
 
     getContext(userId: string, workspaceRoot?: string | null): UserContext | undefined {
         return this.contexts.get(this.contextKey(userId, workspaceRoot)) || this.contexts.get(userId);
-    }
-
-    /**
-     * 清理指定用户的上下文 (对齐 23.1 节)
-     */
-    clearContext(userId: string) {
-        this.contexts.delete(userId);
-    }
-
-    /**
-     * 为 Prompt 注入实时上下文 (对齐 3.1 & 4.5.2 节)
-     * 同时包含全局环境快照，以降低后台服务获取开销
-     */
-    getPromptContext(userId: string, workspaceRoot?: string | null): string {
-        const ctx = this.getContext(userId, workspaceRoot);
-        if (!ctx) return "No active context.";
-
-        let envSection = "";
-        if (this.staticInfo) {
-            envSection = `
-[System Environment - Static]
-OS: ${this.staticInfo.os} (${this.staticInfo.arch})
-Shell: ${this.staticInfo.shell}
-Node.js: ${this.staticInfo.nodeVersion}
-Hardware: ${this.staticInfo.cpuCores} Cores, ${this.staticInfo.totalMemory} RAM
-User: ${this.staticInfo.env?.USER || 'unknown'}
-CWD: ${this.staticInfo.cwd}
-            `.trim();
-        }
-
-        return `
-${envSection}
-
-[Workspace Context]
-Root: ${ctx.workspaceRoot || 'None'}
-Provider: ${ctx.provider || 'default'}
-Model ID: ${ctx.modelId || 'none'}
-
-[User Current State - Dynamic]
-Active File: ${ctx.currentFile || 'None'}
-Editor Focused: ${ctx.isFocused}
-Cursor Position: Line ${ctx.cursor?.line}, Col ${ctx.cursor?.column}
-Last Mouse Click: ${ctx.lastClick ? `Line ${ctx.lastClick.line}, Col ${ctx.lastClick.column}` : 'None'}
-Selected Code: ${ctx.selection ? `\n\`\`\`\n${ctx.selection.text}\n\`\`\`` : 'None'}
-        `.trim();
     }
 }
