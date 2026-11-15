@@ -478,16 +478,24 @@ export const WorkflowPanel: React.FC = () => {
                                                 )}
                                                 <div className="flex flex-col gap-[1px]">
                                                     {run.steps.map((step) => (
-                                                        <div key={step.path} className="flex items-center gap-1 text-[7px] font-mono">
+                                                        <div
+                                                            key={step.path}
+                                                            className="flex items-center gap-1 text-[7px] font-mono"
+                                                            title={step.skipReason || step.error}
+                                                        >
                                                             <span className={`w-1 h-1 rounded-full shrink-0 ${
                                                                 step.status === 'succeeded' ? 'bg-emerald-400/70'
-                                                                    : step.status === 'failed' ? 'bg-red-400/70'
-                                                                        : step.status === 'waiting_approval' ? 'bg-amber-300/70'
-                                                                            : step.status === 'running' ? 'bg-white animate-pulse'
-                                                                                : 'bg-white/20'
+                                                                    : step.status === 'failed' && step.tolerated ? 'bg-amber-300/70'
+                                                                        : step.status === 'failed' ? 'bg-red-400/70'
+                                                                            : step.status === 'waiting_approval' ? 'bg-amber-300/70'
+                                                                                : step.status === 'running' ? 'bg-white animate-pulse'
+                                                                                    : step.status === 'skipped' ? 'bg-white/15'
+                                                                                        : 'bg-white/20'
                                                             }`} />
                                                             <span className="truncate text-white/50">{step.path}</span>
-                                                            <span className="ml-auto text-white/25">{step.status}</span>
+                                                            <span className="ml-auto text-white/25">
+                                                                {step.status}{step.tolerated ? ' · 已容忍' : ''}
+                                                            </span>
                                                         </div>
                                                     ))}
                                                 </div>

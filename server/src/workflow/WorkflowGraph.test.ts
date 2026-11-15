@@ -6,6 +6,7 @@ describe('buildWorkflowGraph', () => {
     it('shows sequential, parallel and conditional workflow structure', () => {
         const graph = buildWorkflowGraph([
             { prepare: { set: { ready: true } } },
+            { optional: { when: '${ .inputs.enabled }', call: 'agent' } },
             { parallel: { fork: { branches: [
                 { do: [{ left: { call: 'agent' } }] },
                 { do: [{ right: { run: { shell: { command: 'test' } } } }] },
@@ -17,6 +18,7 @@ describe('buildWorkflowGraph', () => {
         ]);
         expect(graph.mermaid).toContain('flowchart TD');
         expect(graph.mermaid).toContain('prepare : set');
+        expect(graph.mermaid).toContain('optional : call: agent (when)');
         expect(graph.mermaid).toContain('branch 1');
         expect(graph.mermaid).toContain('branch 2');
         expect(graph.mermaid).toContain('left : call: agent');

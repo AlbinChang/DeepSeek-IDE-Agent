@@ -28,7 +28,13 @@ export interface WorkflowExpressionContext {
     env: Record<string, string | undefined>;
     workspace: string;
     run: { id: string; traceId: string };
-    steps: Record<string, { status: string; output?: unknown; error?: unknown }>;
+    steps: Record<string, {
+        status: string;
+        output?: unknown;
+        error?: unknown;
+        tolerated?: boolean;
+        skipReason?: string;
+    }>;
     context: Record<string, unknown>;
     /** for/try 等局部变量（以裸标识符访问） */
     vars?: Record<string, unknown>;

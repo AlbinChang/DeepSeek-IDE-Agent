@@ -75,6 +75,7 @@
 ### 0.7 当前实现与边界
 
 - 已落地单机声明式执行、Electron `utilityProcess` 多 Worker 调度、控制流、审批/取消/恢复、桌面时间线和 Mermaid 预览；standalone server 可显式启用带 Bearer 鉴权的 REST/SSE。
+- 步骤级 `when` 支持条件跳过并记录 `skipped`；`continueOnError` 可显式容忍普通步骤失败/超时；`run.shell.acceptedExitCodes` 可声明业务允许的非零退出码，避免用 `exit 0` 吞掉真实错误。
 - 嵌套审批支持在父容器内重放已持久化的成功叶子步骤；上下文或输出被截断/脱敏、定义发生变化时拒绝不安全恢复。重启后被脱敏的输入需重新提供。外部操作和崩溃时在途步骤不保证 exactly-once。
 - 按 provider/model 同时限制 Agent/evaluator 步骤，并可选启用覆盖真实请求与重试的请求令牌桶；可选 token 预算只依据已报告 usage，不能保证严格计费上限。`fork` 同时运行的分支数受 `WORKFLOW_MAX_FORK_PARALLEL` 限制。
 - HTTP 使用校验后的 DNS 地址建立连接，逐跳校验重定向并在跨源时移除敏感请求头；Worker 不是安全沙箱。

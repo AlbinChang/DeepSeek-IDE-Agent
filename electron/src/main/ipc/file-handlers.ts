@@ -219,6 +219,165 @@ function detectEncoding(buffer: Buffer): string {
     return 'utf-8';
 }
 
+// ── 目录列表增量缓存 ──────────────────────────────────────────────
+// 文件树轮询/刷新调用非常频繁。原实现使用 fs.readdirSync 在 Electron 主进程
+// 同步遍历目录；大仓库或网络盘上会阻塞主进程，进而卡住 Agent 事件 IPC 与 UI。
+// 这里改为异步 readdir + 目录版本缓存：客户端携带 knownVersion 时，未变化目录
+// 只返回 unchanged，不重新传整份文件列表。
+
+interface DirectoryListEntry {
+    name: string;
+    path: string;
+    type: 'file' | 'directory';
+    isDirectory: boolean;
+    isFile: boolean;
+}
+
+interface DirectoryListSnapshot {
+    version: string;
+    files: DirectoryListEntry[];
+    totalCount: number;
+    cachedAt: number;
+}
+
+// 仅用于合并同一刷新批次内的重复请求；超过该窗口仍会 stat 目录确认版本。
+const DIRECTORY_LIST_CACHE_TTL_MS = 250;
+const DIRECTORY_LIST_CACHE_MAX_ENTRIES = 100;
+const DIRECTORY_LIST_CACHE_STALE_MS = 5 * 60 * 1000;
+const DIRECTORY_LIST_MAX_CACHED_FILES = 5000;
+const DIRECTORY_LIST_SKIP_DIRS = new Set([
+    '.git', 'node_modules', '.ide-agent', '.llm', '.tools',
+    '.memory', '__pycache__', '.vscode', 'dist', '.next',
+]);
+const DIRECTORY_LIST_SKIP_RECURSION = new Set(['node_modules']);
+
+const directoryListCache = new Map<string, DirectoryListSnapshot>();
+const directoryListPending = new Map<string, Promise<DirectoryListSnapshot>>();
+
+function buildDirectoryListResponse(snapshot: DirectoryListSnapshot, knownVersion?: string) {
+    if (knownVersion && knownVersion === snapshot.version) {
+        return {
+            success: true as const,
+            unchanged: true as const,
+            version: snapshot.version,
+            totalCount: snapshot.totalCount,
+            files: [] as DirectoryListEntry[],
+        };
+    }
+    return {
+        success: true as const,
+        unchanged: false as const,
+        version: snapshot.version,
+        files: snapshot.files,
+        totalCount: snapshot.totalCount,
+    };
+}
+
+async function readDirectorySnapshot(dir: string): Promise<DirectoryListSnapshot> {
+    const before = await fs.promises.stat(dir);
+    if (!before.isDirectory()) {
+        throw Object.assign(new Error(`Not a directory: ${dir}`), { code: 'ENOTDIR' });
+    }
+
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    entries.sort((left, right) =>
+        compareFileSystemEntries(
+            left.name,
+            left.isDirectory(),
+            right.name,
+            right.isDirectory(),
+        ),
+    );
+
+    const files: DirectoryListEntry[] = [];
+    for (const entry of entries) {
+        if (entry.name.startsWith('.') && DIRECTORY_LIST_SKIP_DIRS.has(entry.name)) continue;
+        const isDir = entry.isDirectory();
+        files.push({
+            name: entry.name,
+            path: path.join(dir, entry.name),
+            type: isDir ? 'directory' : 'file',
+            isDirectory: isDir,
+            isFile: entry.isFile(),
+        });
+    }
+
+    // 版本取 readdir 之前的目录 stat：若 readdir 期间目录恰好变化，下一轮 stat
+    // 会得到不同的 mtime 并触发重新读取，避免“版本已更新但列表缺新文件”的漏更新。
+    // Windows/NTFS 下目录 mtime 会在子项增删/重命名时变化；对文件树结构而言足够。
+    return {
+        version: `${before.mtimeMs}:${before.ctimeMs}:${files.length}`,
+        files,
+        totalCount: files.length,
+        cachedAt: Date.now(),
+    };
+}
+
+function pruneDirectoryListCache() {
+    const now = Date.now();
+    for (const [key, snapshot] of directoryListCache) {
+        if (now - snapshot.cachedAt > DIRECTORY_LIST_CACHE_STALE_MS) {
+            directoryListCache.delete(key);
+        }
+    }
+    if (directoryListCache.size <= DIRECTORY_LIST_CACHE_MAX_ENTRIES) return;
+    const overflow = directoryListCache.size - DIRECTORY_LIST_CACHE_MAX_ENTRIES;
+    let removed = 0;
+    for (const key of directoryListCache.keys()) {
+        directoryListCache.delete(key);
+        if (++removed >= overflow) break;
+    }
+}
+
+async function walkDirectoryAsync(
+    dir: string,
+    currentDepth: number,
+    maxDepth: number,
+): Promise<DirectoryListEntry[]> {
+    if (currentDepth > maxDepth) return [];
+
+    let entries: import('fs').Dirent[];
+    try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+        return []; // 权限不足等，跳过
+    }
+
+    entries.sort((left, right) =>
+        compareFileSystemEntries(
+            left.name,
+            left.isDirectory(),
+            right.name,
+            right.isDirectory(),
+        ),
+    );
+
+    const results: DirectoryListEntry[] = [];
+    let visitedDirs = 0;
+    for (const entry of entries) {
+        if (entry.name.startsWith('.') && DIRECTORY_LIST_SKIP_DIRS.has(entry.name)) continue;
+
+        const fullPath = path.join(dir, entry.name);
+        const isDir = entry.isDirectory();
+        results.push({
+            name: entry.name,
+            path: fullPath,
+            type: isDir ? 'directory' : 'file',
+            isDirectory: isDir,
+            isFile: entry.isFile(),
+        });
+
+        if (isDir && currentDepth < maxDepth && !DIRECTORY_LIST_SKIP_RECURSION.has(entry.name)) {
+            results.push(...await walkDirectoryAsync(fullPath, currentDepth + 1, maxDepth));
+            // 每遍历若干目录主动让出事件循环，保证 IPC/UI 事件不被长时间饿死。
+            if (++visitedDirs % 10 === 0) {
+                await new Promise<void>((resolve) => setImmediate(resolve));
+            }
+        }
+    }
+    return results;
+}
+
 export function registerFileIpc(ipcMain: IpcMain) {
     
     // ── 读取文件 ──
@@ -349,68 +508,65 @@ export function registerFileIpc(ipcMain: IpcMain) {
         dirPath: string;
         depth?: number;
         root?: string;
+        /** 客户端已知的目录版本；命中时返回 unchanged，不重复传输文件列表 */
+        knownVersion?: string;
     }) => {
         try {
             const resolvedPath = resolveSafePath(params.dirPath, params.root);
             const maxDepth = Math.min(params.depth || 3, 10); // 最大深度限制
 
-            function walkDir(dir: string, currentDepth: number): Array<{
-                name: string;
-                path: string;
-                type: 'file' | 'directory';
-                isDirectory: boolean;
-                isFile: boolean;
-            }> {
-                if (currentDepth > maxDepth) return [];
-                
-                const results: any[] = [];
-                try {
-                    const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((left, right) =>
-                        compareFileSystemEntries(
-                            left.name,
-                            left.isDirectory(),
-                            right.name,
-                            right.isDirectory(),
-                        ),
-                    );
-                    
-                    // 过滤系统目录
-                    const skipDirs = new Set([
-                        '.git', 'node_modules', '.ide-agent', '.llm', '.tools',
-                        '.memory', '__pycache__', '.vscode', 'dist', '.next'
-                    ]);
-                    
-                    for (const entry of entries) {
-                        // 跳过隐藏文件和系统目录
-                        if (entry.name.startsWith('.') && skipDirs.has(entry.name)) continue;
-                        
-                        const fullPath = path.join(dir, entry.name);
-                        const isDir = entry.isDirectory();
-                        
-                        results.push({
-                            name: entry.name,
-                            path: fullPath,
-                            type: isDir ? 'directory' : 'file',
-                            isDirectory: isDir,
-                            isFile: entry.isFile(),
-                        });
-                        
-                        // 递归（仅目录 + 未超深度）
-                        if (isDir && currentDepth < maxDepth) {
-                            // 不递归 node_modules
-                            if (entry.name !== 'node_modules') {
-                                results.push(...walkDir(fullPath, currentDepth + 1));
-                            }
-                        }
-                    }
-                } catch {
-                    // 权限不足等，跳过
+            // 目录树 99% 的调用都是 depth=1（懒加载/轮询）。该路径必须保持异步，
+            // 且带版本缓存：大仓库轮询时只 stat 目录，不重新 readdir/IPC 传输整棵列表。
+            if (maxDepth === 1) {
+                const cacheKey = `${resolvedPath}::1`;
+                const knownVersion = typeof params.knownVersion === 'string' ? params.knownVersion : undefined;
+
+                let cached = directoryListCache.get(cacheKey);
+                if (cached && Date.now() - cached.cachedAt <= DIRECTORY_LIST_CACHE_TTL_MS) {
+                    return buildDirectoryListResponse(cached, knownVersion);
                 }
-                return results;
+
+                // 缓存过期后先 stat 目录：大目录避免 readdir，未变化直接复用缓存列表。
+                if (cached) {
+                    try {
+                        const stat = await fs.promises.stat(resolvedPath);
+                        const version = `${stat.mtimeMs}:${stat.ctimeMs}:${cached.totalCount}`;
+                        if (version === cached.version) {
+                            cached = { ...cached, cachedAt: Date.now() };
+                            directoryListCache.set(cacheKey, cached);
+                            return buildDirectoryListResponse(cached, knownVersion);
+                        }
+                    } catch {
+                        // stat 失败则走完整读取，由外层 catch 统一返回错误
+                    }
+                }
+
+                let pending = directoryListPending.get(cacheKey);
+                if (!pending) {
+                    pending = readDirectorySnapshot(resolvedPath);
+                    directoryListPending.set(cacheKey, pending);
+                }
+
+                try {
+                    const snapshot = await pending;
+                    if (snapshot.files.length <= DIRECTORY_LIST_MAX_CACHED_FILES) {
+                        directoryListCache.set(cacheKey, snapshot);
+                        pruneDirectoryListCache();
+                    } else {
+                        // 超大目录不缓存，避免主进程内存被多个大目录快照占满。
+                        directoryListCache.delete(cacheKey);
+                    }
+                    return buildDirectoryListResponse(snapshot, knownVersion);
+                } finally {
+                    if (directoryListPending.get(cacheKey) === pending) {
+                        directoryListPending.delete(cacheKey);
+                    }
+                }
             }
 
-            const files = walkDir(resolvedPath, 1);
-
+            // depth>1：兼容旧调用。使用异步 readdir + 定期让出事件循环，
+            // 避免在 Electron 主进程中同步遍历大仓库造成 UI/Agent 事件流卡死。
+            const files = await walkDirectoryAsync(resolvedPath, 1, maxDepth);
             return {
                 success: true,
                 files,

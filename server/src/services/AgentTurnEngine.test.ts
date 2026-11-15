@@ -1386,4 +1386,89 @@ describe("AgentTurnEngine request recovery", () => {
             await new Promise<void>((resolve) => server.close(() => resolve()));
         }
     });
+
+    it("captures finish_reason from the terminal chunk and warns on truncated output", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const create = vi.fn(async () => (async function* () {
+            yield { choices: [{ delta: { content: "只输出了报告开头" } }] };
+            // finish_reason 只出现在最后一个 delta 为空的 chunk 上
+            yield { choices: [{ delta: {}, finish_reason: "length" }] };
+        })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+        const emitted: any[] = [];
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "truncation-user",
+            currentTraceId: "trace-truncation",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "生成评估报告" },
+            prepareMessages: async (messages) => messages,
+            emit: (chunk) => emitted.push(chunk),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(result.finishReason).toBe("length");
+        expect(result.finalAssistantContent).toBe("只输出了报告开头");
+        expect(emitted.some((chunk) => chunk.type === "notice" && chunk.code === "MODEL_OUTPUT_TRUNCATED"))
+            .toBe(true);
+    });
+
+    it("forceFinalAnswer requests tool_choice=none from the first turn", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const payloads: any[] = [];
+        const create = vi.fn(async (payload: Record<string, any>) => {
+            payloads.push(payload);
+            return (async function* () {
+                yield {
+                    choices: [{
+                        delta: { content: "完整报告正文，已按要求直接输出。" },
+                        finish_reason: "stop",
+                    }],
+                };
+            })();
+        });
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [{ type: "function", function: { name: "do_work", parameters: {} } }],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "force-final-user",
+            currentTraceId: "trace-force-final",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "重写评估报告" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            forceFinalAnswer: true,
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(payloads).toHaveLength(1);
+        expect(payloads[0].tool_choice).toBe("none");
+        expect(result.finishReason).toBe("stop");
+        expect(result.finalAssistantContent).toContain("完整报告正文");
+    });
 });

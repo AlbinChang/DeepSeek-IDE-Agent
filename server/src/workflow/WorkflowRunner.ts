@@ -161,6 +161,41 @@ export class WorkflowRunner {
             const stepPath = `${basePath}/${index}/${name}`;
             const topLevelIndex = options.depth === 0 ? index : undefined;
             const isRootStep = options.depth === 0 && basePath === '/do';
+
+            // 步骤级 when：条件为假时跳过步骤，而不是静默当作无条件执行。
+            if (definition.when !== undefined) {
+                let shouldRun: boolean;
+                try {
+                    shouldRun = this.evaluateConditionStrict(
+                        definition.when,
+                        this.buildExpressionContext(options.vars, options.context),
+                    );
+                } catch (error: any) {
+                    const record = this.beginStep(stepPath, name);
+                    record.status = 'failed';
+                    record.finishedAt = Date.now();
+                    record.error = `when 条件求值失败: ${error?.message || String(error)}`;
+                    this.rememberStep(record);
+                    await this.options.session.upsertStep(record);
+                    await this.options.session.emit('step.failed', {
+                        path: stepPath,
+                        id: name,
+                        error: record.error,
+                    });
+                    throw new WorkflowError(record.error, 'step', stepPath, error);
+                }
+                if (!shouldRun) {
+                    await this.recordSkippedStep(stepPath, name, definition.when);
+                    if (options.depth === 0 && this.options.onCheckpoint) {
+                        await this.options.onCheckpoint({
+                            nextStepIndex: index + 1,
+                            context: { ...options.context },
+                        });
+                    }
+                    continue;
+                }
+            }
+
             const startingContext = isRootStep ? structuredClone(options.context) : undefined;
             let result: { output?: unknown; exited?: boolean };
             try {
@@ -211,7 +246,7 @@ export class WorkflowRunner {
             signal: AbortSignal;
             topLevelIndex?: number;
         },
-    ): Promise<{ output?: unknown; exited?: boolean }> {
+    ): Promise<{ output?: unknown; exited?: boolean; tolerated?: boolean }> {
         const previous = this.stepByPath.get(step.stepPath);
         const isContainer = definition.switch !== undefined
             || definition.for !== undefined
@@ -306,13 +341,42 @@ export class WorkflowRunner {
             record.status = cancelled ? 'cancelled' : 'failed';
             record.finishedAt = Date.now();
             record.error = error?.message || String(error);
+
+            // continueOnError 只容忍普通步骤错误/超时；取消、审批、预算、
+            // 持久化、校验和未实现错误仍然中止整个 workflow，避免静默吞掉
+            // 配置错误或资源问题。
+            const tolerated = !cancelled
+                && definition.continueOnError === true
+                && this.isTolerableStepError(error);
+            if (tolerated) {
+                const errorPayload = {
+                    error: {
+                        message: record.error,
+                        type: error instanceof WorkflowError ? error.type : 'step',
+                    },
+                };
+                record.tolerated = true;
+                record.output = this.options.session.sanitizeOutput(errorPayload);
+                record.outputPreview = this.options.session.previewOutput(errorPayload);
+            }
+
             this.rememberStep(record);
             await this.options.session.upsertStep(record);
-            await this.options.session.emit(cancelled ? 'step.cancelled' : 'step.failed', {
+            await this.options.session.emit(tolerated
+                ? 'step.tolerated'
+                : cancelled ? 'step.cancelled' : 'step.failed', {
                 path: step.stepPath,
                 id: step.name,
                 error: record.error,
+                ...(tolerated ? { tolerated: true } : {}),
             });
+            if (tolerated) {
+                return {
+                    output: record.output,
+                    exited: definition.then === 'exit',
+                    tolerated: true,
+                };
+            }
             throw error;
         }
     }
@@ -547,7 +611,7 @@ export class WorkflowRunner {
                 continue;
             }
             if (entry.when === undefined) continue;
-            const condition = this.evaluateCondition(entry.when, step.expressionContext);
+            const condition = this.evaluateConditionStrict(entry.when, step.expressionContext);
             if (!condition) continue;
             const doSteps = Array.isArray(entry.do) ? entry.do : [];
             const result = await this.executeSequence(
@@ -597,7 +661,7 @@ export class WorkflowRunner {
             if (step.signal.aborted) throw new WorkflowCancelledError('Workflow cancelled', step.stepPath);
             const vars = { ...step.vars, [each]: collection[index], [at]: index };
             if (whileExpression !== undefined) {
-                const condition = this.evaluateCondition(whileExpression, this.buildExpressionContext(vars, step.context));
+                const condition = this.evaluateConditionStrict(whileExpression, this.buildExpressionContext(vars, step.context));
                 if (!condition) break;
             }
             const result = await this.executeSequence(
@@ -972,22 +1036,80 @@ export class WorkflowRunner {
         return { output: result.lastOutput };
     }
 
-    private evaluateCondition(value: unknown, ctx: WorkflowExpressionContext): boolean {
+    /**
+     * 条件表达式使用严格模式：表达式写错时必须失败，而不是把原始字符串
+     * 当成 truthy 继续执行。适用于步骤级 when、switch case 与 for.while。
+     */
+    private evaluateConditionStrict(value: unknown, ctx: WorkflowExpressionContext): boolean {
+        return this.evaluateConditionValue(value, ctx, true);
+    }
+
+    private evaluateConditionValue(
+        value: unknown,
+        ctx: WorkflowExpressionContext,
+        strict: boolean,
+    ): boolean {
         if (typeof value === 'boolean') return value;
         if (typeof value === 'number') return value !== 0;
         if (typeof value === 'string') {
             const trimmed = value.trim();
             if (!trimmed) return false;
-            if (trimmed.startsWith('${')) {
+            if (trimmed.includes('${')) {
+                if (strict && trimmed.lastIndexOf('${') > trimmed.lastIndexOf('}')) {
+                    throw new WorkflowError('条件表达式缺少结束 }', 'validation');
+                }
                 return Boolean(resolveTemplate(trimmed, ctx));
             }
             try {
                 return Boolean(evaluateExpression(trimmed, ctx));
-            } catch {
+            } catch (error) {
+                if (strict) throw error;
                 return Boolean(trimmed);
             }
         }
+        if (value === undefined || value === null) return false;
+        if (strict && typeof value === 'object') {
+            throw new WorkflowError('条件必须是布尔值、数字或表达式字符串', 'validation');
+        }
         return Boolean(value);
+    }
+
+    private isTolerableStepError(error: unknown): boolean {
+        if (error instanceof WorkflowApprovalPause
+            || error instanceof WorkflowCancelledError
+            || error instanceof WorkflowBudgetExceededError
+            || error instanceof WorkflowPersistenceError
+            || error instanceof WorkflowUnsupportedError) {
+            return false;
+        }
+        if (error instanceof WorkflowError) {
+            return error.type === 'step' || error.type === 'timeout';
+        }
+        return true;
+    }
+
+    private async recordSkippedStep(
+        stepPath: string,
+        name: string,
+        when: unknown,
+    ): Promise<void> {
+        const now = Date.now();
+        const record: WorkflowStepInfo = {
+            path: stepPath,
+            name,
+            status: 'skipped',
+            attempts: 0,
+            startedAt: now,
+            finishedAt: now,
+            ...(when !== undefined ? { skipReason: truncate(String(when), 500) } : {}),
+        };
+        this.rememberStep(record);
+        await this.options.session.upsertStep(record);
+        await this.options.session.emit('step.skipped', {
+            path: stepPath,
+            id: name,
+            reason: record.skipReason,
+        });
     }
 
     private matchesErrorFilter(error: any, filter: unknown): boolean {
@@ -1014,6 +1136,8 @@ export class WorkflowRunner {
                 status: record.status,
                 output: record.output,
                 error: record.error,
+                ...(record.tolerated ? { tolerated: true } : {}),
+                ...(record.skipReason ? { skipReason: record.skipReason } : {}),
             };
         }
         return {

@@ -12,6 +12,7 @@
   "operation_guidelines": {
     "workflow_step_scope_contract": "只完成当前步骤的目标。不要调用 list_workflows/get_workflow/validate_workflow/run_workflow/resume_workflow/cancel_workflow；不要读写 .workflow/.runs/。",
     "tool_allowlist_contract": "只能使用当前请求中提供的工具。未提供的工具不要尝试调用，也不要假装调用成功。",
+    "write_contract": "若步骤要求生成或修改文件，必须实际调用可用的写入工具，并在最终回复中列出写入路径与校验结果；没有写工具时明确失败并说明缺少工具，禁止声称已写入或只输出计划。",
     "workspace_scope_contract": "文件与命令操作限制在当前工作区内；需要读取工作区外文件时，先说明理由并等待用户确认。",
     "output_contract": "最终回复就是步骤产物。若步骤声明了 output.schema，请只输出符合 schema 的 JSON，不要添加 Markdown 代码围栏或解释文字。",
     "no_global_state_contract": "不要写 TODO、never-mistake 规则或用户偏好等全局状态；这些由主 Agent 管理。",

@@ -139,8 +139,15 @@ interface FileWriteParams { filePath: string; content: string; encoding?: string
 interface FileWriteResult { success: boolean; filePath: string; }
 interface FileCreateParams { filePath: string; type?: 'file' | 'directory' | 'folder'; root?: string; }
 interface FileCreateResult { success: boolean; filePath?: string; type?: 'file' | 'directory'; error?: string; }
-interface ListFilesParams { dirPath: string; depth?: number; root?: string; }
-interface ListFilesResult { files: Array<{ name: string; type: 'file' | 'directory'; path: string; }>; }
+interface ListFilesParams { dirPath: string; depth?: number; root?: string; knownVersion?: string; }
+interface ListFilesResult {
+    success?: boolean;
+    unchanged?: boolean;
+    version?: string;
+    totalCount?: number;
+    files: Array<{ name: string; type: 'file' | 'directory'; path: string; isDirectory?: boolean; isFile?: boolean; }>;
+    error?: string;
+}
 interface SearchFilesParams { pattern: string; root?: string; maxResults?: number; }
 interface SearchFilesResult { results: Array<{ path: string; line: number; content: string; }>; }
 
@@ -264,6 +271,8 @@ interface WorkflowStepInfo {
     output?: unknown;
     outputPreview?: string;
     error?: string;
+    tolerated?: boolean;
+    skipReason?: string;
     usage?: WorkflowUsage;
 }
 

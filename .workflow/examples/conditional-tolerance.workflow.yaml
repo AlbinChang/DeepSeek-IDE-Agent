@@ -1,0 +1,38 @@
+document:
+  dsl: 1.0.0
+  namespace: deepseek-ide
+  name: conditional-tolerance
+  version: 1.0.0
+  title: 条件步骤与退出码容错示例
+  summary: 演示步骤级 when、continueOnError 与 acceptedExitCodes。
+  input:
+    schema:
+      type: object
+      properties:
+        runOptional:
+          type: boolean
+          default: false
+
+do:
+  - optional:
+      when: ${ .inputs.runOptional == true }
+      run:
+        shell:
+          command: Write-Output "optional step ran"
+
+  - partial:
+      continueOnError: true
+      run:
+        shell:
+          command: Write-Output "partial data"; exit 5
+
+  - recover:
+      when: ${ .steps.partial.status == 'failed' && .steps.partial.tolerated == true }
+      set:
+        recovered: true
+
+  - acceptedPartial:
+      run:
+        shell:
+          command: Write-Output "partial data accepted"; exit 4
+          acceptedExitCodes: [0, 4]

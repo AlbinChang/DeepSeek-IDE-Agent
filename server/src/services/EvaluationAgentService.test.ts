@@ -6,6 +6,7 @@ import { AgentTurnEngine } from "./AgentTurnEngine.js";
 import { AIProviderFactory } from "./AIProviderFactory.js";
 import { HistoryOptimizerService } from "./HistoryOptimizerService.js";
 import { SettingsService } from "./SettingsService.js";
+import { TodoService } from "./TodoService.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -169,5 +170,238 @@ describe("EvaluationAgentService.parseP0P1IssueCount", () => {
         ].join("\n");
 
         expect(service.parseP0P1IssueCount(sample, 2)).toBe(0);
+    });
+});
+
+const COMPLETE_GOAL_REPORT = [
+    "# 评估Agent的评估报告",
+    "",
+    "## 核验结论",
+    "主Agent产出与用户目标一致，关键文件均已核验。",
+    "",
+    "问题个数：0",
+    "P0+P1问题个数：0",
+    "执行结论：已经达成目标",
+].join("\n");
+
+function mockEvaluationDependencies() {
+    const agentService = AgentService.getInstance();
+    vi.spyOn(agentService, "buildSystemPrompt").mockResolvedValue("system");
+    vi.spyOn(HistoryOptimizerService.getInstance(), "optimizeHistory").mockResolvedValue({ messages: [] });
+    vi.spyOn(AIProviderFactory, "getClient").mockReturnValue({} as ReturnType<typeof AIProviderFactory.getClient>);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    return agentService;
+}
+
+function buildEvaluationInput(agentService: AgentService) {
+    return {
+        agentService,
+        root: process.cwd(),
+        userId: "evaluation-report-test",
+        traceId: "trace",
+        emit: vi.fn(),
+        providerConfig: SettingsService.getDefaultSettings().providers[0],
+        modelId: "model",
+        thinkingOptions: {},
+        userInstruction: "完成文档",
+        mainAgentFinalReply: "已完成",
+        persistReport: false,
+        skipJournal: true,
+        skipTelemetry: true,
+    };
+}
+
+describe("EvaluationAgentService report integrity", () => {
+    const service = new EvaluationAgentService() as any;
+
+    it("treats a heading-only final reply as an incomplete report", () => {
+        const integrity = service.inspectReport("# 评估Agent的评估报告\n\n只核验了开头。");
+        expect(integrity.complete).toBe(false);
+        expect(integrity.hasHeading).toBe(true);
+        expect(integrity.hasIssueCount).toBe(false);
+        expect(integrity.hasDecision).toBe(false);
+    });
+
+    it("requires a repair checklist when the decision asks for another iteration", () => {
+        const withoutList = [
+            "# 评估Agent的评估报告",
+            "",
+            "发现若干问题。",
+            "",
+            "问题个数：2",
+            "P0+P1问题个数：1",
+            "执行结论：需要主Agent继续迭代",
+        ].join("\n");
+        expect(service.inspectReport(withoutList).complete).toBe(false);
+
+        const withList = `${withoutList}\n\n## 可直接修复清单\n- (P1) docs/a.md：替换第 3 节`;
+        expect(service.inspectReport(withList).complete).toBe(true);
+    });
+
+    it("recovers a complete report written into reasoning_content", () => {
+        const resolved = service.resolveReport({
+            finalAssistantContent: "# 评估Agent的评估报告\n\n只输出了开头。",
+            finalAssistantReasoning: COMPLETE_GOAL_REPORT,
+            activeHistory: [],
+            finishReason: "stop",
+        });
+
+        expect(resolved.source).toBe("reasoning");
+        expect(resolved.report).toBe(COMPLETE_GOAL_REPORT);
+        expect(resolved.integrity.complete).toBe(true);
+    });
+
+    it("continues an incomplete report and returns the complete continuation", async () => {
+        const agentService = mockEvaluationDependencies();
+        const runTurns = vi.spyOn(AgentTurnEngine, "runTurns")
+            .mockResolvedValueOnce({
+                activeHistory: [{ role: "system", content: "system" }],
+                usage: null,
+                totalSteps: 1,
+                finalAssistantContent: "# 评估Agent的评估报告\n\n只核验了开头。",
+                finalAssistantReasoning: "",
+                finishReason: "length",
+            })
+            .mockResolvedValueOnce({
+                activeHistory: [],
+                usage: null,
+                totalSteps: 1,
+                finalAssistantContent: COMPLETE_GOAL_REPORT,
+                finalAssistantReasoning: "",
+                finishReason: "stop",
+            });
+
+        const result = await new EvaluationAgentService().runEvaluation(buildEvaluationInput(agentService));
+
+        expect(runTurns).toHaveBeenCalledTimes(2);
+        const continuationOptions = runTurns.mock.calls[1][0];
+        expect(continuationOptions.forceFinalAnswer).toBe(true);
+        expect(continuationOptions.activeHistory.some(
+            (message: any) => String(message?.content || "").includes("评估报告续写"),
+        )).toBe(true);
+        expect(result.decision).toBe("goal_achieved");
+        expect(result.finalReply).toBe(COMPLETE_GOAL_REPORT);
+    });
+
+    it("forces one continuation when finish_reason=length even if the required fields are present", async () => {
+        const agentService = mockEvaluationDependencies();
+        const runTurns = vi.spyOn(AgentTurnEngine, "runTurns")
+            .mockResolvedValueOnce({
+                activeHistory: [],
+                usage: null,
+                totalSteps: 1,
+                finalAssistantContent: COMPLETE_GOAL_REPORT,
+                finalAssistantReasoning: "",
+                finishReason: "length",
+            })
+            .mockResolvedValueOnce({
+                activeHistory: [],
+                usage: null,
+                totalSteps: 1,
+                finalAssistantContent: COMPLETE_GOAL_REPORT,
+                finalAssistantReasoning: "",
+                finishReason: "stop",
+            });
+
+        const result = await new EvaluationAgentService().runEvaluation(buildEvaluationInput(agentService));
+
+        expect(runTurns).toHaveBeenCalledTimes(2);
+        expect(result.decision).toBe("goal_achieved");
+        expect(result.finalReply).toBe(COMPLETE_GOAL_REPORT);
+    });
+
+    it("merges a continuation that only contains the missing report tail", async () => {
+        const agentService = mockEvaluationDependencies();
+        const head = "# 评估Agent的评估报告\n\n## 核验结论\n主Agent产出已完成关键核验，未发现阻塞问题。";
+        const tail = "问题个数：0\nP0+P1问题个数：0\n执行结论：已经达成目标";
+        vi.spyOn(AgentTurnEngine, "runTurns")
+            .mockResolvedValueOnce({
+                activeHistory: [],
+                usage: null,
+                totalSteps: 1,
+                finalAssistantContent: head,
+                finalAssistantReasoning: "",
+                finishReason: "length",
+            })
+            .mockResolvedValueOnce({
+                activeHistory: [],
+                usage: null,
+                totalSteps: 1,
+                finalAssistantContent: tail,
+                finalAssistantReasoning: "",
+                finishReason: "stop",
+            });
+
+        const result = await new EvaluationAgentService().runEvaluation(buildEvaluationInput(agentService));
+
+        expect(result.decision).toBe("goal_achieved");
+        expect(result.finalReply).toContain("主Agent产出已完成关键核验");
+        expect(result.finalReply).toContain("执行结论：已经达成目标");
+    });
+
+    it("recovers a truncated report through a real engine continuation", async () => {
+        const agentService = mockEvaluationDependencies();
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const payloads: any[] = [];
+        const create = vi.fn()
+            .mockImplementationOnce(async (payload: Record<string, any>) => {
+                payloads.push(payload);
+                return (async function* () {
+                    yield { choices: [{ delta: { content: "# 评估Agent的评估报告\n\n只核验了开头。" } }] };
+                    yield { choices: [{ delta: {}, finish_reason: "length" }] };
+                })();
+            })
+            .mockImplementationOnce(async (payload: Record<string, any>) => {
+                payloads.push(payload);
+                return (async function* () {
+                    yield { choices: [{ delta: { content: COMPLETE_GOAL_REPORT }, finish_reason: "stop" }] };
+                })();
+            });
+        vi.spyOn(AIProviderFactory, "getClient").mockReturnValue({
+            chat: { completions: { create } },
+        } as unknown as ReturnType<typeof AIProviderFactory.getClient>);
+
+        const result = await new EvaluationAgentService().runEvaluation(buildEvaluationInput(agentService));
+
+        expect(create).toHaveBeenCalledTimes(2);
+        expect(payloads[1].tool_choice).toBe("none");
+        expect(payloads[1].messages).toEqual(expect.arrayContaining([
+            expect.objectContaining({ role: "assistant", content: expect.stringContaining("只核验了开头") }),
+            expect.objectContaining({ content: expect.stringContaining("评估报告续写") }),
+        ]));
+        expect(result.decision).toBe("goal_achieved");
+        expect(result.finalReply).toBe(COMPLETE_GOAL_REPORT);
+    });
+
+    it("returns evaluation_failed instead of driving another repair loop when the report stays incomplete", async () => {
+        const agentService = mockEvaluationDependencies();
+        const incomplete = {
+            activeHistory: [],
+            usage: null,
+            totalSteps: 1,
+            finalAssistantContent: "# 评估Agent的评估报告\n\n只核验了开头。",
+            finalAssistantReasoning: "",
+            finishReason: "length",
+        };
+        vi.spyOn(AgentTurnEngine, "runTurns").mockResolvedValue(incomplete);
+
+        const result = await new EvaluationAgentService().runEvaluation(buildEvaluationInput(agentService));
+
+        expect(result.decision).toBe("evaluation_failed");
+        expect(result.finalReply).toContain("评估执行异常");
+        expect(result.finalReply).toContain("执行结论：评估失败");
+        expect(result.finalReply).toContain("臆造问题清单");
+    });
+
+    it("marks evaluator exceptions as evaluation_failed", async () => {
+        const agentService = mockEvaluationDependencies();
+        vi.spyOn(AgentTurnEngine, "runTurns").mockRejectedValueOnce(new Error("gateway closed"));
+
+        const result = await new EvaluationAgentService().runEvaluation(buildEvaluationInput(agentService));
+
+        expect(result.decision).toBe("evaluation_failed");
+        expect(result.finalReply).toContain("gateway closed");
+        expect(result.finalReply).toContain("执行结论：评估失败");
     });
 });

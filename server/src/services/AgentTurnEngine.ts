@@ -321,6 +321,11 @@ export interface AgentTurnEngineOptions {
      */
     maxTurns?: number;
     /**
+     * 从第一轮起就禁止工具调用（工具 schema 仍保留，tool_choice:"none"）。
+     * 用于评估报告重写/续写等必须直接产出正文的场景。
+     */
+    forceFinalAnswer?: boolean;
+    /**
      * 跳过 Telemetry 写盘（多 Worker 场景避免并发写 DAU）。
      * 默认 false，保持现有行为。
      */
@@ -351,6 +356,11 @@ export interface AgentTurnEngineResult {
     finalAssistantContent: string;
     /** 本轮引擎最终 assistant 的推理内容 */
     finalAssistantReasoning: string;
+    /**
+     * 最后一次模型请求的 finish_reason（stop/tool_calls/length/content_filter/...）。
+     * 未收到该字段时为 null。调用方可用 "length" 判断输出是否被长度上限截断。
+     */
+    finishReason: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -401,8 +411,10 @@ export class AgentTurnEngine {
         let finalAssistantReasoning = "";
         let lastNonEmptyAssistantContent = "";
         let lastAssistantReasoning = "";
-        let finalTurnRequested = false;
-        let forceFinalAnswer = false;
+        let finalTurnRequested = options.forceFinalAnswer === true;
+        let forceFinalAnswer = options.forceFinalAnswer === true;
+        let lastFinishReason: string | null = null;
+        let truncationNotified = false;
 
         const maxTurnLimit = typeof maxTurns === "number" && Number.isFinite(maxTurns) && maxTurns > 0
             ? Math.floor(maxTurns)
@@ -529,6 +541,7 @@ export class AgentTurnEngine {
             let fullReasoning = "";
             let toolCalls: any[] = [];
             let localUsage: TokenUsage | null = null;
+            let finishReason: string | null = null;
             // 本轮的“模型输出异常 → 丢弃响应并重试”计数；与网络/服务过载/模型替换的重试预算相互独立
             let corruptionRetries = 0;
             let corruptionRecoveryRounds = 0;
@@ -543,6 +556,7 @@ export class AgentTurnEngine {
                 fullReasoning = "";
                 toolCalls = [];
                 localUsage = null;
+                finishReason = null;
                 let contentPrefixConfirmed = false;
                 let pendingContentPrefix = "";
                 // 推理内容与正文同理：控制标记被拆包时先缓冲前缀，判定安全后再送出
@@ -637,6 +651,9 @@ export class AgentTurnEngine {
                     stream: true,
                     stream_options: { include_usage: true },
                     ...(forceFinalAnswer && toolsForRequest !== undefined ? { tool_choice: "none" as const } : {}),
+                    ...(globalConfig.agent.maxOutputTokens > 0
+                        ? { max_tokens: globalConfig.agent.maxOutputTokens }
+                        : {}),
                     ...thinkingOptions,
                 };
 
@@ -699,7 +716,14 @@ export class AgentTurnEngine {
                                 substitutionAccepted = true;
                             }
 
-                            const delta = chunk.choices[0]?.delta as any;
+                            const choice = chunk.choices?.[0] as any;
+                            // finish_reason 可能只出现在最后一个 delta 为空的 chunk 上，
+                            // 必须在 delta 判空之前采集，否则永远拿不到截断信号。
+                            const chunkFinishReason = choice?.finish_reason;
+                            if (typeof chunkFinishReason === "string" && chunkFinishReason) {
+                                finishReason = chunkFinishReason;
+                            }
+                            const delta = choice?.delta as any;
                             if (!delta) continue;
 
                             // 重试成功后，第一条增量到达即清除顶部的“正在重试”状态，
@@ -825,6 +849,12 @@ export class AgentTurnEngine {
                     }
 
                     apiSuccess = true;
+                    if (finishReason === "length") {
+                        console.warn(
+                            `${getTS()} [AgentTurnEngine] 模型输出达到长度上限（finish_reason=length），内容可能被截断：`
+                            + `contentChars=${fullContent.length}, reasoningChars=${fullReasoning.length}, turn=${turns}`,
+                        );
+                    }
                     if (forceFinalAnswer && toolCalls.length > 0) {
                         console.warn(`${getTS()} [AgentTurnEngine] Ignoring unexpected tool calls after final-answer request`);
                         toolCalls = [];
@@ -1151,6 +1181,24 @@ export class AgentTurnEngine {
                     `${getTS()} [AgentTurnEngine] Assistant response (no tool calls) for user: ${userId}, turn: ${turns}:`,
                     fullContent
                 );
+                // 只记录最终答复这一轮的 finish_reason；工具轮次的 tool_calls 不应冒充最终原因。
+                lastFinishReason = finishReason;
+
+                // 明确告知前端“本次回答被长度上限截断”，避免把半截报告当成完整结论。
+                if (finishReason === "length" && !truncationNotified) {
+                    truncationNotified = true;
+                    emit({
+                        type: "notice",
+                        code: "MODEL_OUTPUT_TRUNCATED",
+                        level: "warning",
+                        content: "模型输出达到长度上限，本次回复可能不完整；如需完整结果请重试或提高 AGENT_MAX_OUTPUT_TOKENS。",
+                        params: {
+                            finishReason,
+                            contentChars: fullContent.length,
+                            reasoningChars: fullReasoning.length,
+                        },
+                    });
+                }
 
                 // 工具调用结束后 content 可能为空（纯推理模型），将 reasoning_content 复制过来供前端展示
                 if (!fullContent && fullReasoning) {
@@ -1250,6 +1298,7 @@ export class AgentTurnEngine {
             totalSteps,
             finalAssistantContent,
             finalAssistantReasoning,
+            finishReason: lastFinishReason,
         };
     }
 }

@@ -2,6 +2,25 @@ import { config as globalConfig } from "@/config/index.js";
 import { AIProviderFactory } from "@/services/AIProviderFactory.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
 
+/**
+ * 消息 JSON 字节数缓存。
+ * 每轮工具调用后都会重建 activeHistory，历史消息对象引用保持稳定；
+ * 大仓库/长会话下重复 JSON.stringify 整段历史会占用可观的 CPU，
+ * WeakMap 让同一消息只在首次计算时序列化。
+ */
+const messageByteLengthCache = new WeakMap<object, number>();
+
+function getMessageJsonByteLength(message: any): number {
+    if (!message || typeof message !== "object") {
+        return Buffer.byteLength(JSON.stringify(message), "utf8");
+    }
+    const cached = messageByteLengthCache.get(message);
+    if (cached !== undefined) return cached;
+    const length = Buffer.byteLength(JSON.stringify(message), "utf8");
+    messageByteLengthCache.set(message, length);
+    return length;
+}
+
 export interface MessagePreparationOptions {
     systemPrompt: string;
     pinnedUserMessage: string;
@@ -66,9 +85,7 @@ export class MessagePreparationService {
         }
 
         // 预计算每条消息的 JSON 字节数（只序列化一次每条消息），用于 O(n) 增量裁剪
-        const msgJsonByteLens = msgsToProcess.map(
-            m => Buffer.byteLength(JSON.stringify(m), 'utf8')
-        );
+        const msgJsonByteLens = msgsToProcess.map(getMessageJsonByteLength);
         // JSON 数组序列化的开销：首尾 [ ] = 2 字节，每两个元素间一个逗号 = (n-1) 字节
         const arrayOverhead = (n: number) => (n > 0 ? n + 1 : 0); // 2 + (n-1) = n+1
 

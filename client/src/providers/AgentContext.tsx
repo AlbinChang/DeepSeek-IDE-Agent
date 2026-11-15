@@ -215,7 +215,9 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         }
     }, []);
 
-    const setWorkspaceRoot = (path: string | null) => {
+    // 引用必须稳定：FileTree 的 effect 依赖 setWorkspaceRoot，若每次渲染都创建新函数，
+    // 会导致监听器反复注册/注销并重复 refreshPath('.')，大仓库下直接表现为目录树持续卡顿。
+    const setWorkspaceRoot = useCallback((path: string | null) => {
         const normalizedPath = path ? path.trim() : null;
         setWorkspaceRootState(normalizedPath);
         if (normalizedPath) {
@@ -224,7 +226,7 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
             localStorage.removeItem('agent-workspace-root');
         }
         syncWorkspaceRootToUrl(normalizedPath);
-    };
+    }, [syncWorkspaceRootToUrl]);
 
     // 统一的设置状态应用函数（Electron IPC 和 Web fetch 共用）
     const applySettingsState = (normalized: UserSettings) => {

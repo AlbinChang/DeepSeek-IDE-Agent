@@ -83,10 +83,15 @@ interface ListFilesParams {
     dirPath: string;
     depth?: number;
     root?: string;
+    /** 客户端已知的目录版本；命中时返回 unchanged，避免重复传输整份列表 */
+    knownVersion?: string;
 }
 
 interface ListFilesResult {
     success: boolean;
+    unchanged?: boolean;
+    version?: string;
+    totalCount?: number;
     files?: Array<{
         name: string;
         path: string;
@@ -94,7 +99,6 @@ interface ListFilesResult {
         isDirectory: boolean;
         isFile: boolean;
     }>;
-    totalCount?: number;
     error?: string;
 }
 
@@ -281,6 +285,8 @@ interface WorkflowStepInfo {
     output?: unknown;
     outputPreview?: string;
     error?: string;
+    tolerated?: boolean;
+    skipReason?: string;
     usage?: WorkflowUsage;
 }
 

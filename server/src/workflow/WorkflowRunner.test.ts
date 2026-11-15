@@ -4,7 +4,12 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { WorkflowApprovalPause, WorkflowTimeoutError } from '@/workflow/errors.js';
+import {
+    WorkflowApprovalPause,
+    WorkflowCancelledError,
+    WorkflowError,
+    WorkflowTimeoutError,
+} from '@/workflow/errors.js';
 import { WorkflowRunner } from '@/workflow/WorkflowRunner.js';
 import { WorkflowRunSession } from '@/workflow/WorkflowRunSession.js';
 import { WorkflowRunStore } from '@/workflow/WorkflowRunStore.js';
@@ -156,6 +161,99 @@ describe('WorkflowRunner', () => {
 
         expect(executor.calls).toHaveLength(1);
         expect(executor.calls[0].definition.with.prompt).toBe('fast');
+    });
+
+    it('skips steps whose when condition is false and exposes the skipped status', async () => {
+        const executor = new FakeExecutor();
+        const runner = createRunner([
+            {
+                optional: {
+                    when: '${ .inputs.enabled == true }',
+                    call: 'agent',
+                    with: { prompt: 'optional' },
+                },
+            },
+            {
+                after: {
+                    when: "${ .steps.optional.status == 'skipped' }",
+                    set: { skipped: true },
+                },
+            },
+        ], executor, { enabled: false });
+
+        await runner.run();
+
+        expect(executor.calls).toHaveLength(0);
+        expect(snapshot.steps.find((step) => step.name === 'optional')).toMatchObject({
+            status: 'skipped',
+            skipReason: '${ .inputs.enabled == true }',
+        });
+        expect(runner.getContextValues().skipped).toBe(true);
+        expect(events.some((event) => event.type === 'step.skipped')).toBe(true);
+    });
+
+    it('continues after a tolerated step failure and lets later steps inspect it', async () => {
+        const executor = new FakeExecutor();
+        executor.handler = async (kind, _definition, ctx) => {
+            if (kind === 'agent' && ctx.stepName === 'collect') {
+                throw new WorkflowError('partial data', 'step', ctx.stepPath);
+            }
+            return { output: `${kind}-output` };
+        };
+        const runner = createRunner([
+            {
+                collect: {
+                    continueOnError: true,
+                    call: 'agent',
+                    with: { prompt: 'collect' },
+                },
+            },
+            {
+                recover: {
+                    when: "${ .steps.collect.status == 'failed' && .steps.collect.tolerated == true }",
+                    set: { recovered: true },
+                },
+            },
+            { finish: { call: 'agent', with: { prompt: 'finish' } } },
+        ], executor);
+
+        await runner.run();
+
+        expect(executor.calls.map((call) => call.ctx.stepName)).toEqual(['collect', 'finish']);
+        expect(snapshot.steps.find((step) => step.name === 'collect')).toMatchObject({
+            status: 'failed',
+            tolerated: true,
+            error: 'partial data',
+        });
+        expect(snapshot.steps.find((step) => step.name === 'collect')?.output).toMatchObject({
+            error: { message: 'partial data', type: 'step' },
+        });
+        expect(runner.getContextValues().recovered).toBe(true);
+        expect(events.some((event) => event.type === 'step.tolerated')).toBe(true);
+    });
+
+    it('does not tolerate cancellation even when continueOnError is set', async () => {
+        const executor = new FakeExecutor();
+        executor.handler = async (_kind, _definition, ctx) => {
+            throw new WorkflowCancelledError('cancelled', ctx.stepPath);
+        };
+        const runner = createRunner([
+            { dangerous: { continueOnError: true, call: 'agent', with: { prompt: 'dangerous' } } },
+        ], executor);
+
+        await expect(runner.run()).rejects.toBeInstanceOf(WorkflowCancelledError);
+        expect(snapshot.steps.find((step) => step.name === 'dangerous')?.tolerated).toBeUndefined();
+    });
+
+    it('rejects invalid when expressions instead of treating them as truthy', async () => {
+        const executor = new FakeExecutor();
+        const runner = createRunner([
+            { broken: { when: '${ .inputs.value ==', call: 'agent', with: { prompt: 'broken' } } },
+        ], executor);
+
+        await expect(runner.run()).rejects.toThrow('when 条件求值失败');
+        expect(executor.calls).toHaveLength(0);
+        expect(snapshot.steps.find((step) => step.name === 'broken')?.status).toBe('failed');
     });
 
     it('iterates for-loops with each/at variables', async () => {

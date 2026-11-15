@@ -69,6 +69,39 @@ describe('DefaultWorkflowStepExecutor', () => {
         expect(JSON.stringify(result.output)).toContain('workflow-shell-test');
     });
 
+    it('accepts explicitly whitelisted non-zero shell exit codes', async () => {
+        const result = await executor.execute(
+            'shell',
+            {
+                run: {
+                    shell: {
+                        command: 'Write-Output partial-data; exit 4',
+                        acceptedExitCodes: [0, 4],
+                    },
+                },
+            },
+            createContext(root),
+        );
+
+        expect(JSON.stringify(result.output)).toContain('partial-data');
+        expect(Number((result.output as any)?.code)).toBe(4);
+    });
+
+    it('still fails on shell exit codes outside the whitelist', async () => {
+        await expect(executor.execute(
+            'shell',
+            {
+                run: {
+                    shell: {
+                        command: 'Write-Output unexpected; exit 5',
+                        acceptedExitCodes: [0, 4],
+                    },
+                },
+            },
+            createContext(root),
+        )).rejects.toThrow('shell 步骤失败');
+    });
+
     it('rejects invalid shell environment values instead of ignoring them', async () => {
         await expect(executor.execute(
             'shell',

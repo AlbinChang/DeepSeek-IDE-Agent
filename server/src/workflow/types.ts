@@ -102,6 +102,10 @@ export interface WorkflowStepInfo {
     /** 持久化时输出被脱敏或截断，不能作为嵌套恢复的精确输入。 */
     replayOutputUnavailable?: boolean;
     error?: string;
+    /** 步骤失败但通过 continueOnError 显式容忍；run 可以继续。 */
+    tolerated?: boolean;
+    /** when 条件为假时跳过该步骤的原因（原始条件表达式）。 */
+    skipReason?: string;
     usage?: WorkflowUsage;
 }
 

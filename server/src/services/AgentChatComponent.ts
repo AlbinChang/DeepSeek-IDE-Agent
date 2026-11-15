@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { AgentService } from "@/services/AgentService.js";
 import { AIProviderFactory } from "@/services/AIProviderFactory.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
@@ -80,6 +81,12 @@ export class AgentChatComponent {
         // [DAU STATS] 记录日活：每次用户发起对话均计入活跃用户统计
         TelemetryService.recordActiveUser(userId);
 
+        // Electron IPC 及部分内部调用方不传 requestId；若这里不兜底，buildSystemPrompt
+        // 将完全绕过缓存，每轮工具调用后都重新扫描工作区/技能/规则/环境（大仓库可达数秒），
+        // 表现为「命令执行完后模型第二次回复很慢」。requestId 仅用于本轮提示词缓存，
+        // 在这里生成不会改变任何外部语义。
+        const effectiveRequestId = requestId || randomUUID();
+
         const root = agentService.checkWorkspace(userId, workspaceRoot);
         const resolvedProvider = AIProviderFactory.normalizeProvider({
             ...(providerConfig || {}),
@@ -95,14 +102,14 @@ export class AgentChatComponent {
         agentService.sessionLastAccess.set(isoKey, Date.now());
 
         const startTimeStamp = Date.now();
-        console.log(`${getTS()} [AgentChat] Chat started for user: ${userId}, traceId: ${traceId}, requestId: ${requestId || 'N/A'}, model: ${finalModelId}`);
+        console.log(`${getTS()} [AgentChat] Chat started for user: ${userId}, traceId: ${traceId}, requestId: ${effectiveRequestId}, model: ${finalModelId}`);
 
         // 【缓存策略】追踪本轮对话的系统提示词缓存是否已清理，避免重复操作
         let systemPromptCacheCleared = false;
         const clearPromptCache = () => {
-            if (requestId && !systemPromptCacheCleared) {
+            if (!systemPromptCacheCleared) {
                 systemPromptCacheCleared = true;
-                agentService.clearSystemPromptCache(requestId);
+                agentService.clearSystemPromptCache(effectiveRequestId);
             }
         };
 
@@ -269,7 +276,7 @@ export class AgentChatComponent {
             let currentPinnedUserMessage = recoveryContext?.pinnedUserMessage || firstUserIntent;
             
             const prepareMessages = async (msgs: any[]) => {
-                const systemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId, currentPinnedUserMessage);
+                const systemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, effectiveRequestId, currentPinnedUserMessage);
                 return MessagePreparationService.buildMessages({
                     systemPrompt,
                     pinnedUserMessage: currentPinnedUserMessage,
@@ -311,7 +318,7 @@ export class AgentChatComponent {
                     root,
                     userId,
                     traceId: currentTraceId,
-                    requestId,
+                    requestId: effectiveRequestId,
                     locale: finalLocale,
                     abortSignal,
                     emit,
@@ -342,7 +349,7 @@ export class AgentChatComponent {
                     } catch (todoResetErr) {
                         console.warn(`${getTS()} [AgentChat] Failed to clear stale TODOs before re-iteration for user: ${userId}`, todoResetErr);
                     }
-                    const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId, currentPinnedUserMessage);
+                    const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, effectiveRequestId, currentPinnedUserMessage);
                     const evaluatorReport = evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)";
                     const iterationUserContent = [
                         "【迭代修复模式 — 评估Agent 已发现问题，请立即在原文件上逐项修复】",
@@ -380,17 +387,23 @@ export class AgentChatComponent {
                     evaluationResult.decision === "goal_achieved" ? "已经达成目标" :
                     evaluationResult.decision === "goal_unachievable" ? "条件不满足、目标无法达成" :
                     evaluationResult.decision === "need_user_input" ? "需要用户进一步操作或提供信息" :
+                    evaluationResult.decision === "evaluation_failed" ? "评估失败" :
                     "需要主Agent继续迭代";
 
                 if (evaluationResult.decision === "goal_achieved") {
                     emit({ type: "stage", content: "评估Agent核验通过：已达成目标。" });
+                }
+                if (evaluationResult.decision === "evaluation_failed") {
+                    emit({ type: "stage", content: "评估Agent未能生成完整评估报告，已停止本轮修复循环。" });
                 }
 
                 await markTraceCompleted();
                 clearPromptCache();
                 emit({
                     type: "done",
-                    content: mainReply || `评估已完成：${decisionLabel}。`,
+                    content: evaluationResult.decision === "evaluation_failed"
+                        ? evaluationResult.finalReply
+                        : (mainReply || `评估已完成：${decisionLabel}。`),
                     usage: totalUsage,
                 });
                 return "done";
@@ -527,7 +540,7 @@ export class AgentChatComponent {
                         root,
                         userId,
                         traceId: currentTraceId,
-                        requestId,
+                        requestId: effectiveRequestId,
                         locale: finalLocale,
                         abortSignal,
                         emit,
@@ -559,7 +572,7 @@ export class AgentChatComponent {
                         //
                         // 新方案：不使用 prepareMessages（避免注入原始用户意图），而是构建专用的修复 user 消息，
                         // 将评估报告的修复要求作为本轮 user 指令，让模型以最高优先级执行修复。
-                        const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, requestId, currentPinnedUserMessage);
+                        const iterSystemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, effectiveRequestId, currentPinnedUserMessage);
                         const evaluatorReport = evaluationResult.finalReply || "(评估结论为空，请基于已有信息推断修复方案)";
                         const iterationUserContent = [
                             "【迭代修复模式 — 评估Agent 已发现问题，请立即在原文件上逐项修复】",
@@ -597,23 +610,29 @@ export class AgentChatComponent {
                         continue;
                     }
 
-                    // 评估Agent结论：终局（达成 / 无法达成 / 需用户操作）
+                    // 评估Agent结论：终局（达成 / 无法达成 / 需用户操作 / 评估失败）
                     console.log(`${getTS()} [AgentChat] Evaluator returned terminal decision (${evaluationResult.decision}) for user: ${userId}`);
                     const decisionLabel =
                         evaluationResult.decision === "goal_achieved" ? "已经达成目标" :
                         evaluationResult.decision === "goal_unachievable" ? "条件不满足、目标无法达成" :
                         evaluationResult.decision === "need_user_input" ? "需要用户进一步操作或提供信息" :
+                        evaluationResult.decision === "evaluation_failed" ? "评估失败" :
                         "需要主Agent继续迭代";
 
                     if (evaluationResult.decision === "goal_achieved") {
                         emit({ type: "stage", content: "评估Agent核验通过：已达成目标。" });
+                    }
+                    if (evaluationResult.decision === "evaluation_failed") {
+                        emit({ type: "stage", content: "评估Agent未能生成完整评估报告，已停止本轮修复循环。" });
                     }
 
                     await markTraceCompleted();
                     clearPromptCache();
                     emit({
                         type: "done",
-                        content: mainAgentFinalReply || `评估已完成：${decisionLabel}。`,
+                        content: evaluationResult.decision === "evaluation_failed"
+                            ? evaluationResult.finalReply
+                            : (mainAgentFinalReply || `评估已完成：${decisionLabel}。`),
                         usage: totalUsage,
                     });
                     return;

@@ -463,9 +463,15 @@ function App() {
               </div>
 
               <div className="flex-1 overflow-hidden min-h-0 bg-[#080808]/40">
-                {activeSidebarView === 'explorer' ? (
-                  <FileTree activeFile={activeFile} onFileSelect={handleFileSelect} />
-                ) : activeSidebarView === 'git' ? (
+                {/* 保持 FileTree 挂载：切到搜索/源码管理再切回时不丢失展开状态、不重新全量加载 */}
+                <div className={activeSidebarView === 'explorer' ? 'h-full min-h-0' : 'hidden'}>
+                  <FileTree
+                    activeFile={activeFile}
+                    onFileSelect={handleFileSelect}
+                    isVisible={activeSidebarView === 'explorer'}
+                  />
+                </div>
+                {activeSidebarView === 'explorer' ? null : activeSidebarView === 'git' ? (
                   <Suspense fallback={<PanelFallback label="Loading Git" />}>
                     <SourceControl />
                   </Suspense>

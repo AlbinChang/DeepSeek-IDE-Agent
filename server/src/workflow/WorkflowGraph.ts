@@ -13,7 +13,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function label(value: unknown): string {
     return String(value ?? '')
-        .replace(/[^\p{L}\p{N}_. :/-]/gu, '_')
+        .replace(/[^\p{L}\p{N}_. :/()\-]/gu, '_')
         .slice(0, 80);
 }
 
@@ -63,7 +63,11 @@ export function buildWorkflowGraph(steps: unknown[]): WorkflowGraph {
             const definition = name ? record(step[name]) : undefined;
             if (!name || !definition) continue;
             const kind = stepKind(definition);
-            const current = node(`${name} : ${kind}`, ['switch', 'for', 'fork'].includes(kind) ? 'decision' : 'normal');
+            const conditional = definition.when !== undefined ? ' (when)' : '';
+            const current = node(
+                `${name} : ${kind}${conditional}`,
+                ['switch', 'for', 'fork'].includes(kind) ? 'decision' : 'normal',
+            );
             if (!current) break;
             connect(previous, current, edge);
             edge = undefined;

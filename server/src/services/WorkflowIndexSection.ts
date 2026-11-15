@@ -50,6 +50,7 @@ export class WorkflowIndexSection implements IPromptSection {
             return [
                 '## 可用工作流（工作区 .workflow/）',
                 '需要执行固定流程时，先调用 list_workflows 查看，再用 validate_workflow 校验，最后用 run_workflow 入队；不要凭记忆编造工作流名称。',
+                '创建/修改工作流时使用步骤级 when、continueOnError、run.shell.acceptedExitCodes；写文件阶段显式声明写工具，并优先加 approval 保护高价值文件。',
                 ...lines,
             ].join('\n');
         } catch {

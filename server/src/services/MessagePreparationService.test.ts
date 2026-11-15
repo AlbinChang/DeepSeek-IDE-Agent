@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { MessagePreparationService } from "./MessagePreparationService.js";
 
@@ -38,6 +38,29 @@ const assistantToolCall = (toolCalls: any[], content = "") => ({
 });
 
 const toolResult = (id: string) => ({ role: "tool", tool_call_id: id, content: `result-of-${id}` });
+
+describe("MessagePreparationService.buildMessages — 大历史性能", () => {
+    it("重复重建同一批消息对象时复用字节长度缓存，不再次 JSON.stringify", () => {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            { role: "assistant", content: "完成", reasoning_content: "推理" },
+        ];
+
+        const stringify = vi.spyOn(JSON, "stringify");
+        try {
+            build(messages);
+            const firstPassCalls = stringify.mock.calls.length;
+            expect(firstPassCalls).toBeGreaterThan(0);
+
+            build(messages);
+            // 第二轮命中 WeakMap，不应再序列化任何消息
+            expect(stringify.mock.calls.length).toBe(firstPassCalls);
+        } finally {
+            stringify.mockRestore();
+        }
+    });
+});
 
 describe("MessagePreparationService.buildMessages — 工具调用链完整性", () => {
     it("system 消息插入工具结果之间时，不割裂 tool_calls 与 tool 消息（修复 DeepSeek 400）", () => {

@@ -112,6 +112,54 @@ describe('WorkflowRegistry', () => {
         expect((await registry.list())[0].path).toBe('.workflow/team/nested.yaml');
     });
 
+    it('validates step-level when, continueOnError and acceptedExitCodes', async () => {
+        await writeFile(path.join(root, '.workflow', 'conditional.yaml'), `document:
+  dsl: 1.0.0
+  name: conditional
+do:
+  - optional:
+      when: \${ .inputs.enabled == true }
+      continueOnError: "yes"
+      run:
+        shell:
+          command: exit 4
+          acceptedExitCodes: [0, "4"]
+`, 'utf8');
+
+        const detail = await new WorkflowRegistry(root).get('conditional');
+
+        expect(detail!.validation.ok).toBe(false);
+        expect(detail!.validation.issues).toEqual(expect.arrayContaining([
+            expect.objectContaining({ path: '/do/0/optional/continueOnError', severity: 'error' }),
+            expect.objectContaining({ path: '/do/0/optional/run/shell/acceptedExitCodes', severity: 'error' }),
+        ]));
+    });
+
+    it('validates nested control-flow steps recursively', async () => {
+        await writeFile(path.join(root, '.workflow', 'nested-invalid.yaml'), `document:
+  dsl: 1.0.0
+  name: nested-invalid
+do:
+  - choose:
+      switch:
+        - when: { invalid: true }
+          do:
+            - bad:
+                continueOnError: "no"
+`, 'utf8');
+
+        const detail = await new WorkflowRegistry(root).get('nested-invalid');
+
+        expect(detail!.validation.ok).toBe(false);
+        expect(detail!.validation.issues).toEqual(expect.arrayContaining([
+            expect.objectContaining({ path: '/do/0/choose/switch/case-0/when', severity: 'error' }),
+            expect.objectContaining({
+                path: '/do/0/choose/switch/case-0/do/0/bad/continueOnError',
+                severity: 'error',
+            }),
+        ]));
+    });
+
     it('rejects path traversal attempts', async () => {
         const registry = new WorkflowRegistry(root);
         await expect(registry.get('../secret')).rejects.toThrow('Invalid workflow path');

@@ -20,6 +20,19 @@ const WORKFLOW_EXTENSIONS = new Set(['.yaml', '.yml']);
 const MAX_WORKFLOW_FILE_BYTES = 256 * 1024;
 const MAX_SCAN_DEPTH = 3;
 
+function asRecord(value: unknown): Record<string, any> | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, any>
+        : undefined;
+}
+
+function sequenceOf(value: unknown): unknown[] | undefined {
+    if (Array.isArray(value)) return value;
+    const record = asRecord(value);
+    if (Array.isArray(record?.do)) return record.do;
+    return undefined;
+}
+
 interface ParsedDocumentResult {
     summary: WorkflowSummary;
     issues: WorkflowValidationIssue[];
@@ -302,47 +315,7 @@ export class WorkflowRegistry {
         if (!Array.isArray(steps) || steps.length === 0) {
             issues.push({ path: '/do', message: 'do 必须是非空步骤数组', severity: 'error' });
         } else {
-            steps.forEach((step: any, index: number) => {
-                if (!step || typeof step !== 'object' || Array.isArray(step)) {
-                    issues.push({ path: `/do/${index}`, message: '步骤必须是对象', severity: 'error' });
-                    return;
-                }
-                const names = Object.keys(step);
-                if (names.length === 0) {
-                    issues.push({ path: `/do/${index}`, message: '步骤缺少名称', severity: 'error' });
-                } else if (names.length > 1) {
-                    issues.push({
-                        path: `/do/${index}`,
-                        message: '单个步骤只应包含一个命名条目',
-                        severity: 'warning',
-                    });
-                }
-                for (const stepName of names) {
-                    const definition = step[stepName];
-                    if (!definition || typeof definition !== 'object' || Array.isArray(definition)) {
-                        issues.push({
-                            path: `/do/${index}/${stepName}`,
-                            message: '步骤定义必须是对象',
-                            severity: 'error',
-                        });
-                        continue;
-                    }
-                    if (definition.call !== undefined && typeof definition.call !== 'string') {
-                        issues.push({
-                            path: `/do/${index}/${stepName}/call`,
-                            message: 'call 必须是字符串',
-                            severity: 'error',
-                        });
-                    }
-                    if (definition.run !== undefined && (typeof definition.run !== 'object' || Array.isArray(definition.run))) {
-                        issues.push({
-                            path: `/do/${index}/${stepName}/run`,
-                            message: 'run 必须是对象',
-                            severity: 'error',
-                        });
-                    }
-                }
-            });
+            this.validateSequence(steps, '/do', issues);
         }
 
         return {
@@ -361,6 +334,240 @@ export class WorkflowRegistry {
             issues,
             ...(Array.isArray(steps) ? { steps } : {}),
         };
+    }
+
+    private validateSequence(
+        steps: unknown[],
+        basePath: string,
+        issues: WorkflowValidationIssue[],
+    ): void {
+        steps.forEach((step, index) => {
+            const stepPath = `${basePath}/${index}`;
+            const stepRecord = asRecord(step);
+            if (!stepRecord) {
+                issues.push({ path: stepPath, message: '步骤必须是对象', severity: 'error' });
+                return;
+            }
+            const names = Object.keys(stepRecord);
+            if (names.length === 0) {
+                issues.push({ path: stepPath, message: '步骤缺少名称', severity: 'error' });
+                return;
+            }
+            if (names.length > 1) {
+                issues.push({
+                    path: stepPath,
+                    message: '单个步骤只应包含一个命名条目',
+                    severity: 'warning',
+                });
+            }
+            for (const stepName of names) {
+                const definition = asRecord(stepRecord[stepName]);
+                if (!definition) {
+                    issues.push({
+                        path: `${stepPath}/${stepName}`,
+                        message: '步骤定义必须是对象',
+                        severity: 'error',
+                    });
+                    continue;
+                }
+                this.validateStepDefinition(definition, `${stepPath}/${stepName}`, issues);
+            }
+        });
+    }
+
+    private validateStepDefinition(
+        definition: Record<string, any>,
+        path: string,
+        issues: WorkflowValidationIssue[],
+    ): void {
+        if (definition.when !== undefined
+            && typeof definition.when !== 'boolean'
+            && typeof definition.when !== 'number'
+            && typeof definition.when !== 'string') {
+            issues.push({
+                path: `${path}/when`,
+                message: 'when 必须是布尔值、数字或表达式字符串',
+                severity: 'error',
+            });
+        }
+        if (typeof definition.when === 'string' && !definition.when.trim()) {
+            issues.push({
+                path: `${path}/when`,
+                message: 'when 为空字符串，将永远跳过该步骤',
+                severity: 'warning',
+            });
+        }
+        if (definition.continueOnError !== undefined && typeof definition.continueOnError !== 'boolean') {
+            issues.push({
+                path: `${path}/continueOnError`,
+                message: 'continueOnError 必须是布尔值',
+                severity: 'error',
+            });
+        }
+        if (definition.call !== undefined && typeof definition.call !== 'string') {
+            issues.push({ path: `${path}/call`, message: 'call 必须是字符串', severity: 'error' });
+        }
+        if (definition.run !== undefined && !asRecord(definition.run)) {
+            issues.push({ path: `${path}/run`, message: 'run 必须是对象', severity: 'error' });
+        }
+        if (definition.with !== undefined && !asRecord(definition.with)) {
+            issues.push({ path: `${path}/with`, message: 'with 必须是对象', severity: 'error' });
+        }
+        if (definition.then !== undefined && typeof definition.then !== 'string') {
+            issues.push({ path: `${path}/then`, message: 'then 必须是字符串', severity: 'error' });
+        }
+        if (definition.timeout !== undefined && !asRecord(definition.timeout)) {
+            issues.push({ path: `${path}/timeout`, message: 'timeout 必须是对象', severity: 'error' });
+        }
+        if (definition.output !== undefined && !asRecord(definition.output)) {
+            issues.push({ path: `${path}/output`, message: 'output 必须是对象', severity: 'error' });
+        }
+
+        const shellConfig = asRecord(definition.run?.shell);
+        if (definition.run?.shell !== undefined && !shellConfig) {
+            issues.push({ path: `${path}/run/shell`, message: 'run.shell 必须是对象', severity: 'error' });
+        }
+        if (shellConfig && shellConfig.command !== undefined && typeof shellConfig.command !== 'string') {
+            issues.push({
+                path: `${path}/run/shell/command`,
+                message: 'run.shell.command 必须是字符串',
+                severity: 'error',
+            });
+        }
+        const shellAcceptedExitCodes = shellConfig?.acceptedExitCodes;
+        const withAcceptedExitCodes = asRecord(definition.with)?.acceptedExitCodes;
+        const acceptedExitCodes = shellAcceptedExitCodes ?? withAcceptedExitCodes;
+        const acceptedExitCodesPath = shellAcceptedExitCodes !== undefined
+            ? `${path}/run/shell/acceptedExitCodes`
+            : `${path}/with/acceptedExitCodes`;
+        if (acceptedExitCodes !== undefined) {
+            if (!Array.isArray(acceptedExitCodes) || acceptedExitCodes.length === 0) {
+                issues.push({
+                    path: acceptedExitCodesPath,
+                    message: 'acceptedExitCodes 必须是非空整数数组',
+                    severity: 'error',
+                });
+            } else if (acceptedExitCodes.some((value: unknown) =>
+                typeof value !== 'number' || !Number.isInteger(value) || value < 0)) {
+                issues.push({
+                    path: acceptedExitCodesPath,
+                    message: 'acceptedExitCodes 只能包含非负整数',
+                    severity: 'error',
+                });
+            }
+        }
+
+        if (definition.switch !== undefined) {
+            const switchConfig = asRecord(definition.switch);
+            const cases = Array.isArray(definition.switch)
+                ? definition.switch
+                : (Array.isArray(switchConfig?.cases) ? switchConfig.cases : undefined);
+            if (!Array.isArray(cases) || cases.length === 0) {
+                issues.push({
+                    path: `${path}/switch`,
+                    message: 'switch 必须是非空 cases 数组',
+                    severity: 'error',
+                });
+            } else {
+                cases.forEach((entry: unknown, index: number) => {
+                    const casePath = `${path}/switch/case-${index}`;
+                    const caseRecord = asRecord(entry);
+                    if (!caseRecord) {
+                        issues.push({ path: casePath, message: 'switch case 必须是对象', severity: 'error' });
+                        return;
+                    }
+                    const hasDefault = caseRecord.default !== undefined;
+                    const hasWhen = caseRecord.when !== undefined;
+                    if (!hasDefault && !hasWhen) {
+                        issues.push({
+                            path: casePath,
+                            message: 'switch case 必须包含 when 或 default',
+                            severity: 'error',
+                        });
+                    }
+                    if (hasWhen
+                        && typeof caseRecord.when !== 'boolean'
+                        && typeof caseRecord.when !== 'number'
+                        && typeof caseRecord.when !== 'string') {
+                        issues.push({
+                            path: `${casePath}/when`,
+                            message: 'when 必须是布尔值、数字或表达式字符串',
+                            severity: 'error',
+                        });
+                    }
+                    if (hasWhen && hasDefault) {
+                        issues.push({
+                            path: casePath,
+                            message: 'switch case 不能同时包含 when 与 default',
+                            severity: 'warning',
+                        });
+                    }
+                    const branchSteps = hasDefault
+                        ? sequenceOf(caseRecord.default)
+                        : sequenceOf(caseRecord);
+                    if (branchSteps) {
+                        this.validateSequence(branchSteps, `${casePath}/do`, issues);
+                    }
+                });
+            }
+        }
+
+        if (definition.for !== undefined) {
+            const forConfig = asRecord(definition.for);
+            if (!forConfig) {
+                issues.push({ path: `${path}/for`, message: 'for 必须是对象', severity: 'error' });
+            } else {
+                const doSteps = sequenceOf(definition.do);
+                if (doSteps) this.validateSequence(doSteps, `${path}/for/do`, issues);
+            }
+        }
+
+        if (definition.try !== undefined) {
+            const trySteps = sequenceOf(definition.try);
+            if (!trySteps) {
+                issues.push({ path: `${path}/try`, message: 'try 必须是步骤数组或含 do 的对象', severity: 'error' });
+            } else {
+                this.validateSequence(trySteps, `${path}/try`, issues);
+            }
+            if (definition.catch !== undefined) {
+                const catchSteps = sequenceOf(definition.catch);
+                const catchRecord = asRecord(definition.catch);
+                if (catchSteps) {
+                    this.validateSequence(catchSteps, `${path}/catch`, issues);
+                } else if (!catchRecord) {
+                    issues.push({ path: `${path}/catch`, message: 'catch 必须是步骤数组或对象', severity: 'error' });
+                }
+                // 只有 retry 配置、没有 catch.do 也是合法用法：重试耗尽后继续抛错。
+            }
+        }
+
+        if (definition.fork !== undefined) {
+            const forkConfig = asRecord(definition.fork);
+            const branches = Array.isArray(definition.fork)
+                ? definition.fork
+                : (Array.isArray(forkConfig?.branches) ? forkConfig.branches : undefined);
+            if (!Array.isArray(branches) || branches.length === 0) {
+                issues.push({
+                    path: `${path}/fork`,
+                    message: 'fork 必须是非空 branches 数组',
+                    severity: 'error',
+                });
+            } else {
+                branches.forEach((branch: unknown, index: number) => {
+                    const branchSteps = sequenceOf(branch)
+                        ?? (asRecord(branch) ? [branch] : undefined);
+                    if (!branchSteps) {
+                        issues.push({
+                            path: `${path}/fork/branch-${index}`,
+                            message: 'fork 分支必须是步骤数组或含 do 的对象',
+                            severity: 'error',
+                        });
+                        return;
+                    }
+                    this.validateSequence(branchSteps, `${path}/fork/branch-${index}/do`, issues);
+                });
+            }
+        }
     }
 
     private buildFallbackSummary(fallbackName: string): WorkflowSummary {

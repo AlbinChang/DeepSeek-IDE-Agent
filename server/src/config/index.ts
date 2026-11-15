@@ -135,6 +135,9 @@ export const config = {
         apiServiceBusyRetryLimit: parsePositiveInt(process.env.AGENT_API_SERVICE_BUSY_RETRY_LIMIT, 100, 0),
         maxHistoryBytes: parsePositiveInt(process.env.AGENT_MAX_HISTORY_BYTES, 1024 * 1024, 1),
         lowWatermarkBytes: parsePositiveInt(process.env.AGENT_LOW_WATERMARK_BYTES, 128 * 1024, 1),
+        // 单次模型输出 token 上限；0 = 不发送 max_tokens，采用供应商默认值。
+        // 生产网关常把默认值设得很小，导致评估报告等长输出被截断，可按需显式设置。
+        maxOutputTokens: parsePositiveInt(process.env.AGENT_MAX_OUTPUT_TOKENS, 0, 0),
         // 拦截“控制标记泄漏”的异常模型输出（BOS/EOS 等被当成正文），避免污染会话历史
         modelOutputGuard: parseBoolean(process.env.AGENT_MODEL_OUTPUT_GUARD, true),
         // 检测到服务端返回的模型与所选不一致时，丢弃本次回复并重试的次数（0 = 不重试，仅提示）

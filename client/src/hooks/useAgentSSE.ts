@@ -495,7 +495,7 @@ export function useAgentSSE() {
             treeRefreshTimer = setTimeout(() => {
                 treeRefreshTimer = null;
                 window.dispatchEvent(new CustomEvent('ui:file-tree:refresh'));
-            }, 600);
+            }, 1200);
         };
         // 标记是否需要在本次 flush 前取消已有 rAF（用于 terminal 事件立即刷新）
         let needsImmediateFlush = false;

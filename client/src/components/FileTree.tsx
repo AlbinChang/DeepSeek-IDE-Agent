@@ -1,5 +1,6 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { Virtuoso } from 'react-virtuoso';
 import { sortFileEntries } from '../../../server/src/utils/FileOrdering';
 import { 
   File, Folder, ChevronRight, ChevronDown, 
@@ -42,9 +43,11 @@ const extractJarInnerPath = (fullPath: string): string => {
 interface FileTreeProps {
   onFileSelect: (path: string) => void;
   activeFile: string;
+  /** 侧边栏是否可见；隐藏时暂停轮询，避免后台刷新大仓库拖慢 Agent 事件流 */
+  isVisible?: boolean;
 }
 
-const FILE_TREE_POLL_INTERVAL_MS = 5000;
+const FILE_TREE_POLL_INTERVAL_MS = 15000;
 const MAX_AUTO_REFRESH_PATHS = 25;
 const AUTO_REFRESH_SKIP_SEGMENTS = new Set(['node_modules', '.git', 'dist', 'build', '.ide-agent']);
 
@@ -56,7 +59,34 @@ const shouldSkipAutoRefreshPath = (targetPath: string) => {
 /** 目录优先；同组按自然名称顺序排列，包含中文章序号。 */
 const sortFileNodes = (nodes: FileNode[]): FileNode[] => sortFileEntries(nodes);
 
-export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) => {
+const normalizePathForCompare = (value: string): string =>
+  value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+
+/** 按归一化路径查找已加载节点（跨 Windows/Unix 分隔符）。 */
+const findNodeByNormalizedPath = (nodes: FileNode[], targetPath: string): FileNode | null => {
+  const target = normalizePathForCompare(targetPath);
+  for (const node of nodes) {
+    if (normalizePathForCompare(node.path) === target) return node;
+    if (node.children) {
+      const found = findNodeByNormalizedPath(node.children, targetPath);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
+/** 只比较文件树结构字段；内容/展开状态变化不影响相等性。 */
+const areNodeListsEqual = (left: FileNode[], right: FileNode[]): boolean => {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) {
+    const a = left[index];
+    const b = right[index];
+    if (a.path !== b.path || a.name !== b.name || a.isDirectory !== b.isDirectory) return false;
+  }
+  return true;
+};
+
+export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile, isVisible = true }) => {
   const { workspaceRoot, setWorkspaceRoot } = useAgentContext();
   const [nodes, setNodes] = useState<FileNode[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -77,6 +107,10 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
   const pollAbortRef = useRef<AbortController | null>(null);
   /** 当前节点树的镜像引用（供 UI 事件回调读取最新展开状态，避免闭包过期） */
   const nodesRef = useRef<FileNode[]>([]);
+  /** 各目录最近一次已知版本；命中时 file:list 只返回 unchanged，避免重复传输/重渲染 */
+  const directoryVersionsRef = useRef<Map<string, string>>(new Map());
+  /** 同目录刷新节流，避免轮询与 Agent 事件同时触发重复 IPC */
+  const refreshStartedAtRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
@@ -129,7 +163,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         onFileSelect('');
       }
       // 刷新目录树
-      refreshPath('.');
+      refreshPath('.', false, true);
     } catch (e: any) {
       setDeleteError(e?.message || '删除失败');
     } finally {
@@ -160,7 +194,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
       setRenameTarget(null);
       setRenameInput('');
       // 刷新目录树
-      refreshPath('.');
+      refreshPath('.', false, true);
     } catch (e: any) {
       setRenameError(e?.message || '重命名失败');
     } finally {
@@ -224,7 +258,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
       const result = await electronBridge.createFile({ filePath: targetPath, type: newItem.type, root: workspaceRoot });
       if (!result.success) throw new Error(result.error || '创建失败');
       // 刷新目录树
-      refreshPath(parentDir || '.');
+      refreshPath(parentDir || '.', false, true);
       // 文件创建成功后直接打开编辑器
       if (newItem.type === 'file') {
         onFileSelect(targetPath);
@@ -404,7 +438,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
       }
 
       // 刷新目录树
-      refreshPath('.');
+      refreshPath('.', false, true);
     } catch (e: any) {
       console.error('[FileTree] Move failed:', e);
     } finally {
@@ -412,10 +446,39 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     }
   };
 
+  const lastWorkspaceRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (workspaceRoot) {
-      refreshPath('.');
+    const workspaceChanged = lastWorkspaceRef.current !== workspaceRoot;
+    lastWorkspaceRef.current = workspaceRoot;
+
+    if (workspaceChanged) {
+      directoryVersionsRef.current.clear();
+      refreshStartedAtRef.current.clear();
+      setNodes([]);
     }
+
+    const collectOpenPaths = (): string[] => {
+      const openPaths: string[] = [];
+      const walk = (list: FileNode[]) => {
+        for (const node of list) {
+          if (openPaths.length >= MAX_AUTO_REFRESH_PATHS) return;
+          if (node.jarBase) continue;
+          if (node.isDirectory && node.isOpen && !shouldSkipAutoRefreshPath(node.path)) {
+            openPaths.push(node.path);
+          }
+          if (node.children) walk(node.children);
+        }
+      };
+      walk(nodesRef.current);
+      return openPaths;
+    };
+
+    const refreshOpenPaths = (silent = true, force = false) => {
+      for (const p of collectOpenPaths()) {
+        void refreshPath(p, silent, force);
+      }
+    };
 
     // 对齐 36.1 节：共享单次 system-events 连接 (Section 15.0 Hot Reattach)
     // 不再单独开启 fs-watcher 连接，通过 UI 事件总线监听 App.tsx 已建立的信道，降低连接并发数 (Limit 6)
@@ -442,119 +505,141 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     };
 
     const onRefreshRequest = () => {
-      refreshPath('.');
-      // 同步刷新当前已展开的目录：
-      // 根目录 mergeNodes 会保留已展开节点的旧 children，若不主动重取，
-      // Agent 新写入的文件（如 docs/images）在已展开目录中要等到轮询周期才可见
-      const openPaths: string[] = [];
-      const collectOpenPaths = (list: FileNode[]) => {
-        for (const node of list) {
-          if (openPaths.length >= MAX_AUTO_REFRESH_PATHS) return;
-          if (node.jarBase) continue;
-          if (node.isDirectory && node.isOpen && !shouldSkipAutoRefreshPath(node.path)) {
-            openPaths.push(node.path);
-          }
-          if (node.children) collectOpenPaths(node.children);
-        }
-      };
-      collectOpenPaths(nodesRef.current);
-      for (const p of openPaths) {
-        void refreshPath(p, true);
+      // 侧边栏隐藏时不做无意义的大仓库扫描；重新可见时会补一次刷新。
+      if (!isVisible) return;
+      void refreshPath('.', false, true);
+      refreshOpenPaths(true, true);
+    };
+
+    const onFileChanged = (event: Event) => {
+      if (!isVisible || !workspaceRoot) return;
+      const detail = (event as CustomEvent).detail || {};
+      const rawPath = typeof detail.path === 'string' ? detail.path : '';
+      if (!rawPath) return;
+
+      const absPath = typeof detail.absolutePath === 'string' ? detail.absolutePath : rawPath;
+      const normalizedAbs = absPath.replace(/\\/g, '/');
+      const normalizedRoot = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+      const relativePath = normalizedAbs.toLowerCase().startsWith(normalizedRoot.toLowerCase())
+        ? normalizedAbs.slice(normalizedRoot.length).replace(/^\/+/, '')
+        : rawPath.replace(/\\/g, '/').replace(/^\.\//, '');
+      if (!relativePath) return;
+
+      const parentPath = relativePath.includes('/')
+        ? relativePath.slice(0, relativePath.lastIndexOf('/'))
+        : '.';
+      const absoluteParent = parentPath === '.'
+        ? workspaceRoot
+        : `${workspaceRoot.replace(/[\\/]+$/, '')}/${parentPath}`;
+      if (parentPath === '.' || findNodeByNormalizedPath(nodesRef.current, absoluteParent)) {
+        void refreshPath(parentPath, true);
+      }
+      if (detail.isDirectory && findNodeByNormalizedPath(nodesRef.current, relativePath)) {
+        void refreshPath(relativePath, true);
       }
     };
+
     window.addEventListener(GATEWAY_EVENT, handleWsMessage);
     window.addEventListener('ui:file-tree:refresh', onRefreshRequest);
+    window.addEventListener('ui:file:changed', onFileChanged);
+
+    if (isVisible && (workspaceChanged || nodesRef.current.length === 0)) {
+      void refreshPath('.');
+    } else if (isVisible) {
+      // 从搜索/源码管理等视图切回：用版本增量刷新已展开目录，而不是重新走一遍全量加载。
+      void refreshPath('.', false, true);
+      refreshOpenPaths(true, true);
+    }
 
     // 轻量轮询作为兜底同步：串行执行、限制路径数，避免大目录/慢接口导致请求堆积和浏览器 OOM。
+    // 15s + 版本命中时只 stat 目录，不再每 5s 重传/重渲染整棵树。
     const pollInterval = setInterval(() => {
-      if (!workspaceRoot || pollInFlightRef.current) return;
-        
-        setNodes(currentNodes => {
-        const pathsToRefresh = ['.'];
-            const findOpenPaths = (nodesList: FileNode[]) => {
-                for (const node of nodesList) {
-            // 跳过 JAR 内部节点（虚拟目录，不参与文件系统轮询）
-            if (node.jarBase) continue;
-            if (node.isDirectory && node.isOpen && !shouldSkipAutoRefreshPath(node.path)) {
-                        pathsToRefresh.push(node.path);
-              if (pathsToRefresh.length >= MAX_AUTO_REFRESH_PATHS) return;
-                        if (node.children) {
-                            findOpenPaths(node.children);
-                if (pathsToRefresh.length >= MAX_AUTO_REFRESH_PATHS) return;
-                        }
-                    }
-                }
-            };
-            findOpenPaths(currentNodes);
+      if (!workspaceRoot || !isVisible || document.visibilityState === 'hidden' || pollInFlightRef.current) return;
 
-        pollInFlightRef.current = true;
-        pollAbortRef.current?.abort();
-        const controller = new AbortController();
-        pollAbortRef.current = controller;
-            
-            // 异步并发去获取更新
-        Promise.all(pathsToRefresh.slice(0, MAX_AUTO_REFRESH_PATHS).map(async p => {
-                try {
-                    const result = await electronBridge.listFiles({ dirPath: p, depth: 1, root: workspaceRoot! });
-                    const children = result.success ? (result.files || []).map((f: any) => ({
-                        name: f.name, path: f.path,
-                        isDirectory: f.isDirectory || f.type === 'directory',
-                    })) : [];
-                    return { path: p, children };
-                } catch {
-                    return null;
-                }
-            })).then(results => {
-          if (controller.signal.aborted) return;
-                setNodes(oldTree => {
-                    let nextTree = oldTree;
-                    // 【性能优化】预构建 path → node 索引，O(N) 一次构建，后续 O(1) 定位
-                    // 替代原 O(P×N) 每路径递归遍历全树
-                    const nodeIndex = new Map<string, FileNode>();
-                    const buildIndex = (nodes: FileNode[]) => {
-                        for (const n of nodes) {
-                            nodeIndex.set(n.path, n);
-                            if (n.children) buildIndex(n.children);
-                        }
-                    };
-                    buildIndex(oldTree);
+      const pathsToRefresh = ['.', ...collectOpenPaths()].slice(0, MAX_AUTO_REFRESH_PATHS);
+      pollInFlightRef.current = true;
+      pollAbortRef.current?.abort();
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
 
-                    for (const res of results) {
-                        if (!res) continue;
-                        if (res.path === '.') {
-                            nextTree = mergeNodes(nextTree, res.children);
-                        } else {
-                            const target = nodeIndex.get(res.path);
-                            if (target) {
-                                target.children = target.children ? mergeNodes(target.children, res.children) : res.children;
-                                // 触发 React 重渲染：浅拷贝受影响的节点链
-                                nextTree = [...nextTree];
-                            }
-                        }
-                    }
-                    return nextTree;
-                });
-                }).finally(() => {
-                  if (pollAbortRef.current === controller) {
-                    pollAbortRef.current = null;
-                  }
-                  pollInFlightRef.current = false;
-            });
+      Promise.all(pathsToRefresh.map(async (p) => {
+        try {
+          const knownVersion = directoryVersionsRef.current.get(p);
+          const result = await electronBridge.listFiles({
+            dirPath: p,
+            depth: 1,
+            root: workspaceRoot,
+            knownVersion,
+          });
+          if (result.success === false) return null;
+          if (result.unchanged) return { path: p, unchanged: true as const };
+          if (!Array.isArray(result.files)) return { path: p, unchanged: true as const };
+          if (typeof result.version === 'string') {
+            directoryVersionsRef.current.set(p, result.version);
+          }
+          const children = result.files.map((f: any) => ({
+            name: f.name,
+            path: f.path,
+            isDirectory: f.isDirectory || f.type === 'directory',
+          }));
+          return { path: p, unchanged: false as const, children };
+        } catch {
+          return null;
+        }
+      })).then(results => {
+        if (controller.signal.aborted) return;
+        const changedResults = results.filter(
+          (res): res is { path: string; unchanged: false; children: FileNode[] } =>
+            !!res && res.unchanged === false,
+        );
+        if (changedResults.length === 0) return;
 
-            return currentNodes; // 维持现状，等待 Promise 返回后触发更新
+        setNodes(oldTree => {
+          let nextTree = oldTree;
+          // 【性能优化】预构建 path → node 索引，O(N) 一次构建，后续 O(1) 定位
+          const nodeIndex = new Map<string, FileNode>();
+          const buildIndex = (nodes: FileNode[]) => {
+            for (const n of nodes) {
+              nodeIndex.set(n.path, n);
+              if (n.children) buildIndex(n.children);
+            }
+          };
+          buildIndex(oldTree);
+
+          for (const res of changedResults) {
+            if (res.path === '.') {
+              const merged = mergeNodes(nextTree, res.children);
+              if (merged !== nextTree) nextTree = merged;
+              continue;
+            }
+            const target = nodeIndex.get(res.path);
+            if (!target) continue;
+            const merged = mergeNodes(target.children || [], res.children);
+            if (merged === target.children) continue;
+            target.children = merged;
+            // 触发 React 重渲染：只浅拷贝根链，保持其他节点引用稳定
+            nextTree = nextTree === oldTree ? [...oldTree] : nextTree;
+          }
+          return nextTree;
         });
-
-            }, FILE_TREE_POLL_INTERVAL_MS);
+      }).finally(() => {
+        if (pollAbortRef.current === controller) {
+          pollAbortRef.current = null;
+        }
+        pollInFlightRef.current = false;
+      });
+    }, FILE_TREE_POLL_INTERVAL_MS);
 
     return () => {
         window.removeEventListener(GATEWAY_EVENT, handleWsMessage);
         window.removeEventListener('ui:file-tree:refresh', onRefreshRequest);
-              pollAbortRef.current?.abort();
-              pollAbortRef.current = null;
-              pollInFlightRef.current = false;
+        window.removeEventListener('ui:file:changed', onFileChanged);
+        pollAbortRef.current?.abort();
+        pollAbortRef.current = null;
+        pollInFlightRef.current = false;
         clearInterval(pollInterval);
     };
-  }, [workspaceRoot, setWorkspaceRoot]);
+  }, [workspaceRoot, setWorkspaceRoot, isVisible]);
 
   const initWorkspace = async (path: string, forceRebind = false) => {
     if (isSwitchingWorkspace) return;
@@ -570,7 +655,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             setWorkspaceRoot(result.workspaceRoot);
             setIsInitModalOpen(false);
             setInitError(null);
-            refreshPath('.');
+            refreshPath('.', false, true);
         } else {
             // 对齐 3.4 节：失败时回退至锁定状态
             setWorkspaceRoot(null);
@@ -595,29 +680,49 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     }
   };
 
-  const refreshPath = async (parentPath: string, silent = false) => {
+  const refreshPath = async (parentPath: string, silent = false, force = false) => {
     if (!workspaceRoot) return;
+
+    // 轮询与 Agent 事件可能在短时间内重复请求同一目录；非强制刷新时节流避免重复 IPC。
+    const now = Date.now();
+    const lastStartedAt = refreshStartedAtRef.current.get(parentPath) ?? 0;
+    if (!force && now - lastStartedAt < 300) return;
+    refreshStartedAtRef.current.set(parentPath, now);
+
     if (!silent && parentPath === '.') setIsLoading(true);
     try {
-      const result = await electronBridge.listFiles({ dirPath: parentPath, depth: 1, root: workspaceRoot });
-      if (!result.success) throw new Error(result.error || 'List files failed');
-      const filesData = (result.files || []).map((f: any) => ({
+      const knownVersion = directoryVersionsRef.current.get(parentPath);
+      const result = await electronBridge.listFiles({
+        dirPath: parentPath,
+        depth: 1,
+        root: workspaceRoot,
+        knownVersion,
+      });
+      if (result.success === false) throw new Error(result.error || 'List files failed');
+      // 目录版本未变化：不重新传文件列表、不 setState，避免整棵树重渲染。
+      if (result.unchanged) return;
+      if (!Array.isArray(result.files)) return;
+      if (typeof result.version === 'string') {
+        directoryVersionsRef.current.set(parentPath, result.version);
+      }
+
+      const filesData = result.files.map((f: any) => ({
         name: f.name,
         path: f.path,
         isDirectory: f.isDirectory || f.type === 'directory',
       }));
 
       setNodes(prev => {
-        const next = [...prev];
         if (parentPath === '.') {
           return mergeNodes(prev, filesData);
-        } else {
-          const target = findNodeInMutableTree(next, parentPath);
-          if (target) {
-            target.children = sortFileNodes(filesData);
-          }
-          return next;
         }
+        const target = findNodeInMutableTree(prev, parentPath);
+        if (!target) return prev;
+        const nextChildren = sortFileNodes(filesData);
+        if (areNodeListsEqual(target.children || [], nextChildren)) return prev;
+        target.children = nextChildren;
+        // 只浅拷贝根数组触发渲染；未变化节点保持引用稳定，配合 memo 避免全树重绘。
+        return [...prev];
       });
     } catch (error: any) {
       console.error(`Failed to refresh path ${parentPath}:`, error);
@@ -650,18 +755,32 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     for (const o of oldNodes) {
       oldNodeByPath.set(o.path, o);
     }
-    return sortFileNodes(newNodes.map(newNode => {
+
+    let changed = oldNodes.length !== newNodes.length;
+    const merged = newNodes.map((newNode, index) => {
       const oldNode = oldNodeByPath.get(newNode.path);
-      if (oldNode) {
-        newNode.isOpen = oldNode.isOpen;
-        newNode.jarBase = oldNode.jarBase; // 保留 JAR 内部节点标记
-        // 如果是打开的且已经有子节点，保留它们（含 JAR 展开后的虚拟子节点）
-        if (newNode.isOpen && oldNode.children) {
-          newNode.children = oldNode.children;
-        }
+      if (!oldNode) {
+        changed = true;
+        return newNode;
       }
-      return newNode;
-    }));
+      if (oldNode.name !== newNode.name || oldNode.isDirectory !== newNode.isDirectory) {
+        changed = true;
+      }
+      if (oldNodes[index]?.path !== newNode.path) {
+        changed = true;
+      }
+      const sameStructure = oldNode.name === newNode.name && oldNode.isDirectory === newNode.isDirectory;
+      // 结构未变化时复用旧节点引用（保留 isOpen/children，并避免整棵子树重渲染）。
+      const next = sameStructure ? oldNode : { ...oldNode, ...newNode };
+      if (next.isOpen && oldNode.children) {
+        next.children = oldNode.children;
+      }
+      return next;
+    });
+
+    // 完全未变化时返回原数组引用，React 会跳过状态更新。
+    if (!changed) return oldNodes;
+    return sortFileNodes(merged);
   };
 
   const toggleFolder = async (node: FileNode) => {
@@ -677,15 +796,22 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
 
     setNodes(currentNodes => {
       const updateNode = (nodes: FileNode[]): FileNode[] => {
-        return nodes.map(n => {
+        let changed = false;
+        const next = nodes.map(n => {
           if (n.path === node.path) {
+            changed = true;
             return { ...n, isOpen: isNowOpen };
           }
           if (n.children) {
-            return { ...n, children: updateNode(n.children) };
+            const nextChildren = updateNode(n.children);
+            if (nextChildren !== n.children) {
+              changed = true;
+              return { ...n, children: nextChildren };
+            }
           }
           return n;
         });
+        return changed ? next : nodes;
       };
       return updateNode(currentNodes);
     });
@@ -719,6 +845,9 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
           // ── 普通文件系统目录 ──
           const result = await electronBridge.listFiles({ dirPath: node.path, depth: 1, root: workspaceRoot });
           if (!result.success) throw new Error(result.error || 'Toggle failed');
+          if (typeof result.version === 'string') {
+            directoryVersionsRef.current.set(node.path, result.version);
+          }
           childData = (result.files || []).map((f: any) => ({
             name: f.name, path: f.path,
             isDirectory: f.isDirectory || f.type === 'directory',
@@ -728,15 +857,22 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         const sortedChildData = sortFileNodes(childData);
         setNodes(currentNodes => {
           const updateChildren = (nodes: FileNode[]): FileNode[] => {
-            return nodes.map(n => {
+            let changed = false;
+            const next = nodes.map(n => {
               if (n.path === node.path) {
+                changed = true;
                 return { ...n, children: sortedChildData };
               }
               if (n.children) {
-                return { ...n, children: updateChildren(n.children) };
+                const nextChildren = updateChildren(n.children);
+                if (nextChildren !== n.children) {
+                  changed = true;
+                  return { ...n, children: nextChildren };
+                }
               }
               return n;
             });
+            return changed ? next : nodes;
           };
           return updateChildren(currentNodes);
         });
@@ -744,15 +880,22 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
         console.error(e);
         setNodes(currentNodes => {
           const revert = (nodes: FileNode[]): FileNode[] => {
-            return nodes.map(n => {
+            let changed = false;
+            const next = nodes.map(n => {
               if (n.path === node.path) {
+                changed = true;
                 return { ...n, isOpen: false };
               }
               if (n.children) {
-                return { ...n, children: revert(n.children) };
+                const nextChildren = revert(n.children);
+                if (nextChildren !== n.children) {
+                  changed = true;
+                  return { ...n, children: nextChildren };
+                }
               }
               return n;
             });
+            return changed ? next : nodes;
           };
           return revert(currentNodes);
         });
@@ -771,65 +914,83 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
     return null;
   };
 
-  const renderNode = (node: FileNode, depth: number = 0) => {
+  const renderNodeRow = (node: FileNode, depth: number = 0) => {
     const isActive = activeFile === node.path;
     const isDragging = dragNodePath === node.path;
     const isDragOver = dragOverPath === node.path && node.isDirectory;
     const isDropTarget = node.isDirectory && dragNodePath && !isDescendantOf(dragNodePath, node.path) && !isMoving;
 
     return (
-      <div key={node.path}>
-        <div 
-          draggable
-          onClick={() => toggleFolder(node)}
-          onContextMenu={(e) => handleContextMenu(e, node)}
-          onDragStart={(e) => handleDragStart(e, node)}
-          onDragEnd={handleDragEnd}
-          onDragOver={(e) => isDropTarget ? handleDragOver(e, node) : e.preventDefault()}
-          onDragEnter={(e) => isDropTarget ? handleDragEnter(e, node) : undefined}
-          onDragLeave={(e) => isDropTarget ? handleDragLeave(e, node) : undefined}
-          onDrop={(e) => isDropTarget ? handleDrop(e, node) : undefined}
-          data-testid={`file-node-${node.path}`}
-          style={{ paddingLeft: `${depth * 10 + 6}px` }}
-          className={`flex items-center gap-1.5 py-0.5 px-2 cursor-pointer transition-all duration-150 group ${
-            isActive ? 'bg-white/10 text-white font-black' : 'hover:bg-white/5 text-white'
-          } ${isDragOver ? 'bg-[#3B82F6]/20 ring-1 ring-[#3B82F6]/50' : ''} ${
-            isDragging ? 'opacity-40' : ''
-          }`}
-        >
-          <div className="flex items-center gap-1.5 min-w-0 flex-1">
-            {node.isDirectory || isArchiveFile(node.name) ? (
-              <>
-                {(node.isDirectory || isArchiveFile(node.name)) && (
-                  node.isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />
-                )}
-                {isArchiveFile(node.name) && !node.jarBase ? (
-                  <span title="归档文件 (JAR/WAR/EAR/ZIP)">
-                    <Box size={11} className={`${node.isOpen ? 'text-amber-400' : 'text-amber-400/60 group-hover:text-amber-400'} shrink-0`} />
-                  </span>
-                ) : (
-                  <Folder size={11} className={`${node.isOpen ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`} />
-                )}
-              </>
-            ) : (
-              <>
-                <File size={10} className={`${isActive ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${node.jarBase ? 'text-amber-400/50' : ''}`} />
-              </>
-            )}
-            <span className={`text-[10px] truncate tracking-tighter ${isActive ? 'translate-x-0.5 transition-transform' : 'opacity-40 group-hover:opacity-100'} ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`}>
-              {node.name}
-            </span>
-          </div>
+      <div
+        draggable
+        onClick={() => toggleFolder(node)}
+        onContextMenu={(e) => handleContextMenu(e, node)}
+        onDragStart={(e) => handleDragStart(e, node)}
+        onDragEnd={handleDragEnd}
+        onDragOver={(e) => isDropTarget ? handleDragOver(e, node) : e.preventDefault()}
+        onDragEnter={(e) => isDropTarget ? handleDragEnter(e, node) : undefined}
+        onDragLeave={(e) => isDropTarget ? handleDragLeave(e, node) : undefined}
+        onDrop={(e) => isDropTarget ? handleDrop(e, node) : undefined}
+        data-testid={`file-node-${node.path}`}
+        style={{ paddingLeft: `${depth * 10 + 6}px` }}
+        className={`flex items-center gap-1.5 py-0.5 px-2 cursor-pointer transition-all duration-150 group ${
+          isActive ? 'bg-white/10 text-white font-black' : 'hover:bg-white/5 text-white'
+        } ${isDragOver ? 'bg-[#3B82F6]/20 ring-1 ring-[#3B82F6]/50' : ''} ${
+          isDragging ? 'opacity-40' : ''
+        }`}
+      >
+        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+          {node.isDirectory || isArchiveFile(node.name) ? (
+            <>
+              {(node.isDirectory || isArchiveFile(node.name)) && (
+                node.isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />
+              )}
+              {isArchiveFile(node.name) && !node.jarBase ? (
+                <span title="归档文件 (JAR/WAR/EAR/ZIP)">
+                  <Box size={11} className={`${node.isOpen ? 'text-amber-400' : 'text-amber-400/60 group-hover:text-amber-400'} shrink-0`} />
+                </span>
+              ) : (
+                <Folder size={11} className={`${node.isOpen ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`} />
+              )}
+            </>
+          ) : (
+            <>
+              <File size={10} className={`${isActive ? 'text-white' : 'text-white opacity-20 group-hover:opacity-100'} shrink-0 ${node.jarBase ? 'text-amber-400/50' : ''}`} />
+            </>
+          )}
+          <span className={`text-[10px] truncate tracking-tighter ${isActive ? 'translate-x-0.5 transition-transform' : 'opacity-40 group-hover:opacity-100'} ${isDragOver ? 'text-[#3B82F6] opacity-100' : ''}`}>
+            {node.name}
+          </span>
         </div>
-        {(node.isDirectory || isArchiveFile(node.name)) && node.isOpen && (
-          <div>
-            {node.children && node.children.map(child => renderNode(child, depth + 1))}
-            {newItem && newItem.parentPath === node.path && !node.jarBase && renderNewItemInput(depth + 1)}
-          </div>
-        )}
       </div>
     );
   };
+
+  // 将树扁平化为可见行，交给 Virtuoso 虚拟滚动：
+  // 大仓库展开上万个节点时只渲染视口附近的行，避免整棵树 DOM/重排卡死 UI。
+  type FileTreeRow =
+    | { kind: 'node'; node: FileNode; depth: number }
+    | { kind: 'new-item'; depth: number };
+
+  const visibleRows = React.useMemo<FileTreeRow[]>(() => {
+    const rows: FileTreeRow[] = [];
+    const walk = (list: FileNode[], depth: number) => {
+      for (const node of list) {
+        rows.push({ kind: 'node', node, depth });
+        if ((node.isDirectory || isArchiveFile(node.name)) && node.isOpen) {
+          if (node.children) walk(node.children, depth + 1);
+          if (newItem && newItem.parentPath === node.path && !node.jarBase) {
+            rows.push({ kind: 'new-item', depth: depth + 1 });
+          }
+        }
+      }
+    };
+    walk(nodes, 0);
+    if (newItem && newItem.parentPath === '.') {
+      rows.push({ kind: 'new-item', depth: 0 });
+    }
+    return rows;
+  }, [nodes, newItem]);
 
   return (
     <div className="flex flex-col h-full bg-[#000000]" data-testid="file-tree-container">
@@ -1264,7 +1425,7 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
             <span className="ml-1 text-[7.5px] uppercase tracking-[0.2em] text-white/20 font-black select-none">新建</span>
           </div>
           <div
-            className="flex-1 overflow-y-auto py-2"
+            className="flex-1 min-h-0 overflow-hidden pt-2"
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -1272,18 +1433,27 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile }) 
               setEmptyMenu({ x: e.clientX, y: e.clientY });
             }}
           >
-            {nodes.map(node => renderNode(node))}
-            {newItem && newItem.parentPath === '.' && renderNewItemInput(0)}
-            {nodes.length === 0 && !isLoading && (
-              <div className="p-4 text-[11px] text-white/60 uppercase font-black tracking-[0.2em] italic text-center border-b border-white/5 mx-4 mt-8 py-4 bg-white/[0.02] shadow-inner">
-                <div className="opacity-20 mb-2">EMPTY_DIRECTORY_MIRROR</div>
-                <div className="underline decoration-white/20 underline-offset-8">未发现文件 (EMPTY_DIR)</div>
-              </div>
-            )}
-            {isLoading && nodes.length === 0 && (
+            {isLoading && nodes.length === 0 ? (
               <div className="p-4 flex items-center gap-2 text-[10px] text-white uppercase font-black tracking-widest opacity-40">
                 <Loader2 size={12} className="animate-spin" /> 正在加载 (LOADING)...
               </div>
+            ) : (
+              <Virtuoso
+                style={{ height: '100%' }}
+                data={visibleRows}
+                computeItemKey={(_, row) => row.kind === 'node' ? row.node.path : `new-item:${row.depth}`}
+                itemContent={(_, row) => row.kind === 'node'
+                  ? renderNodeRow(row.node, row.depth)
+                  : renderNewItemInput(row.depth)}
+                components={{
+                  EmptyPlaceholder: () => (
+                    <div className="p-4 text-[11px] text-white/60 uppercase font-black tracking-[0.2em] italic text-center border-b border-white/5 mx-4 mt-8 py-4 bg-white/[0.02] shadow-inner">
+                      <div className="opacity-20 mb-2">EMPTY_DIRECTORY_MIRROR</div>
+                      <div className="underline decoration-white/20 underline-offset-8">未发现文件 (EMPTY_DIR)</div>
+                    </div>
+                  ),
+                }}
+              />
             )}
           </div>
         </>

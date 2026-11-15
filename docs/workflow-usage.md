@@ -87,6 +87,29 @@ do:
 
 ## 4. 步骤类型
 
+### 4.0 步骤级条件与容错（`when` / `continueOnError`）
+
+任意步骤都可以声明 `when`，条件为假时该步骤会被标记为 `skipped`，不会执行，也不会消耗步骤预算：
+
+```yaml
+- verify:
+    when: ${ .inputs.mode == 'full' }
+    call: agent
+    with:
+      prompt: 执行完整核验
+
+- handleMissing:
+    when: ${ .steps.collect.status == 'failed' }
+    set:
+      needsReview: true
+```
+
+- `when` 支持布尔值、数字或表达式字符串；表达式写错会直接失败，不会被当成 truthy 静默执行。
+- 跳过原因写入 `step.skipReason`，后续步骤可通过 `.steps.<name>.status == 'skipped'` 判断。
+- `continueOnError: true` 允许普通步骤失败后继续执行；失败步骤仍记录为 `failed`，并带 `tolerated: true` 和 `{ error: { message, type } }` 输出。取消、审批、预算、持久化、校验和未实现错误不会被容忍。
+- `continueOnError` 适用于“允许多少缺失、但必须留下证据”的采集/可选阶段；必做步骤应保持默认失败中止，避免把真实崩溃吞掉。
+- 可运行示例：`.workflow/examples/conditional-tolerance.workflow.yaml`。
+
 ### 4.1 `set`
 
 ```yaml
@@ -117,6 +140,8 @@ do:
 
 - 默认只读工具：`read_skill`、`read_file`、`read_file_by_byte`、`list_files`、`calculate`。
 - 写文件/命令/浏览器工具必须显式写进 `tools`。
+- `verify` / `render` 这类会生成 `verify.csv`、报告 Markdown 的 LLM 阶段，必须把 `file_write` / `file_replace` / `file_insert` 等写工具列入 `tools`；否则模型只有只读工具，阶段会产出缺失或直接失败。建议在后续 shell 步骤或 `output.schema` 中校验目标文件存在且非空，避免“阶段没有真正落盘”却继续执行。
+- 如果要覆盖既有高价值文件（例如已存在的百 KB 报告），先在写文件 agent 前放一个 `call: approval`；批准后再执行，拒绝则流程取消。
 - 禁止在工作流内调用 `run_workflow` / `resume_workflow` / `cancel_workflow`，以及 TODO 写工具。
 - `output.schema` 使用内置轻量校验（type/required/properties/items/enum/数值与长度约束）。
 
@@ -143,8 +168,18 @@ do:
         minutes: 10
 ```
 
+```yaml
+- collect:
+    run:
+      shell:
+        command: python collect.py
+        acceptedExitCodes: [0, 4]
+```
+
 - 统一走 `run_powershell_command`（Windows: powershell，macOS/Linux: pwsh）与 `ProcessSafetyGuard`。
 - `run.shell.environment` 会追加/覆盖子进程环境变量（仅字符串值）。
+- `run.shell.acceptedExitCodes` 可把业务约定的非零退出码视为成功（默认 `[0]`）。例如“部分公告缺失”返回 4 时写 `acceptedExitCodes: [0, 4]`，不要再把命令包成 `exit 0` 从而吞掉真正的 NameError/崩溃。
+- 需要“失败后继续”时组合使用步骤级 `continueOnError: true` 和后续 `when`，把容错策略显式表达在 YAML 中。
 - 取消/超时会通过 `AbortSignal` 终止命令；Windows 使用 `taskkill /T /F`，POSIX 使用独立进程组和组级终止。Windows 已做实际测试；POSIX 组信号目前只有模拟测试，部署时应在目标系统验证。
 - **不要**把不可信输入（尤其是 `.inputs`）直接插值进 shell 命令；如需使用，先在脚本内部做参数校验，或改用只读/写文件工具。
 

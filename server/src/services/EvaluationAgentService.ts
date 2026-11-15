@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { AgentService } from "@/services/AgentService.js";
-import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
+import { AgentTurnEngine, type AgentTurnEngineResult } from "@/services/AgentTurnEngine.js";
 import { AIProviderFactory } from "@/services/AIProviderFactory.js";
 import { HistoryOptimizerService } from "@/services/HistoryOptimizerService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
-import type { TokenUsage } from "@/utils/TokenUsage.js";
+import { accumulateTokenUsage, type TokenUsage } from "@/utils/TokenUsage.js";
 import type { ModelProviderConfig } from "@/services/SettingsService.js";
 import { FileIO } from "@/utils/FileIO.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
@@ -12,13 +13,36 @@ import type { LLMRequestRecord } from "@/services/LLMRequestJournal.js";
 /** 最近一次评估报告落盘路径（工作区相对路径，系统内部上下文补充文件） */
 const EVALUATION_REPORT_RELATIVE_PATH = ".evaluate/evl_result.md";
 
+/** 评估报告不完整时，最多自动续写几次（避免无限循环） */
+const MAX_REPORT_CONTINUATIONS = 2;
+
 const getTS = () => getBeijingLogTimePrefix();
 
 export type EvaluationDecision =
     | "continue_main_agent"
     | "goal_achieved"
     | "goal_unachievable"
-    | "need_user_input";
+    | "need_user_input"
+    /** 评估Agent未能产出完整报告（输出被截断/异常），不得据此驱动主Agent修复循环 */
+    | "evaluation_failed";
+
+/** 评估报告完整性检查结果 */
+interface ReportIntegrity {
+    complete: boolean;
+    hasHeading: boolean;
+    hasIssueCount: boolean;
+    hasP0P1Count: boolean;
+    hasDecision: boolean;
+    hasRepairList: boolean;
+    requiresRepairList: boolean;
+    length: number;
+}
+
+interface ResolvedReport {
+    report: string;
+    source: string;
+    integrity: ReportIntegrity;
+}
 
 export interface EvaluationAgentInput {
     agentService: AgentService;
@@ -106,6 +130,10 @@ export class EvaluationAgentService {
             telemetrySink,
         } = input;
 
+        // workflow evaluator 等调用方可能不传 requestId；兜底生成本次评估的
+        // 提示词缓存 key，避免每轮工具调用后重复扫描工作区/技能/规则。
+        const effectiveRequestId = requestId || randomUUID();
+
         const evaluationTask = [
             "你现在是评估专家Agent，请执行完整评估闭环。",
             "",
@@ -153,7 +181,7 @@ export class EvaluationAgentService {
                 finalLocale,
                 "evaluator-agent.json",
                 root,
-                requestId,
+                effectiveRequestId,
                 userInstruction,
             );
             return MessagePreparationService.buildMessages({
@@ -183,13 +211,19 @@ export class EvaluationAgentService {
         let decision: EvaluationDecision = "continue_main_agent";
         let issueCount = 1;
         let p0p1IssueCount = 1;
+        let finalReportComplete = true;
 
         let requestGateFailed = false;
-        try {
-            const turnResult = await AgentTurnEngine.runTurns({
+
+        const executeTurns = async (
+            history: any[],
+            forceFinalAnswer: boolean,
+            isFirstAttempt: boolean,
+        ): Promise<AgentTurnEngineResult> => {
+            const result = await AgentTurnEngine.runTurns({
                 client,
                 finalModelId: modelId,
-                activeHistory,
+                activeHistory: history,
                 toolsMetadata,
                 thinkingOptions,
                 agentService,
@@ -211,6 +245,7 @@ export class EvaluationAgentService {
                 skipJournal,
                 skipTelemetry,
                 maxTurns,
+                forceFinalAnswer,
                 beforeApiRequest: beforeApiRequest && (async () => {
                     try {
                         await beforeApiRequest();
@@ -233,33 +268,127 @@ export class EvaluationAgentService {
                     pinnedUserMessage,
                     mainAgentFinalReply,
                 },
-                resumeRequest,
+                // 只有第一次请求需要重放崩溃前的原始 payload；续写必须使用新构造的历史。
+                resumeRequest: isFirstAttempt ? resumeRequest : undefined,
             });
+            turnResultUsage = accumulateTokenUsage(turnResultUsage, result.usage);
+            return result;
+        };
 
-            turnResultUsage = turnResult.usage;
-            const rawFinalReply = (turnResult.finalAssistantContent || "").trim();
-            finalReply = rawFinalReply;
-            decision = this.parseDecision(rawFinalReply);
-            issueCount = this.parseIssueCount(rawFinalReply);
-            p0p1IssueCount = this.parseP0P1IssueCount(rawFinalReply, issueCount);
+        try {
+            let turnResult = await executeTurns(activeHistory, false, true);
+            let resolved = this.resolveReport(turnResult);
 
-            // 质量门禁：仅 P0+P1 级别问题阻塞交付，P2/P3 不阻塞。
-            if (p0p1IssueCount > 0) {
-                decision = "continue_main_agent";
+            // 评估报告必须是完整正文；只拿到标题/开头时不能直接交给主Agent，
+            // 否则主Agent会按一个不存在的「可直接修复清单」反复扫描工作区。
+            // 即使字段齐全，只要 finish_reason=length 也强制续写一次，避免尾部清单被截断。
+            let continuationRounds = 0;
+            let shouldContinue = !resolved.integrity.complete
+                || (turnResult.finishReason === "length" && continuationRounds === 0);
+            while (shouldContinue
+                && continuationRounds < MAX_REPORT_CONTINUATIONS
+                && !abortSignal?.aborted) {
+                const partial = resolved.report;
+                const missing = this.describeMissingReportParts(resolved.integrity);
+                console.warn(
+                    `${getTS()} [EvaluationAgent] 评估报告不完整（缺少：${missing}；`
+                    + `finishReason=${turnResult.finishReason ?? "unknown"}；长度=${partial.length}），`
+                    + `正在自动续写（第 ${continuationRounds + 1}/${MAX_REPORT_CONTINUATIONS} 次）...`,
+                );
+                emit({
+                    type: "stage",
+                    content: `评估报告不完整（缺少：${missing}），正在自动续写完整报告...`,
+                });
+
+                const continuationHistory = this.buildContinuationHistory(
+                    turnResult,
+                    partial,
+                    this.buildContinuationDirective(resolved.integrity, turnResult.finishReason),
+                    providerConfig,
+                );
+                const nextResult = await executeTurns(continuationHistory, true, false);
+                const nextResolved = this.resolveReport(nextResult);
+
+                if (nextResolved.integrity.complete) {
+                    resolved = nextResolved;
+                    turnResult = nextResult;
+                    break;
+                }
+
+                // 强制续写时模型可能只回一句“报告已完整输出”。原报告已完整时保留原报告，
+                // 不要把确认语拼进正文。
+                if (resolved.integrity.complete
+                    && nextResolved.report.length < 120
+                    && !/(?:问题个数|执行结论|可直接修复清单)/.test(nextResolved.report)) {
+                    turnResult = nextResult;
+                    break;
+                }
+
+                if (nextResolved.report) {
+                    const combined = this.combineReportSegments(partial, nextResolved.report);
+                    resolved = {
+                        report: combined,
+                        source: "continuation",
+                        integrity: this.inspectReport(combined),
+                    };
+                }
+                turnResult = nextResult;
+                continuationRounds++;
+                shouldContinue = !resolved.integrity.complete
+                    && continuationRounds < MAX_REPORT_CONTINUATIONS
+                    && !abortSignal?.aborted;
+            }
+
+            if (abortSignal?.aborted) {
+                const abortError = new Error("评估Agent请求已取消");
+                abortError.name = "AbortError";
+                throw abortError;
+            }
+
+            finalReply = resolved.report.trim();
+            finalReportComplete = resolved.integrity.complete;
+
+            if (finalReportComplete) {
+                decision = this.parseDecision(finalReply);
+                issueCount = this.parseIssueCount(finalReply);
+                p0p1IssueCount = this.parseP0P1IssueCount(finalReply, issueCount);
+
+                // 质量门禁：仅 P0+P1 级别问题阻塞交付，P2/P3 不阻塞。
+                // 评估失败是终局信号，不能被 P0/P1 计数改写成“继续迭代”。
+                if (decision !== "evaluation_failed" && p0p1IssueCount > 0) {
+                    decision = "continue_main_agent";
+                }
+            } else {
+                decision = "evaluation_failed";
+                issueCount = 1;
+                p0p1IssueCount = 1;
+                finalReply = this.buildIncompleteReport(resolved, turnResult);
+                console.error(
+                    `${getTS()} [EvaluationAgent] 评估报告仍不完整，已终止修复循环：`
+                    + `missing=${this.describeMissingReportParts(resolved.integrity)}，`
+                    + `finishReason=${turnResult.finishReason ?? "unknown"}，`
+                    + `length=${resolved.report.length}，user=${userId}`,
+                );
             }
         } catch (err: any) {
-            if (requestGateFailed) throw err;
+            if (requestGateFailed || err?.name === "AbortError" || abortSignal?.aborted) throw err;
             const errMsg = String(err?.message || err || "未知异常").trim();
-            decision = "continue_main_agent";
+            // 评估异常不能伪装成“需要主Agent继续迭代”：否则主Agent会把异常文本
+            // 当成修复清单，反复扫描工作区却找不到可执行项。
+            decision = "evaluation_failed";
             issueCount = 1;
             p0p1IssueCount = 1;
+            finalReportComplete = false;
             finalReply = [
                 "## 评估执行异常",
                 "",
                 `评估Agent在运行过程中出现异常：${errMsg}`,
                 "",
+                "系统已停止本轮修复循环；请重试评估，不要依据本报告臆造「可直接修复清单」。",
+                "",
                 "问题个数：1",
-                "执行结论：需要主Agent继续迭代",
+                "P0+P1问题个数：1",
+                "执行结论：评估失败",
             ].join("\n");
             console.error(`${getTS()} [EvaluationAgent] runTurns failed for user: ${userId}`, err);
         }
@@ -271,7 +400,7 @@ export class EvaluationAgentService {
         // 失败不应影响评估主流程，这里仅告警。
         if (persistReport !== false) {
             try {
-                await this.saveEvaluationReport(root, finalReply);
+                await this.saveEvaluationReport(root, finalReply, finalReportComplete);
             } catch (persistErr) {
                 console.warn(
                     `${getTS()} [EvaluationAgent] Failed to persist evaluation report to ${EVALUATION_REPORT_RELATIVE_PATH}:`,
@@ -282,12 +411,210 @@ export class EvaluationAgentService {
 
         console.log(`${getTS()} [EvaluationAgent] Evaluation finished for user: ${userId}, decision: ${decision}, issueCount: ${issueCount}, p0p1IssueCount: ${p0p1IssueCount}`);
 
+        // 本次评估自行生成的缓存 key：评估结束后清理，避免 workflow/内部调用长期占用
+        // 全局提示词缓存（chat 路径由 AgentChatComponent 统一清理）。
+        if (!requestId) {
+            try {
+                agentService.clearSystemPromptCache(effectiveRequestId);
+            } catch (cacheErr) {
+                console.warn(`${getTS()} [EvaluationAgent] Failed to clear system prompt cache:`, cacheErr);
+            }
+        }
+
         return {
             decision,
             finalReply,
             reportContent,
             usage: turnResultUsage,
         };
+    }
+
+    /**
+     * 检查评估报告是否满足交付契约：
+     * - 固定标题「# 评估Agent的评估报告」
+     * - 「问题个数：N」
+     * - 「执行结论：...」
+     * - 结论为需要继续迭代时，必须包含「可直接修复清单」
+     *
+     * 只有完整报告才允许进入主Agent修复循环；仅拿到标题/开头时视为评估失败。
+     */
+    private inspectReport(report: string): ReportIntegrity {
+        const text = String(report || "").trim();
+        const hasHeading = /(?:^|\n)\s*#{1,3}\s*评估Agent的评估报告/.test(text);
+        const hasIssueCount = /(?:^|\n)\s*(?:问题个数|问题数量|问题数)\s*[：:]\s*\d+/.test(text);
+        const hasP0P1Count = /(?:^|\n)\s*(?:P0\+P1问题个数|P0P1问题个数|P0\+P1问题数|P0P1问题数)\s*[：:]\s*\d+/.test(text);
+        const hasDecision = /(?:^|\n)\s*执行结论\s*[：:]/.test(text);
+        const hasRepairList = /(?:可直接修复清单|修复清单)/.test(text);
+
+        const decisionLine = text
+            .split(/\r?\n/)
+            .map((line) => this.normalizeDecisionLine(line))
+            .find((line) => /^执行结论\s*[：:]/.test(line));
+        const requiresRepairList = (!!decisionLine
+            && decisionLine.replace(/\s+/g, "").includes("需要主Agent继续迭代"))
+            // 兼容“执行结论：”与结论文字之间被换行/空格拆开的情况
+            || /执行结论\s*[：:][\s\S]{0,40}需要主Agent继续迭代/.test(text);
+
+        const complete = text.length >= 40
+            && hasHeading
+            && hasIssueCount
+            && hasDecision
+            && (!requiresRepairList || hasRepairList);
+
+        return {
+            complete,
+            hasHeading,
+            hasIssueCount,
+            hasP0P1Count,
+            hasDecision,
+            hasRepairList,
+            requiresRepairList,
+            length: text.length,
+        };
+    }
+
+    /**
+     * 从「最终答复 / 推理内容 / 历史 assistant 消息」中挑选最完整的评估报告。
+     * 某些模型会把完整报告写进 reasoning_content，或把报告写在带工具调用的
+     * 中间轮次里，而最终 content 只剩一行开头；此时必须回退到更完整的候选。
+     */
+    private resolveReport(result: AgentTurnEngineResult): ResolvedReport {
+        const finalContent = String(result.finalAssistantContent || "").trim();
+        const finalIntegrity = this.inspectReport(finalContent);
+        if (finalIntegrity.complete) {
+            return { report: finalContent, source: "final", integrity: finalIntegrity };
+        }
+
+        const candidates: Array<{ source: string; text: string }> = [];
+        const reasoning = String(result.finalAssistantReasoning || "").trim();
+        if (reasoning) candidates.push({ source: "reasoning", text: reasoning });
+
+        (result.activeHistory || []).forEach((message: any, index: number) => {
+            if (message?.role !== "assistant" || typeof message.content !== "string") return;
+            const text = message.content.trim();
+            if (text) candidates.push({ source: `history#${index}`, text });
+        });
+
+        const completeCandidates = candidates
+            .map((candidate) => ({ ...candidate, integrity: this.inspectReport(candidate.text) }))
+            .filter((candidate) => candidate.integrity.complete)
+            .sort((left, right) => right.text.length - left.text.length);
+
+        if (completeCandidates.length > 0) {
+            const best = completeCandidates[0];
+            console.warn(
+                `${getTS()} [EvaluationAgent] 最终答复不完整（长度=${finalContent.length}），`
+                + `改用 ${best.source} 中的完整报告（长度=${best.text.length}）`,
+            );
+            return { report: best.text, source: best.source, integrity: best.integrity };
+        }
+
+        // 没有完整候选：优先保留最终答复，避免把更长的中间草稿误当成结论。
+        const fallback = finalContent
+            ? { source: "final", text: finalContent }
+            : (candidates.sort((left, right) => right.text.length - left.text.length)[0]
+                ?? { source: "none", text: "" });
+
+        return {
+            report: fallback.text,
+            source: fallback.source,
+            integrity: this.inspectReport(fallback.text),
+        };
+    }
+
+    private describeMissingReportParts(integrity: ReportIntegrity): string {
+        const missing: string[] = [];
+        if (!integrity.hasHeading) missing.push("标题「# 评估Agent的评估报告」");
+        if (!integrity.hasIssueCount) missing.push("「问题个数：N」");
+        if (!integrity.hasDecision) missing.push("「执行结论：...」");
+        if (integrity.requiresRepairList && !integrity.hasRepairList) missing.push("「可直接修复清单」");
+        return missing.length > 0 ? missing.join("、") : "完整报告正文";
+    }
+
+    private buildContinuationDirective(integrity: ReportIntegrity, finishReason: string | null): string {
+        const missing = this.describeMissingReportParts(integrity);
+        return [
+            "【评估报告续写】",
+            "你上一次的最终答复不是完整的评估报告：可能被输出长度上限截断，或只输出了开头。",
+            `缺失内容：${missing}。`,
+            finishReason === "length" ? "上次请求的 finish_reason=length，确认输出已被截断。" : "",
+            "请立即输出完整评估报告正文：",
+            "- 必须以「# 评估Agent的评估报告」开头；",
+            "- 必须包含「问题个数：N」「P0+P1问题个数：M」「执行结论：<四类之一>」；",
+            "- 若结论为「需要主Agent继续迭代」，必须包含「可直接修复清单」，逐项给出 P0-P3、文件路径、位置、问题描述、最小修复动作和复查方式；",
+            "- 不要调用任何工具；不要只输出标题或摘要；如果无法从中断处续写，请重新输出完整报告。",
+        ].filter(Boolean).join("\n");
+    }
+
+    private buildContinuationHistory(
+        result: AgentTurnEngineResult,
+        partial: string,
+        directive: string,
+        provider: Partial<ModelProviderConfig>,
+    ): any[] {
+        const history = [...(result.activeHistory || [])];
+        const partialText = String(partial || "").trim();
+        const last = history[history.length - 1];
+        const alreadyPresent = last?.role === "assistant"
+            && typeof last.content === "string"
+            && last.content.trim() === partialText;
+
+        if (partialText && !alreadyPresent) {
+            const assistantMessage: any = { role: "assistant", content: partialText };
+            // 请求携带 tools 时，DeepSeek thinking mode 要求 assistant 消息逐字回传 reasoning_content。
+            if (result.finalAssistantReasoning) {
+                assistantMessage.reasoning_content = result.finalAssistantReasoning;
+            }
+            history.push(assistantMessage);
+        }
+
+        history.push(AIProviderFactory.buildMidConversationDirective(provider, directive));
+        return history;
+    }
+
+    /** 合并两次续写片段；模型重新从头输出时取更完整的一份，避免重复拼接。 */
+    private combineReportSegments(partial: string, continuation: string): string {
+        const left = String(partial || "").trim();
+        const right = String(continuation || "").trim();
+        if (!left) return right;
+        if (!right) return left;
+
+        if (/(?:^|\n)\s*#{1,3}\s*评估Agent的评估报告/.test(right)) {
+            return right.length >= left.length ? right : left;
+        }
+        if (left.endsWith(right)) return left;
+
+        const maxOverlap = Math.min(200, left.length, right.length);
+        for (let length = maxOverlap; length > 0; length--) {
+            if (left.slice(-length) === right.slice(0, length)) {
+                return left + right.slice(length);
+            }
+        }
+        return `${left}${left.endsWith("\n") ? "" : "\n"}${right}`;
+    }
+
+    private buildIncompleteReport(resolved: ResolvedReport, result: AgentTurnEngineResult): string {
+        const missing = this.describeMissingReportParts(resolved.integrity);
+        const received = resolved.report.trim();
+        const lines = [
+            "## 评估执行异常",
+            "",
+            "评估Agent未能生成完整评估报告，系统已停止本轮修复循环，避免主Agent依据不完整报告臆造问题清单。",
+            "",
+            `- 报告完整性：不完整（缺少：${missing}）`,
+            `- 已接收内容长度：${received.length} 字符`,
+            `- finish_reason：${result.finishReason ?? "unknown"}`,
+        ];
+        if (received) {
+            lines.push("", "### 已接收到的报告片段", "", received);
+        }
+        lines.push(
+            "",
+            "问题个数：1",
+            "P0+P1问题个数：1",
+            "执行结论：评估失败",
+        );
+        return lines.join("\n");
     }
 
     /**
@@ -298,11 +625,16 @@ export class EvaluationAgentService {
      *   HTML 注释形式的元信息，不影响 Markdown 渲染与标题识别。
      * - 写入失败由调用方 try/catch 兜底，不影响评估主流程。
      */
-    private async saveEvaluationReport(root: string, finalReply: string): Promise<void> {
+    private async saveEvaluationReport(
+        root: string,
+        finalReply: string,
+        complete: boolean = true,
+    ): Promise<void> {
         const content = String(finalReply || "").trim();
         const body = content || "(评估结论为空)";
         const stamped = [
             `<!-- 最近一次评估Agent评估报告 · 生成时间 ${getBeijingLogTimePrefix()} · 系统内部上下文补充文件 -->`,
+            `<!-- 报告状态：${complete ? "完整" : "不完整/评估失败"} -->`,
             `<!-- 多轮对话中若上下文缺少评估报告且需要补充评估信息，可用 read_file 读取本文件；一般情况下无需读取。 -->`,
             "",
             body,
@@ -332,6 +664,7 @@ export class EvaluationAgentService {
 
         if (explicitLine) {
             const normalized = explicitLine.replace(/\s+/g, "");
+            if (normalized.includes("评估失败")) return "evaluation_failed";
             if (normalized.includes("需要主Agent继续迭代")) return "continue_main_agent";
             if (normalized.includes("已经达成目标")) return "goal_achieved";
             if (normalized.includes("条件不满足、目标无法达成") || normalized.includes("无法达成")) return "goal_unachievable";
@@ -341,6 +674,9 @@ export class EvaluationAgentService {
         }
 
         if (!text) return "continue_main_agent";
+        if (text.includes("执行结论：评估失败") || text.includes("评估报告不完整") || text.includes("评估执行异常")) {
+            return "evaluation_failed";
+        }
         if (text.includes("需要主Agent继续迭代") || text.includes("执行结论：需要主Agent继续迭代")) {
             return "continue_main_agent";
         }

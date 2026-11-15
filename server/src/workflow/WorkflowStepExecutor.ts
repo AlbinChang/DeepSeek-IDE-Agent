@@ -193,6 +193,26 @@ function positiveInteger(value: unknown): number | undefined {
     return Math.floor(parsed);
 }
 
+/**
+ * shell 步骤默认只接受 0。显式 acceptedExitCodes 可把业务约定的非零码
+ * （例如“部分公告缺失”用 4）视为成功，避免用 `exit 0` 把真实崩溃吞掉。
+ */
+function readAcceptedExitCodes(
+    runShellConfig: Record<string, any> | undefined,
+    stepConfig: Record<string, any> | undefined,
+    stepPath: string,
+): number[] {
+    const raw = runShellConfig?.acceptedExitCodes ?? stepConfig?.acceptedExitCodes;
+    if (raw === undefined) return [0];
+    if (!Array.isArray(raw) || raw.length === 0) {
+        throw new WorkflowError('acceptedExitCodes 必须是非空整数数组', 'validation', stepPath);
+    }
+    if (raw.some((value) => typeof value !== 'number' || !Number.isInteger(value) || value < 0)) {
+        throw new WorkflowError('acceptedExitCodes 只能包含非负整数', 'validation', stepPath);
+    }
+    return raw as number[];
+}
+
 function resolveAgentTools(requested?: string[]): ReadonlySet<string> {
     const tools = new Set(requested && requested.length > 0 ? requested : READONLY_AGENT_TOOLS);
     for (const name of FORBIDDEN_WORKFLOW_TOOLS) tools.delete(name);
@@ -453,6 +473,11 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
             ?? parseDurationMs(definition.with?.timeout)
             ?? negativeToUndefined(definition.with?.timeoutMs)
             ?? globalConfig.workflow.defaultStepTimeoutMs;
+        const acceptedExitCodes = readAcceptedExitCodes(
+            shellConfig,
+            definition.with && typeof definition.with === 'object' ? definition.with : undefined,
+            ctx.stepPath,
+        );
 
         const result: any = await this.getAgentService().toolManager.executeTool(
             ctx.userId,
@@ -473,7 +498,14 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
 
         const status = result?.status;
         const code = result?.code;
-        if (status === 'error' || (code !== undefined && code !== null && code !== 0 && code !== '0')) {
+        const normalizedCode = code === undefined || code === null || code === ''
+            ? undefined
+            : Number(code);
+        const acceptedCode = normalizedCode !== undefined
+            && Number.isInteger(normalizedCode)
+            && acceptedExitCodes.includes(normalizedCode);
+        if ((status === 'error' && !acceptedCode)
+            || (normalizedCode !== undefined && !acceptedCode)) {
             throw new WorkflowError(
                 `shell 步骤失败 (code=${String(code ?? 'unknown')}): ${String(result?.stderr || result?.stdout || '').slice(0, 2000)}`,
                 'step',

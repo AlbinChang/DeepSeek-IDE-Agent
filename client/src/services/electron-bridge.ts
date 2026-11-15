@@ -130,6 +130,8 @@ export interface WorkflowStepInfo {
     output?: unknown;
     outputPreview?: string;
     error?: string;
+    tolerated?: boolean;
+    skipReason?: string;
     usage?: WorkflowUsage;
 }
 
@@ -350,7 +352,7 @@ export const electronBridge = {
     async createFile(params: { filePath: string; type?: 'file' | 'directory' | 'folder'; root?: string }) {
         return callIpc('createFile', [params]);
     },
-    async listFiles(params: { dirPath: string; depth?: number; root?: string }) {
+    async listFiles(params: { dirPath: string; depth?: number; root?: string; knownVersion?: string }) {
         return callIpc('listFiles', [params]);
     },
     /** 轻量存在性检查（Markdown 链接候选路径解析等场景） */
