@@ -7,6 +7,11 @@ export interface UserInstructionRecord {
     timestamp: number;
     date: string;
     instruction: string;
+    /**
+     * 后台对话计数器分配到的对话编号（1 起单调递增，永不回收）。
+     * 与 `.memory/user_instructs_reply.json` 中的 `dialogIndex` 一一对应。
+     */
+    dialogIndex: number;
 }
 
 export interface NeverMistakeRecord {
@@ -42,22 +47,78 @@ export interface PreferenceUpsertResult {
 }
 
 /**
- * 长期指令记忆服务
- * 负责记录用户的长期指令历史（.memory/user_instructs.json，硬上限 20 条）。
- * 注意：不再无条件注入系统提示词；仅当本轮用户指令不明确、必须结合历史指令
- * 才能正确理解意图时，由 Agent 按提示词策略（UserInstructsPolicySection）
- * 通过 read_file 工具按需读取该文件。
+ * 主 Agent 单轮最终回复记录（`.memory/user_instructs_reply.json`）。
+ * `id` 形如 `11.2`：第 11 次对话中主 Agent 的第 2 份最终回复。
+ */
+export interface MainAgentReplyRecord {
+    id: string;
+    dialogIndex: number;
+    replyIndex: number;
+    timestamp: number;
+    beijingTime: string;
+    /** 该次对话的用户指令摘要（用于不读 user_instructs.json 也能识别上下文） */
+    instruction: string;
+    reply: string;
+    /** 原文长度（截断前） */
+    replyChars: number;
+    truncated: boolean;
+    /** 产出该回复时主 Agent 已累计的工具轮次 */
+    steps: number;
+}
+
+/** 列表视图：只带摘要，避免把整份记忆读进上下文。 */
+export interface MainAgentReplyIndexEntry {
+    id: string;
+    dialogIndex: number;
+    replyIndex: number;
+    beijingTime: string;
+    instructionPreview: string;
+    replyPreview: string;
+    replyChars: number;
+    truncated: boolean;
+    steps: number;
+}
+
+/**
+ * 长期记忆服务
+ *
+ * 负责四份工作区记忆的读写：
+ * - `.memory/user_instructs.json`：用户指令历史（硬上限 20 条），每条带 `dialogIndex`
+ * - `.memory/user_instructs_reply.json`：主 Agent 每轮最终回复，按 `dialogIndex.replyIndex` 编号，
+ *   保留范围与 `user_instructs.json` 的 `dialogIndex` 集合严格一一对应
+ * - `.memory/never_mistake_again.json`：防重复犯错规则
+ * - `.memory/user_preferences.json`：用户偏好（置信度按时间衰减）
+ * 另有 `.memory/dialog_counter.json` 作为后台对话计数器（单调递增，永不回退）。
+ *
+ * 注意：不无条件注入系统提示词；仅当本轮指令不明确、必须结合历史记忆
+ * 才能正确理解意图时，由 Agent 通过工具或 read_file 按需读取。
  */
 export class MemoryService {
     private static readonly NEVER_MISTAKE_MAX = 20;
     private static readonly USER_PREFERENCE_MAX = 200;
     /** user_instructs.json 硬上限：最多保留最近 20 条用户指令 */
     private static readonly USER_INSTRUCTS_MAX = 20;
+    /** 同一次对话内最多保留的主 Agent 回复条数（异常长循环的安全阀） */
+    private static readonly MAIN_AGENT_REPLY_MAX_PER_DIALOG = 50;
+    /** 单条回复正文上限，超出截断并标记 truncated */
+    private static readonly MAIN_AGENT_REPLY_MAX_CHARS = 20_000;
+    /** 回复记忆文件总量上限，超出时按最旧对话整组淘汰 */
+    private static readonly MAIN_AGENT_REPLY_MAX_FILE_BYTES = 2 * 1024 * 1024;
+    /** 回复记录的指令摘要上限 */
+    private static readonly MAIN_AGENT_REPLY_INSTRUCTION_MAX_CHARS = 200;
     // 置信度衰减半衰期：30天（对应毫秒）
     private static readonly PREFERENCE_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
 
     private static getMemoryFile(workspaceRoot: string) {
         return path.join(workspaceRoot, '.memory', 'user_instructs.json');
+    }
+
+    private static getReplyFile(workspaceRoot: string) {
+        return path.join(workspaceRoot, '.memory', 'user_instructs_reply.json');
+    }
+
+    private static getDialogCounterFile(workspaceRoot: string) {
+        return path.join(workspaceRoot, '.memory', 'dialog_counter.json');
     }
 
     private static getNeverMistakeFile(workspaceRoot: string) {
@@ -80,17 +141,18 @@ export class MemoryService {
     }
 
     /**
-     * 确保所有 .memory/ 文件都存在（不存在则播种为空数组）。
+     * 确保所有 .memory/ 文件都存在（不存在则播种为空数组 / 零计数器）。
      * 在每次对话启动时调用，保证用户能看到文件落地，Agent 也能在提示词中感知到。
      */
     static async ensureMemoryFiles(workspaceRoot: string): Promise<void> {
         await this.ensureMemoryDir(workspaceRoot);
-        const files = [
+        const arrayFiles = [
             this.getMemoryFile(workspaceRoot),
+            this.getReplyFile(workspaceRoot),
             this.getNeverMistakeFile(workspaceRoot),
             this.getUserPreferenceFile(workspaceRoot),
         ];
-        for (const filePath of files) {
+        for (const filePath of arrayFiles) {
             try {
                 await fs.access(filePath);
             } catch {
@@ -102,6 +164,60 @@ export class MemoryService {
                 }
             }
         }
+
+        const counterFile = this.getDialogCounterFile(workspaceRoot);
+        try {
+            await fs.access(counterFile);
+        } catch {
+            try {
+                await this.writeDialogCounter(workspaceRoot, 0);
+            } catch (e) {
+                // 权限不足或磁盘问题，静默跳过
+            }
+        }
+    }
+
+    // ─────────────────────────── 对话计数器 ───────────────────────────
+
+    private static async readDialogCounter(workspaceRoot: string): Promise<number> {
+        try {
+            const raw = await fs.readFile(this.getDialogCounterFile(workspaceRoot), 'utf8');
+            const parsed = JSON.parse(raw);
+            const value = Number(parsed?.lastDialogIndex);
+            return Number.isInteger(value) && value > 0 ? value : 0;
+        } catch {
+            return 0;
+        }
+    }
+
+    private static async writeDialogCounter(workspaceRoot: string, lastDialogIndex: number): Promise<void> {
+        await this.ensureMemoryDir(workspaceRoot);
+        const payload = JSON.stringify({ lastDialogIndex }, null, 2);
+        await fs.writeFile(this.getDialogCounterFile(workspaceRoot), payload, 'utf8');
+    }
+
+    /**
+     * 旧版 user_instructs.json 没有 dialogIndex：按时间顺序补齐。
+     * 数组为时间倒序（最新在前），因此最旧一条取 1，最新一条取 n。
+     */
+    private static normalizeDialogIndexes(records: UserInstructionRecord[]): UserInstructionRecord[] {
+        const allValid = records.every((record) => {
+            const value = Number(record?.dialogIndex);
+            return Number.isInteger(value) && value > 0;
+        });
+        if (allValid || records.length === 0) return records;
+
+        const total = records.length;
+        return records.map((record, index) => ({ ...record, dialogIndex: total - index }));
+    }
+
+    /**
+     * 当前（最近一次）对话编号；尚未开过对话时返回 0。
+     */
+    static async getCurrentDialogIndex(workspaceRoot: string): Promise<number> {
+        const records = await this.getInstructions(workspaceRoot);
+        const maxKnown = records.reduce((max, record) => Math.max(max, record.dialogIndex), 0);
+        return Math.max(await this.readDialogCounter(workspaceRoot), maxKnown);
     }
 
     /**
@@ -113,29 +229,61 @@ export class MemoryService {
             const content = await fs.readFile(filePath, 'utf8');
             const parsed = JSON.parse(content);
             if (!Array.isArray(parsed)) return [];
-            return parsed.slice(0, this.USER_INSTRUCTS_MAX);
+            const records = parsed
+                .filter((item: any) => item && typeof item.instruction === 'string')
+                .slice(0, this.USER_INSTRUCTS_MAX)
+                .map((item: any) => ({
+                    timestamp: Number(item.timestamp) || 0,
+                    date: typeof item.date === 'string' ? item.date : '',
+                    instruction: item.instruction,
+                    dialogIndex: Number(item.dialogIndex),
+                } as UserInstructionRecord));
+            return this.normalizeDialogIndexes(records);
         } catch {
             return [];
         }
     }
 
     /**
-     * 写入一条新的用户指令
+     * 写入一条新的用户指令（或在恢复同一对话时沿用当前编号）。
+     *
+     * @returns 本次对话的编号（1 起单调递增）
      */
-    static async recordUserInstruction(workspaceRoot: string, instruction: string): Promise<void> {
+    static async recordUserInstruction(
+        workspaceRoot: string,
+        instruction: string,
+        options: { resume?: boolean } = {},
+    ): Promise<number> {
         await this.ensureMemoryDir(workspaceRoot);
         const filePath = this.getMemoryFile(workspaceRoot);
         const records = await this.getInstructions(workspaceRoot);
-        
+
+        const maxKnown = records.reduce((max, record) => Math.max(max, record.dialogIndex), 0);
+        const storedCounter = await this.readDialogCounter(workspaceRoot);
+        const lastDialogIndex = Math.max(maxKnown, storedCounter);
+
+        // 恢复同一对话：沿用当前编号，不新增指令记录、不递增计数器
+        if (options.resume) {
+            const activeDialogIndex = lastDialogIndex || 1;
+            if (storedCounter !== activeDialogIndex) {
+                await this.writeDialogCounter(workspaceRoot, activeDialogIndex);
+            }
+            return activeDialogIndex;
+        }
+
+        const dialogIndex = lastDialogIndex + 1;
+        await this.writeDialogCounter(workspaceRoot, dialogIndex);
+
         const newRecord: UserInstructionRecord = {
             timestamp: Date.now(),
             date: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
-            instruction
+            instruction,
+            dialogIndex,
         };
 
         // 插入到数组开头（时间倒序排列）
         records.unshift(newRecord);
-        
+
         // 硬上限：user_instructs.json 最多保留最近 20 条用户指令；
         // .env 的 AGENT_MAX_STORED_INSTRUCTIONS 只能调低，不能超过 20。
         const maxStored = Math.min(globalConfig.memory.maxStoredInstructions, this.USER_INSTRUCTS_MAX);
@@ -144,6 +292,213 @@ export class MemoryService {
         }
 
         await fs.writeFile(filePath, JSON.stringify(records, null, 2), 'utf8');
+
+        // 回复记忆与指令记忆一一对应：对话被淘汰后同步淘汰其全部回复
+        await this.pruneMainAgentReplies(workspaceRoot, records);
+
+        return dialogIndex;
+    }
+
+    // ─────────────────── 主 Agent 最终回复记忆 ───────────────────
+
+    /** 读取全部回复记录（时间倒序，已按保留策略裁剪） */
+    static async getMainAgentReplies(
+        workspaceRoot: string,
+        options: { dialogIndex?: number; limit?: number } = {},
+    ): Promise<MainAgentReplyRecord[]> {
+        const records = await this.readMainAgentReplyFile(workspaceRoot);
+        const filtered = typeof options.dialogIndex === 'number'
+            ? records.filter((record) => record.dialogIndex === options.dialogIndex)
+            : records;
+        const limit = Number.isInteger(options.limit) && (options.limit as number) > 0
+            ? (options.limit as number)
+            : filtered.length;
+        return filtered.slice(0, limit);
+    }
+
+    /** 列表视图：只给摘要，避免把整份记忆塞进上下文 */
+    static async getMainAgentReplyIndex(
+        workspaceRoot: string,
+        options: { dialogIndex?: number; limit?: number } = {},
+    ): Promise<MainAgentReplyIndexEntry[]> {
+        const replies = await this.getMainAgentReplies(workspaceRoot, options);
+        return replies.map((record) => ({
+            id: record.id,
+            dialogIndex: record.dialogIndex,
+            replyIndex: record.replyIndex,
+            beijingTime: record.beijingTime,
+            instructionPreview: this.clip(record.instruction, 120),
+            replyPreview: this.clip(record.reply.replace(/\s+/g, ' '), 240),
+            replyChars: record.replyChars,
+            truncated: record.truncated,
+            steps: record.steps,
+        }));
+    }
+
+    /** 按 `id`（如 `11.2`）读取单条完整回复 */
+    static async getMainAgentReplyById(
+        workspaceRoot: string,
+        id: string,
+    ): Promise<MainAgentReplyRecord | null> {
+        const target = String(id || '').trim();
+        if (!target) return null;
+        const records = await this.readMainAgentReplyFile(workspaceRoot);
+        return records.find((record) => record.id === target) || null;
+    }
+
+    /**
+     * 记录主 Agent 单轮最终回复。
+     *
+     * 编号规则：`dialogIndex.replyIndex`，`replyIndex` 从 1 起按该对话内出现顺序递增。
+     * 空回复不记录；对话已被指令保留策略淘汰时同样不记录。
+     *
+     * @returns 新写入的记录；未写入时返回 null
+     */
+    static async recordMainAgentReply(
+        workspaceRoot: string,
+        dialogIndex: number,
+        reply: string,
+        options: { instruction?: string; steps?: number } = {},
+    ): Promise<MainAgentReplyRecord | null> {
+        const text = typeof reply === 'string' ? reply : '';
+        if (!text.trim()) return null;
+        if (!Number.isInteger(dialogIndex) || dialogIndex <= 0) return null;
+
+        const instructions = await this.getInstructions(workspaceRoot);
+        const retained = new Set(instructions.map((record) => record.dialogIndex));
+        // 指令文件为空（首次启动/被清空）时不做淘汰，避免误删历史回复
+        if (retained.size > 0 && !retained.has(dialogIndex)) return null;
+
+        const current = await this.readMainAgentReplyFile(workspaceRoot);
+        const replyIndex = current
+            .filter((record) => record.dialogIndex === dialogIndex)
+            .reduce((max, record) => Math.max(max, record.replyIndex), 0) + 1;
+
+        const now = Date.now();
+        const truncated = text.length > this.MAIN_AGENT_REPLY_MAX_CHARS;
+        const instruction = String(options.instruction
+            ?? instructions.find((record) => record.dialogIndex === dialogIndex)?.instruction
+            ?? '');
+
+        const record: MainAgentReplyRecord = {
+            id: `${dialogIndex}.${replyIndex}`,
+            dialogIndex,
+            replyIndex,
+            timestamp: now,
+            beijingTime: formatBeijingIso(new Date(now)),
+            instruction: this.clip(instruction, this.MAIN_AGENT_REPLY_INSTRUCTION_MAX_CHARS),
+            reply: truncated
+                ? `${text.slice(0, this.MAIN_AGENT_REPLY_MAX_CHARS)}\n…[truncated ${text.length - this.MAIN_AGENT_REPLY_MAX_CHARS} chars]`
+                : text,
+            replyChars: text.length,
+            truncated,
+            steps: Number.isFinite(options.steps) ? Number(options.steps) : 0,
+        };
+
+        const pruned = this.pruneReplyRecords([record, ...current], retained);
+        await this.writeMainAgentReplyFile(workspaceRoot, pruned);
+        return record;
+    }
+
+    /** 按当前指令文件保留的 dialogIndex 集合裁剪回复记忆 */
+    private static async pruneMainAgentReplies(
+        workspaceRoot: string,
+        instructions: UserInstructionRecord[],
+    ): Promise<void> {
+        const current = await this.readMainAgentReplyFile(workspaceRoot);
+        if (current.length === 0) return;
+        const retained = new Set(instructions.map((record) => record.dialogIndex));
+        if (retained.size === 0) return;
+        const pruned = this.pruneReplyRecords(current, retained);
+        if (pruned.length === current.length) return;
+        await this.writeMainAgentReplyFile(workspaceRoot, pruned);
+    }
+
+    /**
+     * 回复记录裁剪：
+     * 1. 只保留 dialogIndex 仍被保留的对话（一一对应）
+     * 2. 同一对话最多保留最近 N 条
+     * 3. 文件总量超限时按最旧对话整组淘汰
+     */
+    private static pruneReplyRecords(
+        records: MainAgentReplyRecord[],
+        retainedDialogs: Set<number>,
+    ): MainAgentReplyRecord[] {
+        const kept = retainedDialogs.size > 0
+            ? records.filter((record) => retainedDialogs.has(record.dialogIndex))
+            : [...records];
+
+        // 时间倒序：同一对话内编号大的在前
+        kept.sort((a, b) => (b.dialogIndex - a.dialogIndex) || (b.replyIndex - a.replyIndex));
+
+        const perDialogCount = new Map<number, number>();
+        const capped = kept.filter((record) => {
+            const count = perDialogCount.get(record.dialogIndex) || 0;
+            if (count >= this.MAIN_AGENT_REPLY_MAX_PER_DIALOG) return false;
+            perDialogCount.set(record.dialogIndex, count + 1);
+            return true;
+        });
+
+        if (Buffer.byteLength(JSON.stringify(capped), 'utf8') <= this.MAIN_AGENT_REPLY_MAX_FILE_BYTES) {
+            return capped;
+        }
+
+        // 超限：从最旧的对话开始整组丢弃
+        const oldestFirst = [...capped].reverse();
+        let bytes = Buffer.byteLength(JSON.stringify(capped), 'utf8');
+        const droppedDialogs = new Set<number>();
+        for (const record of oldestFirst) {
+            if (bytes <= this.MAIN_AGENT_REPLY_MAX_FILE_BYTES) break;
+            if (droppedDialogs.has(record.dialogIndex)) continue;
+            const groupSize = capped
+                .filter((entry) => entry.dialogIndex === record.dialogIndex)
+                .reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry), 'utf8'), 0);
+            droppedDialogs.add(record.dialogIndex);
+            bytes -= groupSize;
+        }
+        return capped.filter((record) => !droppedDialogs.has(record.dialogIndex));
+    }
+
+    private static async readMainAgentReplyFile(workspaceRoot: string): Promise<MainAgentReplyRecord[]> {
+        try {
+            const content = await fs.readFile(this.getReplyFile(workspaceRoot), 'utf8');
+            const parsed = JSON.parse(content);
+            if (!Array.isArray(parsed)) return [];
+            const records = parsed
+                .filter((item: any) => item
+                    && typeof item.reply === 'string'
+                    && Number.isInteger(Number(item.dialogIndex))
+                    && Number.isInteger(Number(item.replyIndex)))
+                .map((item: any) => ({
+                    id: typeof item.id === 'string' && item.id ? item.id : `${Number(item.dialogIndex)}.${Number(item.replyIndex)}`,
+                    dialogIndex: Number(item.dialogIndex),
+                    replyIndex: Number(item.replyIndex),
+                    timestamp: Number(item.timestamp) || 0,
+                    beijingTime: typeof item.beijingTime === 'string' ? item.beijingTime : '',
+                    instruction: typeof item.instruction === 'string' ? item.instruction : '',
+                    reply: item.reply,
+                    replyChars: Number(item.replyChars) || item.reply.length,
+                    truncated: Boolean(item.truncated),
+                    steps: Number(item.steps) || 0,
+                } as MainAgentReplyRecord));
+            // 统一按「对话编号倒序、回复序号倒序」返回，避免文件被手工编辑后顺序不确定
+            return records.sort((a, b) => (b.dialogIndex - a.dialogIndex) || (b.replyIndex - a.replyIndex));
+        } catch {
+            return [];
+        }
+    }
+
+    private static async writeMainAgentReplyFile(
+        workspaceRoot: string,
+        records: MainAgentReplyRecord[],
+    ): Promise<void> {
+        await this.ensureMemoryDir(workspaceRoot);
+        await fs.writeFile(this.getReplyFile(workspaceRoot), JSON.stringify(records, null, 2), 'utf8');
+    }
+
+    private static clip(value: string, maxChars: number): string {
+        const text = String(value ?? '');
+        return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`;
     }
 
 

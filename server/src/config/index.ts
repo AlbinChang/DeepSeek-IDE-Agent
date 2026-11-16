@@ -123,7 +123,8 @@ export const config = {
 
     // 用户指令记忆配置
     memory: {
-        // user_instructs.json 最多保留的指令条数（默认 20；MemoryService 另有 20 条硬上限，只能调低）
+        // user_instructs.json 最多保留的指令条数（默认 20；MemoryService 另有 20 条硬上限，只能调低）。
+        // 主 Agent 回复记忆（user_instructs_reply.json）按同一批 dialogIndex 同步保留，无需单独配置。
         maxStoredInstructions: parsePositiveInt(process.env.AGENT_MAX_STORED_INSTRUCTIONS, 20, 1),
     },
 

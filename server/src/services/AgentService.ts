@@ -8,6 +8,7 @@ import { RuleService } from '@/services/RuleService.js';
 import { TodoTools } from '@/tools/TodoTools.js';
 import { NeverMistakeTools } from '@/tools/NeverMistakeTools.js';
 import { UserPreferenceTools } from '@/tools/UserPreferenceTools.js';
+import { MainAgentReplyTools } from '@/tools/MainAgentReplyTools.js';
 import { FileTools } from '@/tools/FileTools.js';
 import { BrowserMcpAdapter } from '@/services/BrowserMcpAdapter.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
@@ -164,6 +165,25 @@ export class AgentService extends EventEmitter {
                         case 'upsert_user_preference': return await tools.upsertPreference(params, context);
                         case 'delete_user_preference': return await tools.deletePreference(params, context);
                         default: throw new Error(`Unknown user-preference tool: ${toolName}`);
+                    }
+                }
+            });
+        }
+
+        console.log('[AgentService] Registering MainAgentReplyTools (atomic)...');
+        // 注册主 Agent 历史最终回复记忆原子工具集 (list_main_agent_replies / read_main_agent_reply)
+        for (const def of MainAgentReplyTools.getDefinitions()) {
+            const toolName = def.name;
+            this.toolManager.registerTool({
+                ...def,
+                execute: async (params, context) => {
+                    const root = this.resolveWorkspaceRootFromContext(context);
+                    if (!root) throw new Error('Workspace not initialized');
+                    const tools = new MainAgentReplyTools(root);
+                    switch (toolName) {
+                        case 'list_main_agent_replies': return await tools.listReplies(params);
+                        case 'read_main_agent_reply': return await tools.readReply(params);
+                        default: throw new Error(`Unknown main-agent-reply tool: ${toolName}`);
                     }
                 }
             });
@@ -1119,6 +1139,18 @@ export class AgentService extends EventEmitter {
             '5. 禁止依赖历史上下文中可能过期的偏好描述；如有不确定，必须重新 `list_user_preferences`。'
         ].join('\n');
 
+        // 主 Agent 历史最终回复记忆：与 user_instructs.json 的对话编号一一对应
+        const mainAgentReplyMemoryPrompt = [
+            '### 主Agent 历史最终回复记忆 (MAIN AGENT REPLY MEMORY)',
+            '系统会把你在最近若干次对话中的每一轮最终回复写入 `.memory/user_instructs_reply.json`，编号为「对话编号.回复序号」（如 `11.2` = 第 11 次对话中你的第 2 份最终回复）。保留范围与 `.memory/user_instructs.json` 的对话编号严格一一对应。',
+            '**何时必须检索**：',
+            '1. 用户指令出现「继续」「接着上次」「之前那个方案」「刚才让你改的」等指代历史工作的表述，而当前上下文缺少对应细节时；',
+            '2. 需要确认自己在同一任务的多轮迭代中已经承诺过什么、交付过什么时；',
+            '3. 需要核对本轮结论与上一轮最终结论是否自相矛盾时。',
+            '**检索方式**：先调用 `list_main_agent_replies` 拿到 id 与摘要，再调用 `read_main_agent_reply({ id })` 读取完整正文；只有需要跨多条对比时才用 `read_file` 读取整个文件。',
+            '**禁止**：每轮无差别加载历史回复（挤占上下文、降低缓存命中）；用历史回复替代真实证据（文件内容与命令输出才是唯一事实来源）；修改、删除、重命名该文件，或把它写入文件变更清单、当作交付物输出。'
+        ].join('\n');
+
         const tempFilePolicyPrompt = [
             '### 临时文件治理策略 (TEMP FILES SSOT POLICY)',
             '- 临时产物（调试脚本、构建中转、格式转换中间产物、一次性抓取缓存等用完即弃内容）只能写入工作区 `.temp/`，禁止散落到 `src/`、`test/`、`docs/` 或工作区根目录。',
@@ -1366,6 +1398,9 @@ export class AgentService extends EventEmitter {
 
             // 7. 用户偏好记忆（置信度衰减，高置信优先）
             userPreferencePrompt,
+
+            // 7.2 主Agent 历史最终回复记忆（按需检索，不注入快照）
+            mainAgentReplyMemoryPrompt,
 
             // 7.5 按用户指令自动装配的技能正文（仅命中时存在，放在动态区避免污染静态前缀缓存）
             autoLoadedSkillPrompt,

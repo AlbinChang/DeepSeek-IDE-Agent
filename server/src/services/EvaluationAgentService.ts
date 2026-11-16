@@ -18,6 +18,24 @@ const MAX_REPORT_CONTINUATIONS = 2;
 
 const getTS = () => getBeijingLogTimePrefix();
 
+/**
+ * 构建落盘用的评估报告文档。
+ *
+ * @returns 报告正文为空时返回 null —— 调用方应保留上一次有效报告，绝不用占位内容覆盖
+ */
+export function buildEvaluationReportDocument(finalReply: string, complete: boolean = true): string | null {
+    const content = String(finalReply || "").trim();
+    if (!content) return null;
+    return [
+        `<!-- 最近一次评估Agent评估报告 · 生成时间 ${getTS()} · 系统内部上下文补充文件 -->`,
+        `<!-- 报告状态：${complete ? "完整" : "不完整/评估失败"} -->`,
+        `<!-- 该文件仅保留最近一次评估结果，只有用户显式「清空历史会话」时才会被清除；Agent 工具禁止改写或删除。 -->`,
+        "",
+        content,
+        "",
+    ].join("\n");
+}
+
 export type EvaluationDecision =
     | "continue_main_agent"
     | "goal_achieved"
@@ -630,17 +648,16 @@ export class EvaluationAgentService {
         finalReply: string,
         complete: boolean = true,
     ): Promise<void> {
-        const content = String(finalReply || "").trim();
-        const body = content || "(评估结论为空)";
-        const stamped = [
-            `<!-- 最近一次评估Agent评估报告 · 生成时间 ${getBeijingLogTimePrefix()} · 系统内部上下文补充文件 -->`,
-            `<!-- 报告状态：${complete ? "完整" : "不完整/评估失败"} -->`,
-            `<!-- 多轮对话中若上下文缺少评估报告且需要补充评估信息，可用 read_file 读取本文件；一般情况下无需读取。 -->`,
-            "",
-            body,
-            "",
-        ].join("\n");
-        await FileIO.writeFile(EVALUATION_REPORT_RELATIVE_PATH, root, stamped);
+        const document = buildEvaluationReportDocument(finalReply, complete);
+        if (document === null) {
+            // 空报告绝不覆盖：保留上一次有效评估结果，避免「最后一轮评估结果被清空」
+            console.warn(
+                `${getTS()} [EvaluationAgent] Empty evaluation report; keeping the previous `
+                + `${EVALUATION_REPORT_RELATIVE_PATH} untouched.`,
+            );
+            return;
+        }
+        await FileIO.writeFile(EVALUATION_REPORT_RELATIVE_PATH, root, document);
     }
 
     private normalizeDecisionLine(line: string): string {

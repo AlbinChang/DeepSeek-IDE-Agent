@@ -1,4 +1,4 @@
-﻿import * as fs from 'fs/promises';
+import * as fs from 'fs/promises';
 import * as path from 'path';
 import crypto from 'crypto';
 import simpleGit from 'simple-git';
@@ -7,6 +7,7 @@ import { FileIO } from '@/utils/FileIO.js';
 import { compareFileSystemEntries } from '@/utils/FileOrdering.js';
 import { config as globalConfig } from '@/config/index.js';
 import { WORKSPACE_SKILL_CONTAINER_DIRECTORIES, isWorkspaceSkillPath } from '@/utils/WorkspaceSkillPaths.js';
+import { assertAgentStatePathWritable } from '@/utils/AgentSystemPaths.js';
 
 export class FileTools {
     private static readonly LIST_FILES_MAX_DEPTH = 10;
@@ -29,6 +30,14 @@ export class FileTools {
         if (!normalized || normalized === '.') return false;
         const segments = normalized.split('/');
         return segments.some((seg) => FileTools.AGENT_SYSTEM_DIR_NAMES.has(seg));
+    }
+
+    /**
+     * 写操作前的系统状态目录守卫：`.evaluate/` 与 `.memory/` 只允许系统服务写入。
+     * 评估报告只保留最近一次且仅由用户「清空历史会话」清除，任何 Agent 工具都不得改写或删除。
+     */
+    private static assertSystemStateWritable(fullPath: string, workspaceRoot: string, action: string): void {
+        assertAgentStatePathWritable(PathUtils.getRelativePath(fullPath, workspaceRoot), action);
     }
 
     private static isDirectoryTreeImportantPath(relativePath: string): boolean {
@@ -400,6 +409,7 @@ export class FileTools {
                 message: `路径 "${unsafePath}" 超出工作区边界，禁止写入。` };
         }
 
+        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'file_write');
         // 写入体积守卫：防止超大内容经 GBK roundtrip 校验产生 20 倍内存放大
         const MAX_WRITE_CHARS = 5 * 1024 * 1024; // 5M 字符，与读取侧 5MB 字节上限对齐
         if (content.length > MAX_WRITE_CHARS) {
@@ -483,6 +493,7 @@ export class FileTools {
      */
     static async patchFileByLines(workspaceRoot: string, unsafePath: string, content: string, startLine: number, lineCount: number = 0, encodingOverride?: string) {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
+        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'file_patch');
         
         try {
             if (!Number.isInteger(startLine) || startLine < 1) {
@@ -660,6 +671,7 @@ export class FileTools {
         newText: string
     ) {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
+        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'file_replace');
 
         try {
             // 文件必须存在
@@ -860,6 +872,7 @@ export class FileTools {
         newText: string
     ) {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
+        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'file_replace');
 
         try {
             // 文件必须存在
@@ -1032,6 +1045,7 @@ export class FileTools {
      */
     static async deletePath(workspaceRoot: string, unsafePath: string, recursive: boolean = false) {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
+        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'delete_path');
         await fs.rm(fullPath, { recursive, force: true });
         return { status: 'success' };
     }

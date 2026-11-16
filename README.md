@@ -192,9 +192,24 @@ pnpm run electron:dev
 
 - **常驻部分**只保留角色、核心契约、工作区元信息、工具策略与技能索引；
 - **专业任务规范**（PPT/幻灯片、SVG/图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索）以 `SKILL.md` 形式内置在 `server/src/config/skills/`，命中用户指令关键词时由服务端自动装配，未命中时由模型调用 `read_skill("<name>")` 按需拉取；
-- 同一内容不再在 `main-agent.json`、`shared-contracts.json` 与各服务内重复注入，避免提示词膨胀。
+- 同一内容不再在 `main-agent.json`、`evaluator-agent.json` 与各服务内重复注入，避免提示词膨胀。
 
 新增内置技能：在 `server/src/config/skills/<name>/SKILL.md` 写入 YAML frontmatter（`name` / `description` / `triggers`）与正文即可，无需改代码。
+
+### 4.2.2 Agent 长期记忆
+
+工作区 `.memory/` 下维护四份长期记忆，均采用「不注入快照、按需检索」策略：
+
+| 文件 | 内容 | 保留策略 |
+|---|---|---|
+| `user_instructs.json` | 用户指令历史（每条带 `dialogIndex`） | 最近 `AGENT_MAX_STORED_INSTRUCTIONS` 条 |
+| `user_instructs_reply.json` | 主 Agent 每轮最终回复，编号 `对话编号.回复序号`（如 `11.2`） | 与 `user_instructs.json` 的对话编号**严格一一对应** |
+| `never_mistake_again.json` | 防重复犯错规则 | 最近 20 条 |
+| `user_preferences.json` | 用户偏好（30 天半衰期置信度衰减） | 最近 200 条 |
+
+另有一个后台对话计数器 `dialog_counter.json`（从 1 起单调递增，永不回退），用于给每次对话分配绝对编号。
+
+主 Agent 与评估 Agent 均可通过 `list_main_agent_replies` / `read_main_agent_reply` 按需检索历史最终回复，从而在超长多轮会话中避免长程记忆缺失。完整规则见 [docs/MEMORY.md](docs/MEMORY.md)。
 
 ### 4.3 编辑器特性
 

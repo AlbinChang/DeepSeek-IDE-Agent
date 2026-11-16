@@ -41,7 +41,13 @@ export class AgentChatComponent {
         return this.instance;
     }
 
-    public clearSession(userId: string, workspaceRoot?: string) {
+    /**
+     * 清空会话（仅由用户显式点击「清空历史会话」触发）。
+     *
+     * 只有这条路径会删除 `.evaluate/evl_result.md`：其余任何时刻
+     * （新对话、任务结束、工作区切换、评估失败、应用重启）都必须保留最近一次评估结果。
+     */
+    public async clearSession(userId: string, workspaceRoot?: string): Promise<void> {
         const agentService = AgentService.getInstance();
         const root = workspaceRoot || agentService.getWorkspaceRoot(userId);
         agentService.clearSessionHistory(userId, root);
@@ -50,11 +56,12 @@ export class AgentChatComponent {
             void LLMRequestJournal.getInstance().discardPendingForUser(root, userId).catch((err) => {
                 console.error(`${getTS()} [AgentChat] Failed to discard pending recovery for user ${userId}:`, err);
             });
-            TodoService.clearAllTodos(root, userId).catch((err) => {
+            await TodoService.clearAllTodos(root, userId).catch((err) => {
                 console.error(`${getTS()} [AgentChat] Failed to clear todos for user ${userId}:`, err);
             });
-            // 清理最近一次评估报告落盘，避免跨会话残留污染新对话
-            FileIO.deletePath(".evaluate/evl_result.md", root, false).catch((err) => {
+            // 用户显式清空会话时才清除最近一次评估报告；await 保证清理完成后再返回，
+            // 避免与新一次评估写盘产生竞态。
+            await FileIO.deletePath(".evaluate/evl_result.md", root, false).catch((err) => {
                 console.warn(`${getTS()} [AgentChat] Failed to clear evaluator report file for user ${userId}:`, err);
             });
             agentService.contextStore.updateContext(userId, { currentFile: null, selection: null }, root);
@@ -208,9 +215,12 @@ export class AgentChatComponent {
 
             // 写入长期记忆机制 + 播种缺失的 memory 文件
             const { MemoryService } = await import('./MemoryService.js');
-            if (!resumeRequest) {
-                await MemoryService.recordUserInstruction(root, lastUserMsgRecord.content);
-            }
+            // 后台对话计数器：新对话 +1；恢复同一对话沿用原编号（不重复计数）
+            const dialogIndex = await MemoryService.recordUserInstruction(
+                root,
+                lastUserMsgRecord.content,
+                { resume: Boolean(resumeRequest) },
+            );
             await MemoryService.ensureMemoryFiles(root);
 
             // 如果存在非终态任务，不清理历史，继续推进；仅在全部任务都为终态时才清理。
@@ -454,6 +464,15 @@ export class AgentChatComponent {
                 totalSteps = turnResult.totalSteps;
                 mainAgentFinalReply = turnResult.finalAssistantContent || "";
 
+                // 【长期记忆】记录主 Agent 本轮最终回复，编号 = 「对话编号.回复序号」（如 11.2）。
+                // 一次对话内循环多轮会产生多条回复，供主 Agent / 评估 Agent 后续按需检索。
+                await MemoryService.recordMainAgentReply(root, dialogIndex, mainAgentFinalReply, {
+                    instruction: String(lastUserMsgRecord?.content || ""),
+                    steps: totalSteps,
+                }).catch((replyMemoryErr) => {
+                    console.warn(`${getTS()} [AgentChat] Failed to persist main-agent reply memory for user ${userId}:`, replyMemoryErr);
+                });
+
                 // 若主Agent明确要求用户补充信息或做决策，应立即退出循环等待新指令。
                 // 该规则优先级高于“非终态任务继续执行”，避免代理在等待用户输入时空转。
                 if (requiresUserInputOrDecision(mainAgentFinalReply)) {
@@ -515,6 +534,13 @@ export class AgentChatComponent {
                     ].join('\n');
                     mainAgentFinalReply = fallbackReply;
                     emit({ type: "text", content: fallbackReply });
+                    // 兜底总结同样是本轮最终回复，需一并落记忆
+                    await MemoryService.recordMainAgentReply(root, dialogIndex, fallbackReply, {
+                        instruction: String(lastUserMsgRecord?.content || ""),
+                        steps: totalSteps,
+                    }).catch((replyMemoryErr) => {
+                        console.warn(`${getTS()} [AgentChat] Failed to persist fallback reply memory for user ${userId}:`, replyMemoryErr);
+                    });
                 }
 
                 if (todos.length <= 1) {

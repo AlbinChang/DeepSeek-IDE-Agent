@@ -262,7 +262,7 @@ export function registerAgentIpc(ipcMain: IpcMain, mainWindow: BrowserWindow) {
     ipcMain.handle('agent:clear', async (_event, params: { userId: string; workspaceRoot?: string }) => {
         try {
             const agentChatComponent = await getAgentChatComponent();
-            agentChatComponent.clearSession(params.userId, params.workspaceRoot);
+            await agentChatComponent.clearSession(params.userId, params.workspaceRoot);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err?.message };
