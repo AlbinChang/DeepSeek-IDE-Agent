@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { calculateCrc32, LLMRequestJournal } from "./LLMRequestJournal.js";
 
+const REQUEST_FILE = /^request-\d+\.json$/;
+
 describe("LLMRequestJournal", () => {
     let root: string;
     let journal: LLMRequestJournal;
@@ -159,4 +161,58 @@ describe("LLMRequestJournal", () => {
 
         expect(await journal.getPendingRecovery(root, "test-user")).toBeNull();
     });
-});
+
+    it("discards a recovery request that is already consumed or missing without failing", async () => {
+        await journal.recordRequest(recordOptions({ traceId: "trace-1" }));
+        await journal.completeTrace(root, "test-user", "trace-1");
+
+        // 已完成/已丢弃/已被清理的记录都视为「没有需要放弃的内容」，
+        // 否则前端弹窗既无法恢复也无法关闭。
+        await expect(journal.discardRecovery(root, "test-user", 0)).resolves.toBeUndefined();
+        await expect(journal.discardRecovery(root, "test-user", 42)).resolves.toBeUndefined();
+        await expect(journal.discardRecovery(root, "other-user", 0)).resolves.toBeUndefined();
+    });
+
+    it("does not offer a recovery request for a trace that is still running", async () => {
+        await journal.recordRequest(recordOptions({ traceId: "live-trace" }));
+
+        journal.markTraceActive(root, "live-trace");
+        expect(await journal.getPendingRecovery(root, "test-user")).toBeNull();
+        await expect(journal.readPendingRequest(root, "test-user", 0)).rejects.toThrow("still running");
+
+        journal.clearTraceActive(root, "live-trace");
+        expect((await journal.getPendingRecovery(root, "test-user"))?.requestIndex).toBe(0);
+        await expect(journal.readPendingRequest(root, "test-user", 0)).resolves.toMatchObject({ requestIndex: 0 });
+    });
+
+    it("keeps the newest pending request when pruning completed history", async () => {
+        for (let index = 0; index < 100; index++) {
+            await journal.recordRequest(recordOptions({ traceId: "history-trace", timestamp: index }));
+        }
+        await journal.completeTrace(root, "test-user", "history-trace");
+
+        const pending = await journal.recordRequest(recordOptions({ traceId: "crash-trace", timestamp: 1000 }));
+        expect(pending.requestIndex).toBe(100);
+        for (let index = 1; index <= 20; index++) {
+            await journal.recordRequest(recordOptions({ traceId: "crash-trace", timestamp: 1000 + index }));
+        }
+
+        const directory = path.join(root, ".llm-request");
+        await expect(fs.access(path.join(directory, "request-100.json"))).resolves.toBeUndefined();
+        expect((await fs.readdir(directory)).filter((file) => REQUEST_FILE.test(file))).toHaveLength(100);
+        expect((await journal.getPendingRecovery(root, "test-user"))?.requestIndex).toBe(120);
+    }, 60_000);
+
+    it("still prunes old pending requests when nothing else can be removed", async () => {
+        for (let index = 0; index < 100; index++) {
+            await journal.recordRequest(recordOptions({ traceId: `trace-${index}`, timestamp: index }));
+        }
+        const latest = await journal.recordRequest(recordOptions({ traceId: "latest-trace", timestamp: 200 }));
+        expect(latest.requestIndex).toBe(100);
+
+        const directory = path.join(root, ".llm-request");
+        await expect(fs.access(path.join(directory, "request-0.json"))).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(fs.access(path.join(directory, "request-100.json"))).resolves.toBeUndefined();
+        expect((await fs.readdir(directory)).filter((file) => REQUEST_FILE.test(file))).toHaveLength(100);
+    }, 60_000);
+}, 60_000);

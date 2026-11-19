@@ -12,6 +12,8 @@ import type { Message, MessagePart, StreamProgress } from '@/hooks/useAgentSSE';
 import { USER_ID } from '@/config';
 import { electronBridge, type AgentRecoveryInfo } from '@/services/electron-bridge';
 
+const RECOVERY_EXPIRED_MESSAGE = '上次未完成的请求已失效或仍在执行中，本次恢复已跳过。可直接发送新的指令继续任务。';
+
 interface ChatMessageItemProps {
     message: Message;
     isLastItem: boolean;
@@ -298,26 +300,75 @@ export const AgentChat: React.FC = () => {
         };
     }, [workspaceRoot]);
 
-    const continueRecovery = useCallback(() => {
+    // 恢复弹窗里的数据来自一次快照，期间记录可能已被清理或被更早的流程标记完成。
+    // 恢复/放弃前都以磁盘上的最新状态为准，避免拿着失效的序号反复失败。
+    const fetchPendingRecovery = useCallback(async (): Promise<{ ok: boolean; recovery: AgentRecoveryInfo | null }> => {
+        if (!workspaceRoot) return { ok: false, recovery: null };
+        try {
+            const result = await electronBridge.getAgentRecovery({ userId: USER_ID, root: workspaceRoot });
+            if (!result.success) {
+                setRecoveryError(result.error || '读取上次未完成的 Agent 请求失败');
+                return { ok: false, recovery: null };
+            }
+            return { ok: true, recovery: result.recovery };
+        } catch (error) {
+            console.error('[AgentChat] Failed to refresh pending recovery:', error);
+            setRecoveryError(error instanceof Error ? error.message : String(error));
+            return { ok: false, recovery: null };
+        }
+    }, [workspaceRoot]);
+
+    const closeExpiredRecovery = useCallback(() => {
+        setPendingRecovery(null);
+        setIsRecoveryPromptOpen(false);
+        setRecoveryError(RECOVERY_EXPIRED_MESSAGE);
+    }, []);
+
+    const continueRecovery = useCallback(async () => {
         if (!pendingRecovery || isRecoveryBusy || isLoading) return;
 
         setIsRecoveryBusy(true);
         setIsRecoveryPromptOpen(false);
         setRecoveryError(null);
-        void resume(pendingRecovery).then((success) => {
+        try {
+            const latest = await fetchPendingRecovery();
+            if (!latest.ok) {
+                setIsRecoveryPromptOpen(true);
+                return;
+            }
+            if (!latest.recovery) {
+                closeExpiredRecovery();
+                return;
+            }
+            if (latest.recovery.requestIndex !== pendingRecovery.requestIndex) {
+                setPendingRecovery(latest.recovery);
+            }
+
+            const success = await resume(latest.recovery);
             if (success) {
                 setPendingRecovery(null);
                 return;
             }
-            setRecoveryError('恢复未能完成。原请求仍可重试，或选择放弃本次恢复。');
+
+            // 恢复失败后按最新状态决定下一步：记录已失效就关闭弹窗，
+            // 否则刷新为最新的可恢复请求，让用户可以重试或放弃。
+            const after = await fetchPendingRecovery();
+            if (after.ok && !after.recovery) {
+                closeExpiredRecovery();
+                return;
+            }
+            if (after.ok && after.recovery) {
+                setPendingRecovery(after.recovery);
+            }
+            setRecoveryError('恢复未能完成。可重试恢复，或放弃本次恢复。');
             setIsRecoveryPromptOpen(true);
-        }).catch((error) => {
+        } catch (error) {
             setRecoveryError(error instanceof Error ? error.message : String(error));
             setIsRecoveryPromptOpen(true);
-        }).finally(() => {
+        } finally {
             setIsRecoveryBusy(false);
-        });
-    }, [pendingRecovery, isRecoveryBusy, isLoading, resume]);
+        }
+    }, [pendingRecovery, isRecoveryBusy, isLoading, resume, fetchPendingRecovery, closeExpiredRecovery]);
 
     const discardRecovery = useCallback(async () => {
         if (!pendingRecovery || !workspaceRoot || isRecoveryBusy) return;
@@ -331,6 +382,15 @@ export const AgentChat: React.FC = () => {
                 requestIndex: pendingRecovery.requestIndex,
             });
             if (!result.success) {
+                // 放弃失败同样以磁盘状态为准：记录已不存在时直接关闭弹窗，避免永久卡死。
+                const after = await fetchPendingRecovery();
+                if (after.ok && !after.recovery) {
+                    closeExpiredRecovery();
+                    return;
+                }
+                if (after.ok && after.recovery) {
+                    setPendingRecovery(after.recovery);
+                }
                 setRecoveryError(result.error || '放弃恢复失败');
                 return;
             }
@@ -342,7 +402,7 @@ export const AgentChat: React.FC = () => {
         } finally {
             setIsRecoveryBusy(false);
         }
-    }, [pendingRecovery, workspaceRoot, isRecoveryBusy]);
+    }, [pendingRecovery, workspaceRoot, isRecoveryBusy, fetchPendingRecovery, closeExpiredRecovery]);
 
     // 2026.04: 思考强度控制（对齐 DeepSeek 官方 thinking mode：reasoning_effort = low | high | max）
     // default: 不发送思考强度字段，采用模型默认（官方默认 high）；low: 轻量档；

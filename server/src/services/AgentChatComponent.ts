@@ -199,6 +199,11 @@ export class AgentChatComponent {
                 return mentionsEvaluatorRepair && asksForRepairConsent && !needsRealUserInput;
             };
 
+        // 执行期间把 trace 标记为活跃：渲染进程重载后不能把正在运行的请求当成「上次未完成」再恢复一次，
+        // 否则同一条 trace 会并发执行，先结束的一方把记录标记为 completed，另一方恢复时报「请求已不存在」。
+        const journal = LLMRequestJournal.getInstance();
+        journal.markTraceActive(root, currentTraceId);
+
         try {
             emit({ type: "stage", content: "Agent 思考中..." });
             
@@ -679,6 +684,8 @@ export class AgentChatComponent {
             // 注意：error 事件使用 content 字段（与 SSE 契约一致，前端与 IPC 桥均按 content 渲染）
             emit({ type: "error", content: err.message || "未知错误" });
             console.log(`${getTS()} [AgentChat] Error for user ${userId}:`, err);
+        } finally {
+            journal.clearTraceActive(root, currentTraceId);
         }
     }
 }

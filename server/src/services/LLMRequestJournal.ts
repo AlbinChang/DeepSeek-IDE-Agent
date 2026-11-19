@@ -100,6 +100,10 @@ export class LLMRequestJournal {
     private readonly workspaceQueues = new Map<string, Promise<void>>();
     private readonly trackedDirectories = new Set<string>();
     private readonly nextRequestIndices = new Map<string, number>();
+    /** 每个工作区最新一条 pending 记录的序号（-1 表示没有），用于清理时保护崩溃恢复候选 */
+    private readonly latestPendingIndices = new Map<string, number>();
+    /** 本进程内正在执行的 trace（工作区::traceId → 引用计数），这些请求不能被当成「上次未完成」重新恢复 */
+    private readonly activeTraces = new Map<string, number>();
 
     public static getInstance(): LLMRequestJournal {
         if (!this.instance) {
@@ -110,6 +114,30 @@ export class LLMRequestJournal {
 
     public trackWorkspace(root: string): void {
         this.trackedDirectories.add(this.getDirectory(root));
+    }
+
+    /**
+     * 标记某个 trace 正在本进程执行。执行中的请求处于 pending 状态，
+     * 但它不是「上次崩溃遗留的请求」：渲染进程重载（Ctrl+R/HMR）后再次弹出恢复提示，
+     * 会导致同一条 trace 被并发恢复，其中一方结束时会把记录标记为 completed，
+     * 另一方随后恢复就会报「请求已不存在或无法恢复」。
+     */
+    public markTraceActive(root: string, traceId?: string): void {
+        if (!traceId) return;
+        const key = this.getTraceKey(root, traceId);
+        this.activeTraces.set(key, (this.activeTraces.get(key) ?? 0) + 1);
+    }
+
+    public clearTraceActive(root: string, traceId?: string): void {
+        if (!traceId) return;
+        const key = this.getTraceKey(root, traceId);
+        const count = this.activeTraces.get(key);
+        if (count === undefined) return;
+        if (count <= 1) {
+            this.activeTraces.delete(key);
+        } else {
+            this.activeTraces.set(key, count - 1);
+        }
     }
 
     public async recordRequest(options: RecordRequestOptions): Promise<LLMRequestMetadata> {
@@ -143,6 +171,7 @@ export class LLMRequestJournal {
             const filePath = path.join(directory, `request-${requestIndex}.json`);
             await this.writeRecordAtomically(filePath, metadata, rawPayload);
             this.nextRequestIndices.set(sequenceKey, requestIndex + 1);
+            this.latestPendingIndices.set(sequenceKey, requestIndex);
             await this.pruneOldRequests(directory);
 
             return metadata;
@@ -177,7 +206,11 @@ export class LLMRequestJournal {
             for (const file of files) {
                 const record = await this.readRecordFile(file.filePath, file.requestIndex);
                 if (record && record.metadata.userId === userId) {
-                    return record.metadata.status === "pending" ? this.toRequestRecord(record) : null;
+                    if (record.metadata.status !== "pending") return null;
+                    // 正在本进程执行的 trace 不是「上次未完成」，恢复它会造成同一任务并发执行
+                    return this.isTraceActive(directory, record.metadata.traceId)
+                        ? null
+                        : this.toRequestRecord(record);
                 }
             }
             return null;
@@ -196,6 +229,9 @@ export class LLMRequestJournal {
             const record = await this.readRecordFile(filePath, requestIndex);
             if (!record || record.metadata.userId !== userId || record.metadata.status !== "pending") {
                 throw new Error(`Pending LLM request ${requestIndex} was not found or is no longer recoverable`);
+            }
+            if (this.isTraceActive(directory, record.metadata.traceId)) {
+                throw new Error(`Pending LLM request ${requestIndex} is still running in this session`);
             }
             return this.toRequestRecord(record);
         });
@@ -239,8 +275,10 @@ export class LLMRequestJournal {
             }
             const filePath = path.join(directory, `request-${requestIndex}.json`);
             const record = await this.readRecordFile(filePath, requestIndex, false);
+            // 记录可能已被清理/损坏/被更早的恢复流程终结。放弃恢复必须是幂等的：
+            // 否则 UI 会一直停留在「恢复上次未完成的对话」弹窗里，既无法恢复也无法关闭。
             if (!record || record.metadata.userId !== userId || record.metadata.status !== "pending") {
-                throw new Error(`Pending LLM request ${requestIndex} was not found or is no longer recoverable`);
+                return;
             }
 
             await this.updateRequestStatuses(
@@ -328,6 +366,15 @@ export class LLMRequestJournal {
 
     private getQueueKey(directory: string): string {
         return process.platform === "win32" ? directory.toLowerCase() : directory;
+    }
+
+    private getTraceKey(root: string, traceId: string): string {
+        return `${this.getQueueKey(this.getDirectory(root))}::${traceId}`;
+    }
+
+    private isTraceActive(directory: string, traceId?: string): boolean {
+        if (!traceId) return false;
+        return this.activeTraces.has(`${this.getQueueKey(directory)}::${traceId}`);
     }
 
     private async runExclusive<T>(directory: string, operation: () => Promise<T>): Promise<T> {
@@ -459,14 +506,67 @@ export class LLMRequestJournal {
             const metadata = { ...record.metadata, status };
             await this.writeRecordAtomically(file.filePath, metadata, record.rawPayload);
         }
+        // 状态可能发生变化（例如最新一条 pending 记录已完成），下一次清理重新计算保护目标
+        this.latestPendingIndices.delete(this.getQueueKey(directory));
     }
 
     private async pruneOldRequests(directory: string): Promise<void> {
         const files = (await this.listRequestFiles(directory))
             .sort((left, right) => left.requestIndex - right.requestIndex);
-        const oldFiles = files.slice(0, Math.max(0, files.length - MAX_REQUEST_FILES));
-        for (const file of oldFiles) {
+        let excess = files.length - MAX_REQUEST_FILES;
+        if (excess <= 0) return;
+
+        // 最新一条 pending 记录是崩溃恢复的唯一候选，绝不能因为后续请求变多而被清理掉，
+        // 否则恢复弹窗会指向一个已删除的文件，表现为「请求已不存在或无法恢复」。
+        const protectedIndex = await this.getLatestPendingRequestIndex(directory);
+        for (const file of files) {
+            if (excess <= 0) break;
+            if (file.requestIndex === protectedIndex) continue;
             await fs.unlink(file.filePath);
+            excess--;
+        }
+    }
+
+    private async getLatestPendingRequestIndex(directory: string): Promise<number> {
+        const key = this.getQueueKey(directory);
+        const cached = this.latestPendingIndices.get(key);
+        if (cached !== undefined) return cached;
+
+        const files = (await this.listRequestFiles(directory))
+            .sort((left, right) => right.requestIndex - left.requestIndex);
+        let latestPending = -1;
+        for (const file of files) {
+            if (await this.readMetadataStatus(file.filePath) === "pending") {
+                latestPending = file.requestIndex;
+                break;
+            }
+        }
+        this.latestPendingIndices.set(key, latestPending);
+        return latestPending;
+    }
+
+    /**
+     * 只读取文件头部（元数据行就在首行）判断状态，避免为了清理而把每个请求体（可能数百 KB）全部读入内存。
+     * 读取失败或无法判定时返回 null（视为可清理的历史文件）。
+     */
+    private async readMetadataStatus(filePath: string): Promise<LLMRequestStatus | null> {
+        let handle: FileHandle | undefined;
+        try {
+            handle = await fs.open(filePath, "r");
+            const buffer = Buffer.alloc(16 * 1024);
+            const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+            if (bytesRead <= 0) return null;
+            const match = /"status"\s*:\s*"(pending|completed|discarded)"/.exec(buffer.subarray(0, bytesRead).toString("utf8"));
+            return match ? match[1] as LLMRequestStatus : null;
+        } catch (error) {
+            if (!isNodeError(error) || error.code !== "ENOENT") {
+                console.warn(`[LLMRequestJournal] Failed to read request metadata: ${filePath}`, error);
+            }
+            return null;
+        } finally {
+            if (handle) {
+                await handle.close().catch(() => undefined);
+            }
         }
     }
 
