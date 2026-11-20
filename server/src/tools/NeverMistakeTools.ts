@@ -90,12 +90,12 @@ export class NeverMistakeTools {
                     properties: {
                         entries: {
                             type: 'array',
-                            description: '非空规则数组。',
+                            description: '非空规则数组',
                             items: {
                                 type: 'object',
                                 properties: {
-                                    shouldNot: { type: 'string', description: '应避免的行为。' },
-                                    shouldDo: { type: 'string', description: '已验证的替代做法。' }
+                                    shouldNot: { type: 'string', description: '应避免的做法' },
+                                    shouldDo: { type: 'string', description: '已验证的正确做法' }
                                 },
                                 required: ['shouldNot', 'shouldDo']
                             }

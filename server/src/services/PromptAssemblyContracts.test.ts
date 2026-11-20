@@ -35,13 +35,25 @@ describe('system prompt assembly contracts', () => {
         const config = await readJson('config/main-agent.json');
         const textLength = (value: unknown) => (Array.isArray(value) ? value.join('') : String(value)).length;
         const guidelineChars = Object.values(config.operation_guidelines as Record<string, unknown>)
-            .reduce((total, value) => total + textLength(value), 0);
+            .reduce<number>((total, value) => total + textLength(value), 0);
         const tipChars = (config.important_tips as string[])
             .reduce((total, text) => total + text.length, 0);
 
         expect(Object.keys(config.operation_guidelines).length).toBeLessThanOrEqual(14);
-        expect(guidelineChars).toBeLessThanOrEqual(3600);
-        expect(tipChars).toBeLessThanOrEqual(1800);
+        expect(guidelineChars).toBeLessThanOrEqual(1900);
+        expect(tipChars).toBeLessThanOrEqual(800);
+    });
+
+    it('keeps the evaluator config compact', async () => {
+        const evaluator = await readJson('config/evaluator-agent.json');
+        const textLength = (value: unknown) => (Array.isArray(value) ? value.join('') : String(value)).length;
+        const guidelineChars = Object.values(evaluator.operation_guidelines as Record<string, unknown>)
+            .reduce<number>((total, value) => total + textLength(value), 0);
+        const tipChars = (evaluator.important_tips as string[])
+            .reduce((total, text) => total + text.length, 0);
+
+        expect(guidelineChars).toBeLessThanOrEqual(1500);
+        expect(tipChars).toBeLessThanOrEqual(900);
     });
 
     it('routes professional guidance to the matching builtin skill', async () => {

@@ -1,6 +1,6 @@
 ---
 name: jar-analysis
-description: JAR/WAR/AAR/CLASS 等 Java 二进制归档的解包、结构与内部逻辑分析规范。涉及 jar 包、反编译、查看 class、分析依赖包、理解第三方库内部逻辑时使用。
+description: JAR/WAR/AAR/CLASS 二进制归档的解包与内部逻辑分析。涉及 jar 包、反编译、看 class 时使用。
 triggers:
   - jar
   - war

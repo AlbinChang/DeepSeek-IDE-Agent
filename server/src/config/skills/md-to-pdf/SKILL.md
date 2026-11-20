@@ -1,6 +1,6 @@
 ---
 name: md-to-pdf
-description: Markdown 转 PDF 的唯一推荐方案（md-to-pdf）、配色排版规范与防乱码检查。涉及 MD 转 PDF、导出 PDF、生成 PDF 报告时使用。
+description: Markdown 转 PDF 的唯一推荐方案（md-to-pdf）与防乱码检查。涉及导出 PDF 时使用。
 triggers:
   - pdf
   - md-to-pdf

@@ -1,6 +1,6 @@
 ---
 name: ppt-design
-description: PPT/幻灯片（含 HTML+SVG 演示文稿）的规划、绘制、逐页检查与修复规范。涉及 PPT、幻灯片、slides、演示文稿、汇报材料时使用。
+description: PPT/幻灯片（HTML+SVG）的规划、绘制、逐页检查与修复规范。涉及 PPT、slides、演示文稿时使用。
 triggers:
   - ppt
   - pptx

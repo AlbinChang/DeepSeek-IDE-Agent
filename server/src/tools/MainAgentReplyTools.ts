@@ -63,17 +63,17 @@ export class MainAgentReplyTools {
         return [
             {
                 name: 'list_main_agent_replies',
-                description: '列出主Agent历史最终回复的索引（含摘要）。每轮对话可能产生多条，编号为「对话编号.回复序号」，如 11.2。',
+                description: '列出主Agent历史最终回复索引（含摘要），编号如 11.2。',
                 parameters: {
                     type: 'object',
                     properties: {
                         dialogIndex: {
                             type: 'integer',
-                            description: '只看某一次对话（如 11）。省略则按时间倒序返回最近的回复。'
+                            description: '只看某次对话（如 11）；省略则按时间倒序取最近'
                         },
                         limit: {
                             type: 'integer',
-                            description: `返回条数，默认 ${MainAgentReplyTools.DEFAULT_LIST_LIMIT}，最大 ${MainAgentReplyTools.MAX_LIST_LIMIT}。`
+                            description: `返回条数，默认 ${MainAgentReplyTools.DEFAULT_LIST_LIMIT}，最大 ${MainAgentReplyTools.MAX_LIST_LIMIT}`
                         }
                     },
                     required: []
@@ -81,13 +81,13 @@ export class MainAgentReplyTools {
             },
             {
                 name: 'read_main_agent_reply',
-                description: '按 id 读取主Agent某一条历史最终回复的完整正文（id 形如 11.2，先用 list_main_agent_replies 获取）。',
+                description: '按 id 读取某条历史最终回复正文（id 形如 11.2）。',
                 parameters: {
                     type: 'object',
                     properties: {
                         id: {
                             type: 'string',
-                            description: '回复编号，格式「对话编号.回复序号」，例如 "11.2"。'
+                            description: '回复编号，如 "11.2"'
                         }
                     },
                     required: ['id']

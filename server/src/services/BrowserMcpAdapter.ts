@@ -616,43 +616,23 @@ export class BrowserMcpAdapter {
         }
 
         const lines: string[] = [
-            '### 浏览器自动化工具 (BROWSER AUTOMATION VIA PLAYWRIGHT MCP)',
-            `✅ Playwright MCP 已连接，共 ${state.tools.length} 个浏览器自动化工具可用。`,
+            '### 浏览器自动化 (PLAYWRIGHT MCP)',
+            `✅ 已连接，${state.tools.length} 个工具可用。工具名统一前缀 \`playwright__\`；参数与用途见函数工具定义，此处不重复。调用方式与内置工具相同，Playwright 自动管理会话。`,
             '',
-            '**工具命名规则**：所有 Playwright 工具以 `playwright__` 为前缀。',
-            '工具名称、参数和用途说明由函数工具定义提供，此处不重复列出。',
+            '**使用策略**：',
+            '- 优先 `playwright__browser_snapshot` 获取可访问性快照了解页面结构。',
+            '- 用 `playwright__browser_evaluate` 做定向数据抽取（返回 JS 表达式结果，不限长度）。',
+            '- `playwright__browser_take_screenshot` 仅用于视觉留存，不用于数据采集。',
+            '- 交互前先取最新快照，确认元素 ref 仍有效。',
             '',
-            '**调用方式**：与内置工具完全相同，直接通过工具名调用即可。Playwright MCP 自动管理浏览器会话，无需手动 open/close。',
+            '**📥 网页内容保存**：正文用 `browser_navigate` + `browser_evaluate` 提取后 `file_write` 写 .md（encoding: "utf-8"）；图片本地化到 `docs/images/` 并用相对路径引用。完整规范见 `read_skill("web-research")`。',
             '',
+            '**🚫 截图禁令**：严禁用 `browser_take_screenshot` 截图「保存/下载/收藏」网页文章（不可检索、不可复制、体积巨大）。截图仅限：UI 视觉验收、调试布局样式、用户明确要求截图。内容采集必须用 `browser_evaluate` 提取文字后 `file_write`。',
+            '',
+            '**本地文件预览**：支持 `file://` 打开本地 HTML（已启用 `--allow-unrestricted-file-access`），格式 `file:///盘符:/路径/文件.html`（Windows）或 `file:///路径/文件.html`（Unix），页面相对路径资源可正常加载。需由开发服务器加载时先启动服务再用 `http://localhost:端口` 导航。',
+            '',
+            '**⚠️ 浏览器清理强制规则**：任务完成、准备输出最终答复前必须 `playwright__browser_close` 关闭浏览器；数据采集/截图/交互结束后不再需要浏览器时立即关闭，禁止保持会话打开。仅需关闭当前标签页时用 `playwright__browser_tabs`（`{ "action": "close" }`）。关闭前确认所需数据已保存，关闭后状态不可恢复。',
         ];
-
-        lines.push('');
-        lines.push('**使用策略**：');
-        lines.push('- 优先使用 `playwright__browser_snapshot` 获取页面可访问性快照，了解页面结构。');
-        lines.push('- 使用 `playwright__browser_evaluate` 进行定向数据抽取（返回 JavaScript 表达式结果），返回内容不做大小限制，可获取完整页面数据。');
-        lines.push('- 使用 `playwright__browser_take_screenshot` 仅用于视觉留存，不用于数据采集。');
-        lines.push('- 交互前先获取最新快照确认元素引用（ref）仍然有效。');
-        lines.push('');
-        lines.push('**📥 网页内容保存**：正文用 `playwright__browser_navigate` + `playwright__browser_evaluate` 提取后 `file_write` 写入 .md（encoding: "utf-8"）；图片必须本地化到 `docs/images/` 并以相对路径引用。完整规范（提取优先级、图片下载命令、保存位置）见技能 `read_skill("web-research")`。');
-        lines.push('');
-        lines.push('**🚫 截图禁令 (SCREENSHOT PROHIBITION FOR CONTENT DOWNLOAD)**：');
-        lines.push('- **绝对禁止**用 `playwright__browser_take_screenshot` 截图方式"保存/下载/收藏"网页文章——用户极度反感截图交付，截图无法检索、不可复制文字、体积巨大、完全不可用。');
-        lines.push('- 截图仅允许用于：① UI 视觉验收（用户明确要求看页面长什么样）；② 调试布局/样式问题；③ 用户明确说"截个图给我看"。');
-        lines.push('- 任何形式的内容采集（文章、文档、教程、博客、新闻、论文等）**必须**用 `browser_evaluate` 提取文字后用 `file_write` 写入文件，严禁以截图代替。');
-        lines.push('');
-        lines.push('**本地文件预览 (LOCAL HTML FILE PREVIEW)**：');
-        lines.push('- ✅ 支持通过 `file://` 协议打开本地 HTML 文件进行预览（已启用 `--allow-unrestricted-file-access`）。');
-        lines.push('- 使用 `playwright__browser_navigate` 导航到本地文件，格式为 `file:///盘符:/路径/文件.html`（Windows）或 `file:///路径/文件.html`（Unix）。');
-        lines.push('- 示例：`playwright__browser_navigate` 参数 `{ "url": "file:///D:/project/dist/index.html" }`');
-        lines.push('- 导航到 `file://` 页面后，页面内引用的相对路径资源（CSS/JS/图片）可正常加载。');
-        lines.push('- 如果页面需要从本地 HTTP 服务器加载（如 webpack-dev-server、vite），先确保开发服务器已启动，再用 `http://localhost:端口` 导航。');
-        lines.push('');
-        lines.push('**⚠️ 浏览器清理强制规则 (MANDATORY BROWSER CLEANUP)**：');
-        lines.push('- **任务完成时必须关闭浏览器**：在确认所有任务完成、准备输出最终答复之前，必须调用 `playwright__browser_close` 关闭浏览器。');
-        lines.push('- **不再需要浏览器时立即关闭**：一旦完成网页数据采集、截图或交互操作，无需继续使用浏览器时，应立即调用 `playwright__browser_close` 释放资源。');
-        lines.push('- **禁止保持浏览器打开**：不要在任务完成后保持浏览器会话打开。浏览器会话消耗系统资源，必须在不需要时显式关闭。');
-        lines.push('- **关闭标签页**：如果只需要关闭当前标签页而非整个浏览器，可使用 `playwright__browser_tabs`（参数 `{ "action": "close" }`）关闭当前活跃标签页。');
-        lines.push('- **关闭前确认**：在调用 `playwright__browser_close` 之前，确保已提取并保存所有需要的数据（截图、文本内容等），关闭后浏览器状态将不可恢复。');
 
         return lines.join('\n');
     }

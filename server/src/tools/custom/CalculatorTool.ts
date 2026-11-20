@@ -237,13 +237,8 @@ function executeAndCapture(script: string, sandbox: Record<string, any>, timeout
  */
 export const CalculatorTool: ToolDefinition = {
     name: 'calculate',
-    description: `精确数学与批量数据计算工具，支持单位/进制转换、字符串和日期运算。简单心算直接完成；文件、网络和终端任务使用对应工具。
-
-【脚本】
-可调用 math.evaluate/math.unit；console.log/warn/error 输出收集到 logs。
-
-【安全】
-沙箱不提供 require/process/fs/net/child_process 等 API。`,
+    description: `精确数学计算与批量数据处理：单位/进制转换、字符串与日期运算。心算即可完成的小事直接算，不要调用。
+单行数学表达式走 mathjs；多行或含 JS 语法走 vm 沙箱脚本（可用 math.evaluate/math.unit，console 输出收集到 logs，可用 return 或末表达式返回）。沙箱无 require/process/fs/net/child_process。`,
 
     parameters: {
         type: 'object',
@@ -251,16 +246,16 @@ export const CalculatorTool: ToolDefinition = {
             expression: {
                 type: 'string',
                 description:
-                    '单行纯数学表达式由 mathjs 求值；多行或含 JS 语法的内容由 vm 执行。脚本可用 return 或最后一个表达式返回结果。',
+                    '单行数学表达式，或含 JS 语法的脚本内容',
             },
             variables: {
                 type: 'object',
-                description: '脚本变量对象，键值会提升为顶层变量。',
+                description: '脚本变量，键值提升为顶层变量',
             },
             timeout: {
                 type: 'number',
                 description:
-                    '超时毫秒数。默认 10000，最大 30000。超时后脚本被强制终止并返回错误。仅在脚本模式生效。',
+                    '脚本超时毫秒，默认 10000、最大 30000',
             },
         },
         required: ['expression'],

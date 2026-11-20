@@ -231,13 +231,13 @@ export class AgentService extends EventEmitter {
         // 注册文件核心工具 (原子化 IO)
         this.toolManager.registerTool({
             name: 'read_file',
-            description: `按行读取工作区文件。单次上限 ${globalConfig.readFile.maxLines} 行、约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段，超长行截断后改用 read_file_by_byte。`,
+            description: `按行读工作区文件，上限 ${globalConfig.readFile.maxLines} 行/约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段，超长行改用 read_file_by_byte。`,
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '工作区相对路径。' },
-                    startLine: { type: 'number', description: '起始行号（从 1 开始）。默认为 1。' },
-                    lineCount: { type: 'number', description: '要读取的行数。' }
+                    path: { type: 'string', description: '工作区相对路径' },
+                    startLine: { type: 'number', description: '起始行号，默认 1' },
+                    lineCount: { type: 'number', description: '读取行数' }
                 },
                 required: ['path']
             },
@@ -269,13 +269,13 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering read_file_by_byte...');
         this.toolManager.registerTool({
             name: 'read_file_by_byte',
-            description: '按字节范围读取；仅用于 read_file 的超长单行截断或二进制/混淆内容，不适用于普通文本读取。',
+            description: '按字节范围读取；仅用于超长单行截断或二进制/混淆内容，普通文本请用 read_file。',
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '工作区相对路径。' },
-                    offset: { type: 'number', description: '字节偏移量（从 0 开始）' },
-                    length: { type: 'number', description: '读取字节长度（单次上限 2.5KB）' }
+                    path: { type: 'string', description: '工作区相对路径' },
+                    offset: { type: 'number', description: '字节偏移，从 0 开始' },
+                    length: { type: 'number', description: '字节长度，上限 2.5KB' }
                 },
                 required: ['path']
             },
@@ -302,13 +302,13 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_write...');
         this.toolManager.registerTool({
             name: 'file_write',
-            description: '创建文件或完整覆写现有文件；局部修改用 file_replace/file_insert，多处替换用 file_replace_all。',
+            description: '创建或完整覆写文件；局部修改用 file_replace/file_insert，多处替换用 file_replace_all。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    content: { type: 'string', description: '要写入的完整文本。' },
-                    encoding: { type: 'string', description: '可选：指定写入编码（如 GBK、UTF-8）。仅对新建文件生效；已有文件自动沿用原编码。' }
+                    content: { type: 'string', description: '完整文本内容' },
+                    encoding: { type: 'string', description: '写入编码（如 GBK、UTF-8），仅新建文件生效' }
                 },
                 required: ['path', 'content']
             },
@@ -357,8 +357,8 @@ export class AgentService extends EventEmitter {
             parameters: {
                 type: 'object',
                 properties: {
-                    path: { type: 'string', description: '目录相对路径；默认为 "."。' },
-                    depth: { type: 'number', description: '递归深度（1-10）。' }
+                    path: { type: 'string', description: '目录相对路径，默认 "."' },
+                    depth: { type: 'number', description: '递归深度 1-10' }
                 },
                 required: ['depth']
             },
@@ -386,12 +386,12 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering delete_path...');
         this.toolManager.registerTool({
             name: 'delete_path',
-            description: '物理删除文件或目录；禁止将其用于内容修复，修改请用 file_replace 或 file_insert。',
+            description: '物理删除文件或目录；不可用于内容修复，改内容请用 file_replace/file_insert。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    recursive: { type: 'boolean', description: '是否递归删除目录' }
+                    recursive: { type: 'boolean', description: '递归删除目录' }
                 },
                 required: ['path']
             },
@@ -406,13 +406,13 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_replace...');
         this.toolManager.registerTool({
             name: 'file_replace',
-            description: '在文件中精确替换唯一匹配的 oldText；匹配多处时返回歧义错误，newText 为空时删除匹配内容。',
+            description: '精确替换唯一匹配的 oldText；多处匹配返回歧义错误，newText 为空时删除匹配内容。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    oldText: { type: 'string', description: '原文片段。' },
-                    newText: { type: 'string', description: '替换文本。' }
+                    oldText: { type: 'string', description: '原文片段' },
+                    newText: { type: 'string', description: '替换文本' }
                 },
                 required: ['path', 'oldText', 'newText']
             },
@@ -463,13 +463,13 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_insert...');
         this.toolManager.registerTool({
             name: 'file_insert',
-            description: '在 startLine 指定的行号前插入内容；文件总行数 + 1 表示追加到末尾。',
+            description: '在 startLine 行前插入内容；传「总行数+1」即追加到末尾。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    startLine: { type: 'integer', minimum: 1, description: '起始行号（从 1 开始）。' },
-                    newText: { type: 'string', description: '要插入的文本。' }
+                    startLine: { type: 'integer', minimum: 1, description: '起始行号，从 1 开始' },
+                    newText: { type: 'string', description: '插入文本' }
                 },
                 required: ['path', 'startLine', 'newText']
             },
@@ -519,13 +519,13 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering file_replace_all...');
         this.toolManager.registerTool({
             name: 'file_replace_all',
-            description: '将文件中所有字面匹配的 oldText 替换为 newText，适合批量重命名、术语或格式调整。',
+            description: '把所有字面匹配的 oldText 替换为 newText，适合批量重命名与术语调整。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    oldText: { type: 'string', description: '待匹配文本。' },
-                    newText: { type: 'string', description: '替换文本；空字符串表示删除匹配项。' }
+                    oldText: { type: 'string', description: '待匹配文本' },
+                    newText: { type: 'string', description: '替换文本，空串表示删除' }
                 },
                 required: ['path', 'oldText', 'newText']
             },
@@ -582,11 +582,11 @@ export class AgentService extends EventEmitter {
             parameters: {
                 type: 'object',
                 properties: {
-                    command: { type: 'string', description: 'PowerShell 原生命令体。' },
-                    timeout: { type: 'number', description: '超时毫秒数。' },
+                    command: { type: 'string', description: 'PowerShell 原生命令体' },
+                    timeout: { type: 'number', description: '超时毫秒数' },
                     environment: {
                         type: 'object',
-                        description: '可选：追加/覆盖子进程环境变量（仅字符串值）。',
+                        description: '追加/覆盖子进程环境变量（仅字符串值）',
                         additionalProperties: { type: 'string' },
                     },
                 },
@@ -614,15 +614,15 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_cmd_command...');
         this.toolManager.registerTool({
             name: 'run_cmd_command',
-            description: '仅限 Windows，在工作区执行 CMD 命令；适合简单文本和文件操作。',
+            description: '仅限 Windows，在工作区执行 CMD 命令。',
             parameters: {
                 type: 'object',
                 properties: {
-                    command: { type: 'string', description: 'CMD 原生命令体。' },
-                    timeout: { type: 'number', description: '超时毫秒数。' },
+                    command: { type: 'string', description: 'CMD 原生命令体' },
+                    timeout: { type: 'number', description: '超时毫秒数' },
                     environment: {
                         type: 'object',
-                        description: '可选：追加/覆盖子进程环境变量（仅字符串值）。',
+                        description: '追加/覆盖子进程环境变量（仅字符串值）',
                         additionalProperties: { type: 'string' },
                     },
                 },
@@ -1077,50 +1077,18 @@ export class AgentService extends EventEmitter {
             throw new Error(`Failed to load agent configuration (${agentConfigFile}): ` + e);
         }
 
-        // TODO 提示词策略：使用稳定前缀，避免每轮注入动态快照导致 KV 缓存命中下降
-        const todoPrompt = [
-            '### TODO 工具使用策略 (TODO TOOLING POLICY)',
-            '为提升前缀稳定性与 KV 缓存命中率，系统提示词不再按轮次注入完整 TODO 明细快照。',
-            '`list_todos` / `append_todo` / `update_todo` / `delete_todo` 仅允许顶层 Agent（主 Agent/评估 Agent）直接调用，子代理不得直接操作全局任务清单。',
-            '⚠️ 职责区分：`list_todos` 为纯只读查询工具（无必填参数），绝不会保存任何传入参数！新建/规划任务必须调用 `append_todo`，更新状态调用 `update_todo`。',
-            '当你需要确认最新任务状态、任务 ID，或怀疑历史裁剪导致状态不清晰时，必须优先调用 `list_todos` 获取当前真值（SSOT）。',
-            '`list_todos` 无必填参数，直接调用 `{}` 即可获取完整清单。',
-            '如果用户明确要求查看当前 TODO 状态，应直接调用 `list_todos` 并基于工具结果答复。',
-            '',
-            '**【终态强制门禁】给出最终回复前的强制检查流程（不可跳过）**：',
-            '1. 调用 `list_todos` 获取当前任务清单；',
-            '2. 对状态为 `not-started` 或 `in-progress` 的任务，调用 `update_todo` 将其状态置为 `completed` 或 `failed`；',
-            '3. 确认全部任务已进入终态后，才允许输出最终答复给用户；',
-            '4. 若发现仍有任务可推进（非卡用户输入），禁止强行终态——应继续执行直到任务真正完成或确认不可达为止。',
-            '',
-            '**【记忆反思与持久化 — 任务完成后的知识沉淀】**：',
-            '在确认全部 TODO 任务已进入终态（completed/failed）、准备输出最终答复之前，必须执行记忆反思流程：',
-            '1. **反思本轮是否有值得持久化的知识**，逐项检查：',
-            '   - 工具失败模式 → 调用 `append_never_mistake_rule`（概括失败模式，不引用具体文件路径）',
-            '   - 用户偏好变化 → 调用 `upsert_user_preference`（type 使用 style/language/format/behavior/tool 等）',
-            '   - 项目特定知识（架构约定、端口配置、命名规范等）→ 调用 `upsert_user_preference`（type=`project`，source=`inferred`）',
-            '   - 与已有记忆冲突 → 先 `list_user_preferences` 获取冲突项 ID，通过 `conflictIds` 淘汰旧偏好',
-            '2. **持久化判断标准**（满足任一即记录）：反复使用≥2次 / 因缺少该知识走了弯路 / 对后续有明确指导价值 / 用户要求"记住"',
-            '3. **不应记录**：通用常识 / 一次性临时信息 / 已有重复内容 / 未经验证的推测',
-            '4. 若本轮无值得持久化的知识，跳过此步骤直接输出最终答复。禁止为了记录而记录。'
-        ].join('\n');
-
         // 动态注入“防重复犯错”记忆规则
         let neverMistakePrompt = "";
         try {
             const { MemoryService } = await import('./MemoryService.js');
             const rules = await MemoryService.getNeverMistakeRules(root!);
             const lines = [
-                '### 防重复犯错记忆 (NEVER MISTAKE AGAIN SSOT)',
-                '以下规则来自 `.memory/never_mistake_again.json`，是当前工作区已沉淀的“反复踩坑防线”。你必须先自检再执行。',
+                '### 防重复犯错记忆',
+                '规则来自 `.memory/never_mistake_again.json`，执行前自检：',
                 ...(rules && rules.length > 0
                     ? rules.map((rule, index) => `${index + 1}. 不应该做什么：${rule.shouldNot}\n   应该做什么：${rule.shouldDo}`)
                     : ['- (EMPTY) 暂无历史反错规则。']),
-                '**强制行为**：',
-                '1. 命中规则时，禁止继续执行“应该避免”的动作，必须直接执行“应该做”的替代动作；',
-                '2. 若用户指出你重复犯错，或工具结果证明你刚犯了同类错误，必须立即调用 `append_never_mistake_rule` 记录新规则；',
-                '3. 规则过时或与当前工程约束冲突时，调用 `delete_never_mistake_rule` 删除；',
-                '4. 默认不要在本轮起手调用 `list_never_mistake_rules`，该快照已是本轮最新注入。'
+                '**强制**：① 命中规则直接执行「应该做」的替代动作；② 用户指出重复犯错或工具证明同类错误时立即 `append_never_mistake_rule`；③ 规则过时用 `delete_never_mistake_rule` 删除；④ 本快照即最新，起手不要调 `list_never_mistake_rules`。'
             ];
             neverMistakePrompt = lines.join('\n');
         } catch (neverMistakeErr) {
@@ -1129,76 +1097,53 @@ export class AgentService extends EventEmitter {
 
         // 用户偏好改为“工具拉取”策略：不再注入动态快照，避免提示词抖动与快照-真值冲突
         const userPreferencePrompt = [
-            '### 用户偏好记忆策略 (USER PREFERENCES VIA TOOLS ONLY)',
-            '你必须把 `list_user_preferences` 工具返回结果视为唯一真值（SSOT）。',
-            '**强制行为**：',
-            '1. 当任务涉及输出风格、语言、格式、技术选型或执行习惯时，优先调用 `list_user_preferences` 拉取最新偏好，再执行；',
-            '2. 当用户明确表达新偏好时，立即调用 `upsert_user_preference` 记录；',
-            '3. 若新偏好与已有偏好冲突，先 `list_user_preferences` 获取冲突项 ID，再通过 `conflictIds` 淘汰旧偏好；',
-            '4. 若偏好与本轮用户最新明确指令冲突，以用户最新明确指令为准，并同步更新偏好记忆。',
-            '5. 禁止依赖历史上下文中可能过期的偏好描述；如有不确定，必须重新 `list_user_preferences`。'
+            '### 用户偏好记忆',
+            '`list_user_preferences` 是唯一真值（SSOT）。涉及输出风格、语言、格式、技术选型时先拉最新偏好；用户表达新偏好时立即 `upsert_user_preference`；冲突时先取旧 ID 再用 `conflictIds` 淘汰；与本轮明确指令冲突时以指令为准；禁止依赖历史中可能过期的偏好。'
         ].join('\n');
 
         // 主 Agent 历史最终回复记忆：与 user_instructs.json 的对话编号一一对应
         const mainAgentReplyMemoryPrompt = [
             '### 主Agent 历史最终回复记忆 (MAIN AGENT REPLY MEMORY)',
-            '系统会把你在最近若干次对话中的每一轮最终回复写入 `.memory/user_instructs_reply.json`，编号为「对话编号.回复序号」（如 `11.2` = 第 11 次对话中你的第 2 份最终回复）。保留范围与 `.memory/user_instructs.json` 的对话编号严格一一对应。',
-            '**何时必须检索**：',
-            '1. 用户指令出现「继续」「接着上次」「之前那个方案」「刚才让你改的」等指代历史工作的表述，而当前上下文缺少对应细节时；',
-            '2. 需要确认自己在同一任务的多轮迭代中已经承诺过什么、交付过什么时；',
-            '3. 需要核对本轮结论与上一轮最终结论是否自相矛盾时。',
-            '**检索方式**：先调用 `list_main_agent_replies` 拿到 id 与摘要，再调用 `read_main_agent_reply({ id })` 读取完整正文；只有需要跨多条对比时才用 `read_file` 读取整个文件。',
-            '**禁止**：每轮无差别加载历史回复（挤占上下文、降低缓存命中）；用历史回复替代真实证据（文件内容与命令输出才是唯一事实来源）；修改、删除、重命名该文件，或把它写入文件变更清单、当作交付物输出。'
+            '每轮最终回复写入 `.memory/user_instructs_reply.json`，编号「对话编号.回复序号」（如 `11.2`）。',
+            '**检索时机**：用户以「继续」「之前那个方案」等指代历史而上下文缺细节；需确认已承诺/已交付内容；需核对本轮与上轮结论是否矛盾。',
+            '**方式**：先 `list_main_agent_replies` 取 id 与摘要，再 `read_main_agent_reply({ id })`；跨条对比才 `read_file` 整文件。',
+            '**禁止**：每轮无差别加载历史回复；以历史回复替代真实证据；修改该文件或写入变更清单。'
         ].join('\n');
 
         const tempFilePolicyPrompt = [
-            '### 临时文件治理策略 (TEMP FILES SSOT POLICY)',
-            '- 临时产物（调试脚本、构建中转、格式转换中间产物、一次性抓取缓存等用完即弃内容）只能写入工作区 `.temp/`，禁止散落到 `src/`、`test/`、`docs/` 或工作区根目录。',
-            '- 最终交付文件禁止放 `.temp/`：用户指定路径时按用户指定，未指定时写入合适的业务目录并在回复中说明。',
-            '- `.temp/` 由用户自行清理，不要把清理临时文件列为任务、TODO 或交付门禁。',
-            '- 技术文章、参考文档、白皮书、API 规范、研究论文等有长期参考价值的材料不是临时文件，必须存入 `docs/references/<主题>/`（无 docs 结构时主动创建），禁止混入 `.temp/`。'
+            '### 临时文件治理',
+            '- 一次性临时产物（调试脚本、构建中转、抓取缓存）只写 `.temp/`，禁止落到 `src/`、`test/`、`docs/` 或根目录；最终交付禁止放 `.temp/`。',
+            '- `.temp/` 由用户清理，不要列为任务、TODO 或交付门禁；技术文章、参考文档存 `docs/references/<主题>/`。'
         ].join('\n');
 
         const terminalShellPrompt = [
-            '### 终端工具可用性 (TERMINAL TOOLS)',
-            `- run_powershell_command：${envInfo.powershellAvailable ? `✅ 可用（${envInfo.powershellVersion}）` : '❌ 不可用，禁止调用'}。跨平台，Windows 调 powershell.exe，Linux/macOS 调 pwsh。`,
-            `- run_cmd_command：${envInfo.cmdAvailable ? `✅ 可用（${envInfo.cmdVersion}）` : '❌ 不可用，禁止调用'}。仅限 Windows，调 cmd.exe。`,
-            '- 工具名即执行器。command 直接写原生命令体。',
-            '- PowerShell 5.1 不支持 &&，多个命令用分号连接。',
-            '- timeout 单位为毫秒；简单命令建议 30000，构建/测试 120000~300000，依赖安装 600000。',
-            '- Windows 上优先用 run_powershell_command；仅在用户明确要求或命令确实只能在 cmd.exe 下执行时才用 run_cmd_command；Linux/macOS 上仅能用 run_powershell_command。',
-            '- **输出持久化**：每次命令执行后，完整输出（stdout+stderr+元数据）自动写入 .command/output.txt。返回给 LLM 的结果可能被截断，长输出场景请用 read_file 读取 .command/output.txt 获取完整内容。',
+            '### 终端工具选择',
+            `- run_powershell_command：${envInfo.powershellAvailable ? `✅ 可用（${envInfo.powershellVersion}）` : '❌ 不可用，禁止调用'}。跨平台；Windows 调 powershell.exe，Linux/macOS 调 pwsh。command 直接写原生命令体；PS 5.1 无 &&，多命令用分号。`,
+            `- run_cmd_command：${envInfo.cmdAvailable ? `✅ 可用（${envInfo.cmdVersion}）` : '❌ 不可用，禁止调用'}。仅限 Windows，仅在用户明确要求或只能 cmd.exe 时使用。`,
+            '- timeout 毫秒：简单命令 30000，构建/测试 120000~300000，装依赖 600000。完整输出写入 `.command/output.txt`，返回被截断时用 `read_file` 读全文。',
         ].join('\n');
 
         const processSafetyGuard = ProcessSafetyGuard.getInstance();
         processSafetyGuard.refreshProtectedPorts();
         const protectedPortsText = processSafetyGuard.getProtectedPortsText();
         const servicePortProtectionPrompt = [
-            '### Agent 服务端口保护 (AGENT SERVICE PORT PROTECTION)',
-            `- 当前 Agent 已占用/保留的核心端口：${protectedPortsText}。这些端口来自各服务 server_conf.json 与环境变量，是系统资产，不是用户项目可清理资源。`,
-            '- 禁止杀死、释放、清理或重启这些端口上的进程；禁止使用 taskkill、Stop-Process、kill、kill-port、fkill、fuser -k，或 netstat/lsof/ss/Get-NetTCPConnection 管道到杀进程命令来处理这些端口。',
-            '- 编写、修改、生成或启动用户项目代码、配置、脚本、Docker 映射、示例命令、文档时，禁止把这些端口作为用户应用监听端口或宿主端口。',
-            '- 如果用户应用遇到这些端口 EADDRINUSE 或启动冲突，必须改用非保留端口（如 3000、3002、3004、5173、8000、8080），而不是尝试释放 Agent 端口。'
+            '### Agent 服务端口保护',
+            `- Agent 保留端口：${protectedPortsText}。属系统资产，不是用户项目资源。`,
+            '- 禁止杀死/释放/重启这些端口上的进程；禁止 taskkill、Stop-Process、kill、kill-port、fkill、fuser -k 及 netstat/lsof/ss/Get-NetTCPConnection 管道到杀进程命令。',
+            '- 用户项目的代码、配置、脚本、Docker 映射与文档禁止使用这些端口；遇 EADDRINUSE 改用 3000、3002、3004、5173、8000、8080。'
         ].join('\n');
 
         const gitAutomationPrompt = envInfo.gitAvailable
             ? [
-                '### Git 版本管理策略 (LLM-DRIVEN GIT VIA TERMINAL)',
-                `- 当前环境已检测到可用 Git 命令：${envInfo.gitVersion}。在用户有版本管理需求时，应执行智能 Git 管理流程。`,
-                '- Git 版本管理完全由你通过 `run_powershell_command` 或 `run_cmd_command` 显式执行；系统不会在后台自动 `git init` / `git add` / `git commit` / `.gitignore` 同步。',
-                '- 所有 Git 操作必须分步透明：每执行一条命令，都要先观察输出再决定下一步，禁止一次拼接长命令链隐藏中间状态。',
-                '- 建议顺序：`git --version` -> `git rev-parse --is-inside-work-tree` -> (需要时) `git init` -> `git status --short --branch` -> `git add` / `git commit` / `git log` / `git diff`。',
-                '- **提交前强制门禁（MANDATORY PRE-COMMIT IGNORE HYGIENE）**：在执行 `git commit` 之前，必须先检查并补全 `.gitignore`，确保无必要文件/目录不会进入版本库。',
-                '- **强制步骤**：1) `git status --short --branch` 识别未跟踪项；2) 判断是否存在无必要文件/目录（构建产物、依赖目录、日志、缓存、临时文件、IDE 元数据、本地密钥）；3) 用 `read_file` 读取 `.gitignore`，若缺规则用 `file_insert`（追加）或 `file_write`（首次创建）补齐并去重；4) 再次执行 `git status --short` 验证噪声项已被忽略；5) 仅在复检通过后再 `git add` / `git commit`。',
-                '- 如果发现不确定是否应忽略的文件，先向用户确认，再提交。禁止在未完成忽略体检时直接提交。',
-                '- 任何会改变版本库状态的命令执行前，都应在回复中说明目的；提交完成后必须反馈 commit hash、提交信息和影响范围。',
-                '- 若用户未要求版本管理，不要擅自提交；若用户明确要求 Git 操作，优先用终端工具完成，保持全程可见、可追溯。'
+                '### Git 版本管理策略',
+                `- 已检测到 Git：${envInfo.gitVersion}。仅当用户需要版本管理时才执行，否则不要擅自提交。`,
+                '- 通过 `run_powershell_command`/`run_cmd_command` 分步执行，每条命令先看输出；系统不会后台自动 git 或同步 .gitignore。',
+                '- **提交前门禁**：`git status --short --branch` 找未跟踪项 → 剔除构建产物/依赖/日志/缓存/临时文件/IDE 元数据/本地密钥 → 缺规则时用 `file_insert`/`file_write` 补 `.gitignore` → 复跑 `git status --short` 确认 → 才 `git add`/`git commit`。',
+                '- 改版本库状态前说明目的；提交后反馈 commit hash、提交信息与影响范围。'
             ].join('\n')
             : [
-                '### Git 版本管理策略 (LLM-DRIVEN GIT VIA TERMINAL)',
-                `- 当前环境未检测到可用 Git 命令（${envInfo.gitVersion || 'Not Found'}）。本轮不要执行智能 Git 版本管理。`,
-                '- 禁止尝试执行 `git init` / `git add` / `git commit` / `git log` / `git diff` 等 Git 命令，避免无效重试。',
-                '- 如果用户明确要求 Git 操作，先告知当前环境缺少 Git 工具并给出安装/启用建议；随后继续处理非 Git 任务。'
+                '### Git 版本管理策略',
+                `- 未检测到 Git（${envInfo.gitVersion || 'Not Found'}），禁止尝试 git 命令；用户要求时说明缺失并给安装建议。`
             ].join('\n');
 
 
@@ -1217,8 +1162,10 @@ export class AgentService extends EventEmitter {
         const capabilities = config.capabilities?.map((c: string) => `- ${c}`).join('\n') || "";
         const guidelines = Object.entries(config.operation_guidelines || {})
             .map(([k, v]) => `- **${k}**: ${v}`).join('\n') || "";
-        const tips = config.important_tips?.map((t: string) => `- ${t}`).join('\n') || "";
-        const batchRules = config.batch_rules?.map((r: string) => `- ${r}`).join('\n') || "";
+        const tips = [
+            ...(config.important_tips || []),
+            ...(config.batch_rules || []),
+        ].map((t: string) => `- ${t}`).join('\n') || "";
 
         // 技能索引（内置专项技能随 Agent 分发 + 工作区专项技能）
         // 只注入「名称 + 一句话用途」，完整规范由 read_skill 按需拉取，避免系统提示词常驻长文本。
@@ -1231,10 +1178,10 @@ export class AgentService extends EventEmitter {
             const skills = await SkillService.getInstance().getSkills(root!);
             if (skills && skills.length > 0) {
                 skillParts.push([
-                    '### 工作区专项技能 (WORKSPACE SKILLS INDEX)',
-                    `扫描路径：${WORKSPACE_SKILL_DIRECTORIES.join('、')}。命中场景时用 \`read_skill("<name>")\` 加载，或直接 \`read_file\` 读取入口文件：`,
+                    '### 工作区专项技能',
+                    `扫描路径：${WORKSPACE_SKILL_DIRECTORIES.join('、')}。命中场景用 \`read_skill("<name>")\` 加载，或 \`read_file\` 读入口文件：`,
                     ...skills.map(s => `- **${s.name}**: ${s.description} (路径: ${s.skillFilePath})`),
-                    '**核心指令**：Skill 包含特定领域的 SOP 和 Expert Knowledge，严禁在未加载的情况下凭空猜测；复杂多步骤工作流请用 `append_todo` 拆解追踪。历史被裁剪后若遗忘技能内容，随时重新加载。'
+                    '**核心指令**：Skill 是特定领域 SOP 与专家知识，未加载不得凭空猜测；复杂流程用 `append_todo` 拆解。历史裁剪后若遗忘，随时重新加载。'
                 ].join('\n'));
             }
             skillPrompt = skillParts.join('\n\n');
@@ -1261,8 +1208,8 @@ export class AgentService extends EventEmitter {
             const ruleResult = await RuleService.getInstance().loadWorkspaceRules(root!);
             if (ruleResult) {
                 const parts = [
-                    '### 工程级规范约束 (PROJECT RULES & CONSTRAINTS)',
-                    '检测到当前工程特定的约束规范。你接下来的所有行为必须**严格遵守**这些规范：',
+                    '### 工程级规范约束',
+                    '以下工程规范对所有行为强制生效：',
                     `#### [核心主规范] ${ruleResult.mainFileName}\n\n\`\`\`markdown\n${ruleResult.mainRule}\n\`\`\``
                 ];
                 
@@ -1273,7 +1220,7 @@ export class AgentService extends EventEmitter {
                     }
                 }
 
-                parts.push(`**核心指令**：由于复杂长任务中对话历史会裁剪，当你发现需要某个规范的具体细则时，**一定要随时使用 \`read_file\` 重新加载上文对应的子规范内容 (${ruleResult.ruleDirectory}/*.md)**。如果遇到非常复杂的规范、多步骤或工作流，**请优先使用 \`append_todo\` 工具将其拆分添加为 TODO 任务进行追踪防止丢失细节**。不要试图凭借猜测编写可能会违背规则的代码！`);
+                parts.push(`**核心指令**：对话历史会被裁剪，需要细则时随时用 \`read_file\` 重新加载 ${ruleResult.ruleDirectory}/*.md；复杂多步骤规范先用 \`append_todo\` 拆分追踪。禁止凭猜测编写可能违背规则的代码。`);
 
                 if (ruleResult.error) {
                     parts.push(`> **系统警报**: ${ruleResult.error}`);
@@ -1286,13 +1233,12 @@ export class AgentService extends EventEmitter {
         }
 
         const intentBlock = [
-            '### 用户意图识别与对齐 (INTENT TRACKING & ALIGNMENT)',  
-            '**意图维持准则**：',
-            '1. **核心驱动**：你接下来的所有行为、思考链 (CoT) 及工具调用必须严防“意图漂移”，必须满足【当前意图】。',
-            '2. **历史参考**：如果【当前意图】模糊或涉及连续操作，请参考 assistant 消息来补全上下文，但不要被旧任务带偏。',
-            '3. **任务一致性**：若任务状态或任务 ID 存在不确定性（尤其历史被裁剪后），先调用 `list_todos` 获取最新清单，再执行 `append_todo` / `update_todo` / `delete_todo`。`update_todo` 通过 `todos` 数组传参（每项含 id + 更新字段），`delete_todo` 通过 `ids` 传参；如与【当前意图】冲突，以【当前意图】为准并更新或删除旧 TODO。',
-            '4. **终态前置**：在输出最终答复前，必须确保所有 TODO 任务均已进入 `completed` 或 `failed` 状态，否则视为流程未完成，不允许结束。'
-        ].join('\n');        
+            '### 用户意图与 TODO 对齐',
+            '1. 所有行为与工具调用必须服务【当前意图】，严防意图漂移；【当前意图】模糊或涉及连续操作时参考 assistant 消息补全上下文，但不要被旧任务带偏。',
+            '2. `list_todos` 是纯只读真值（SSOT），无必填参数，传 `{}` 即取全量；新建任务用 `append_todo`，改状态用 `update_todo`。状态/ID 不确定、历史被裁剪或用户询问时先 `list_todos`；与【当前意图】冲突时以【当前意图】为准。仅顶层 Agent 可操作。',
+            '3. **【终态门禁】最终答复前**：调 `list_todos` → 把 `not-started`/`in-progress` 项置为 `completed`/`failed` → 全部终态才可答复；仍有可推进任务时禁止强行终态。',
+            '4. **【记忆反思】终态确认后**：失败模式→`append_never_mistake_rule`；用户偏好或项目知识→`upsert_user_preference`（项目知识 type=`project`、source=`inferred`）；冲突→先取旧 ID 再用 `conflictIds` 淘汰。仅记录复用≥2次/曾因此走弯路/有指导价值/用户要求记住者。'
+        ].join('\n');
 
         // MCP 工具系统提示词（动态：随 workspace 的 .mcp/ 配置变化）
         let mcpSystemPrompt = '';
@@ -1317,48 +1263,36 @@ export class AgentService extends EventEmitter {
             langPrompt,
 
             // 2. 核心能力与操作约束（来自 agentConfigFile 参数指定的配置文件）
-            '### 核心能力 (Core Capabilities)',
+            '### 核心能力',
             capabilities,
-            '### 操作准则与约束 (Operational Guidelines)',
+            '### 操作准则',
             guidelines,
-            '### 批量操作规范 (batch Rules)',
-            batchRules,
-            '### 运行建议 (Important Tips)',
+            '### 运行建议',
             tips,
 
             // 2.5 编码设计规范：先画流程图后写代码
-            '### 编码设计规范：先画流程图，后写代码 (DESIGN-FIRST CODING DISCIPLINE)',
+            '### 编码设计规范：先画流程图，后写代码',
             [
-                '**核心铁律**：任何非平凡编码任务（多文件改动、架构调整、新模块/组件、跨服务交互、数据流设计、状态机、异步流程等），必须先设计 Mermaid 流程图作为方案约束，再动手写代码。',
-                '',
-                '**触发条件（满足任一即必须画图）**：≥2 文件改动 | 前后端交互/API 调用链 | 数据模型变更 | 状态管理 | 异步流程 | 组件树重构 | 第三方集成 | 用户明确要求',
-                '**可跳过场景**：单函数小改（≤20行净增）| 纯文案/翻译/注释 | 单键值配置 | 单文件单函数 Bug 修复 | 用户说"不用设计"',
-                '',
-                '**图表类型选择**：flowchart（业务流程/决策分支）、sequenceDiagram（前后端交互/API调用链）、classDiagram（数据模型/类型关系）、stateDiagram（状态机/生命周期）、erDiagram（数据库表关系）、graph（系统拓扑/模块依赖）',
-                '**覆盖要素**：参与者 | 数据流向 | 决策点 | 边界条件（异常/超时/空值） | 状态变更',
-                '',
-                '**执行顺序**：需求分析 → 画 Mermaid 流程图 → 确认 → 拆解为 TODO → 逐项编码 → 对照流程图自检覆盖度',
-                '**反模式**：写完代码补画图 | 流程图与代码脱节 | 用文字替代流程图 | 过于笼统（三框了事） | 方案变更不同步更新流程图',
+                '**铁律**：非平凡编码任务（多文件改动、架构调整、新模块、跨服务交互、数据流、状态机、异步流程）必须先出 Mermaid 流程图再写代码。',
+                '**触发**：≥2 文件 | 前后端/API 调用链 | 数据模型变更 | 状态管理 | 异步流程 | 组件树重构 | 第三方集成 | 用户要求。**可跳过**：单函数小改（≤20 行）| 纯文案 | 单键值配置 | 用户说"不用设计"。',
+                '**图型**：flowchart 流程分支 / sequenceDiagram 调用链 / classDiagram 类型关系 / stateDiagram 状态机 / erDiagram 表关系 / graph 拓扑。要素：参与者、流向、决策点、边界条件（异常/超时/空值）、状态变更。',
+                '**顺序**：需求分析 → 流程图 → 拆 TODO → 编码 → 对照图自检；禁止写完补画或图文脱节。',
             ].join('\n'),
 
             // 3. 工作区维度的稳定上下文（同一 workspace 内不变）
-            '### 静态环境与项目元信息 (Static Workspace Profile)',
+            '### 静态环境与项目元信息',
             [
                 `- **工作目录（唯一作业边界）**: ${root}`,
-                '  ⚠️ 所有文件操作与配置读取都限定在该目录内；越界访问 DeepSeek IDE / Agent 自身工程或启动配置属于 P0 违规（见 workspace_host_isolation_contract）。',
-                `- **用户标识**: ${userId}`,
+                '  ⚠️ 文件与配置操作限定在该目录内；越界访问 IDE 自身工程属 P0 违规。',
                 `- **操作系统**: ${envInfo.os} (${envInfo.arch})`,
                 `- **Node.js**: ${envInfo.nodeVersion}`,
                 `- **JDK (运行时)**: ${envInfo.javaVersion}`,
                 `- **CPU 核心**: ${envInfo.cpuCores}`,
                 `- **可用内存**: ${envInfo.totalMemory}`,
                 `- **Shell版本**: ${envInfo.shell}`,
-                `- **PowerShell 可用性**: ${envInfo.powershellAvailable ? `可用 (${envInfo.powershellVersion})` : '不可用 (Not Found)'}`,
-                `- **CMD 可用性**: ${envInfo.cmdAvailable ? `可用 (${envInfo.cmdVersion})` : '不可用 (Not Found)'}`,
-                `- **Git 命令可用性**: ${envInfo.gitAvailable ? `可用 (${envInfo.gitVersion})` : `不可用 (${envInfo.gitVersion || 'Not Found'})`}`,
-                projectJavaVersion ? `- **Java 编译目标版本**: ${projectJavaVersion}\n  ⚠️ 编写 Java 代码时必须严格遵守此版本，禁止使用高版本语言特性（如 var/record/sealed/text block 等需 Java 11+/16+/17+）。` : null,
-                projectSourceEncoding ? `- **Maven 项目源文件编码**: ${projectSourceEncoding}\n  ⚠️ 创建或覆写 Java/XML/Properties 文件时，必须将 \`encoding\` 参数显式传入 file_write 工具（如 \`encoding: "${projectSourceEncoding}"\`），防止新建文件默认 UTF-8 与项目编码不一致造成乱码。局部编辑（file_replace / file_insert）会自动沿用文件原编码无需显式传 encoding。` : null,
-                projectPythonVersion ? `- **Python 版本约束**: ${projectPythonVersion}\n  ⚠️ 编写 Python 代码时必须严格遵守此版本，禁止使用高版本语言特性。` : null,
+                projectJavaVersion ? `- **Java 编译目标版本**: ${projectJavaVersion}\n  ⚠️ 严格遵守，禁用高版本语言特性（var/record/sealed/text block 等）。` : null,
+                projectSourceEncoding ? `- **Maven 源文件编码**: ${projectSourceEncoding}\n  ⚠️ 用 file_write 创建/覆写 Java/XML/Properties 时必须传 \`encoding: "${projectSourceEncoding}"\`。` : null,
+                projectPythonVersion ? `- **Python 版本约束**: ${projectPythonVersion}\n  ⚠️ 严格遵守，禁用高版本语言特性。` : null,
                 projectGoVersion ? `- **Go 版本**: ${projectGoVersion}` : null,
             ].filter(Boolean).join('\n'),
 
@@ -1370,7 +1304,7 @@ export class AgentService extends EventEmitter {
             // 【DYNAMIC SUFFIX 动态区】 — 每个回合都可能变化
             //   严禁向上回插静态内容；新增动态内容也只能往这个区追加。
             // ============================================================
-            '### ⚡ 低频运行时上下文 (Low-Churn Runtime Context)',
+            '### 运行时上下文',
             [
                 `- **当前系统日期**: ${localDate} (\`${localTimeZone}\`)`,
             ].join('\n'),
@@ -1405,12 +1339,8 @@ export class AgentService extends EventEmitter {
             // 7.5 按用户指令自动装配的技能正文（仅命中时存在，放在动态区避免污染静态前缀缓存）
             autoLoadedSkillPrompt,
 
-            // 8. 当前意图（最关键，放最后让模型最近期看到）
-            intentBlock,
-
-            // 9. TODO 工具策略（状态不清晰时主动 list 对齐）
-            todoPrompt
-           
+            // 8. 当前意图 + TODO 策略（最关键，放最后让模型最近期看到）
+            intentBlock
         ].filter(Boolean).join('\n\n');
 
         //打印system prompt的

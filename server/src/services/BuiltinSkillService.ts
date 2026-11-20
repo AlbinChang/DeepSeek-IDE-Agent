@@ -31,7 +31,7 @@ const CACHE_TTL = 10 * 1000;
 const MAX_SKILLS = 50;
 /** 单轮自动注入的技能数量与字符预算上限，避免再次膨胀提示词 */
 const MAX_AUTO_LOADED_SKILLS = 2;
-const MAX_AUTO_LOADED_CHARS = 12 * 1024;
+const MAX_AUTO_LOADED_CHARS = 8 * 1024;
 
 export class BuiltinSkillService {
     private static instance: BuiltinSkillService;
@@ -141,7 +141,7 @@ export async function buildBuiltinSkillIndex(): Promise<string> {
 
     return [
         '### 内置专项技能索引 (BUILT-IN SKILLS — 按需加载)',
-        '下列技能内置了专业领域的完整规范。命中对应场景时，必须先调用 `read_skill("<name>")` 载入完整规范后再执行，禁止凭经验即兴发挥；未命中场景不要加载。',
+        '命中场景时必须先 `read_skill("<name>")` 载入完整规范再执行，禁止凭经验即兴发挥；未命中不要加载。',
         ...skills.map((skill) => `- **${skill.name}**: ${skill.description}`),
     ].join('\n');
 }

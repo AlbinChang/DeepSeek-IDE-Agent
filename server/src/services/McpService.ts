@@ -489,11 +489,7 @@ export class McpService {
 
         const lines: string[] = [
             '### 用户配置的 MCP 工具 (USER-CONFIGURED MCP TOOLS)',
-            `检测到工作区 \`.mcp/\` 目录下配置了 ${states.length} 个 MCP 服务器（${connected.length} 个已连接，${disconnected.length} 个未连接）。`,
-            '',
-            '**工具命名规则**：MCP 工具名格式为 `{服务器名}__{原生工具名}`（双下划线分隔）。',
-            '**调用方式**：与内置工具完全相同，直接通过工具名调用即可，系统会自动路由到对应的 MCP 服务器。',
-            '工具名称、参数和用途说明由函数工具定义提供，此处仅列出连接状态。',
+            `工作区 \`.mcp/\` 下配置 ${states.length} 个服务器（已连接 ${connected.length}，未连接 ${disconnected.length}）。工具名格式 \`{服务器名}__{原生工具名}\`，调用方式与内置工具相同，系统自动路由；参数与用途见函数工具定义，此处只列连接状态。`,
             '',
         ];
 
@@ -515,9 +511,8 @@ export class McpService {
         }
 
         lines.push('**注意事项**：');
-        lines.push('- MCP 工具由用户配置，其行为由外部 MCP 服务器决定；若工具返回错误，检查对应的 MCP 服务器是否正常运行。');
-        lines.push('- 每个 MCP 工具名都以服务器名前缀开头，避免与内置工具冲突。');
-        lines.push('- 不确定某个 MCP 工具的参数时，可通过工具名推断其用途，或尝试以合理参数调用。');
+        lines.push('- MCP 工具由用户配置，行为由外部服务器决定；报错先检查该服务器是否正常运行。');
+        lines.push('- 工具名带服务器名前缀，不会与内置工具冲突；不确定参数时可从工具名推断后尝试调用。');
 
         return lines.join('\n');
     }

@@ -121,13 +121,13 @@ export class TodoTools {
                     properties: {
                         todos: {
                             type: 'array',
-                            description: '非空任务数组；每项至少提供 title。',
+                            description: '非空任务数组，每项至少含 title',
                             items: {
                                 type: 'object',
                                 properties: {
-                                    title: { type: 'string', description: '简短任务标题。' },
-                                    status: { type: 'string', enum: ['not-started', 'in-progress', 'completed', 'failed'], description: '任务状态；默认 not-started。' },
-                                    description: { type: 'string', description: '任务说明。' }
+                                    title: { type: 'string', description: '简短任务标题' },
+                                    status: { type: 'string', enum: ['not-started', 'in-progress', 'completed', 'failed'], description: '默认 not-started' },
+                                    description: { type: 'string', description: '任务说明' }
                                 },
                                 required: ['title']
                             }
@@ -144,13 +144,13 @@ export class TodoTools {
                     properties: {
                         todos: {
                             type: 'array',
-                            description: '非空更新数组；每项提供 id 和至少一个更新字段。',
+                            description: '非空更新数组，每项含 id 与至少一个更新字段',
                             items: {
                                 type: 'object',
                                 properties: {
-                                    id: { type: 'string', description: 'TODO ID。' },
-                                    status: { type: 'string', enum: ['not-started', 'in-progress', 'completed', 'failed'], description: 'TODO 状态。' },
-                                    description: { type: 'string', description: '更新说明。' }
+                                    id: { type: 'string', description: 'TODO ID' },
+                                    status: { type: 'string', enum: ['not-started', 'in-progress', 'completed', 'failed'], description: '新状态' },
+                                    description: { type: 'string', description: '更新说明' }
                                 },
                                 required: ['id']
                             }

@@ -23,7 +23,7 @@ export class WorkflowTools {
         return [
             {
                 name: 'list_workflows',
-                description: '列出当前工作区 .workflow 目录下的声明式工作流（名称、标题、输入、路径）。',
+                description: '列出工作区 .workflow 下的声明式工作流。',
                 parameters: {
                     type: 'object',
                     properties: {},
@@ -37,7 +37,7 @@ export class WorkflowTools {
             },
             {
                 name: 'get_workflow',
-                description: '读取指定工作的完整 YAML、元数据与校验结果。',
+                description: '读取工作流完整 YAML、元数据与校验结果。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -65,7 +65,7 @@ export class WorkflowTools {
             },
             {
                 name: 'validate_workflow',
-                description: '校验工作流定义；不传 name 时校验 .workflow 下全部工作流。',
+                description: '校验工作流定义；不传 name 则校验全部。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -84,7 +84,7 @@ export class WorkflowTools {
             },
             {
                 name: 'run_workflow',
-                description: '入队执行一个工作流；默认立即返回 runId，wait=true 时等待到终态或审批暂停。',
+                description: '入队执行工作流；默认返回 runId，wait=true 时等到终态或审批暂停。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -149,7 +149,7 @@ export class WorkflowTools {
             },
             {
                 name: 'list_workflow_runs',
-                description: '列出当前工作区的 workflow 运行记录（默认最近 50 条）。',
+                description: '列出工作区运行记录（默认最近 50 条）。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -187,7 +187,7 @@ export class WorkflowTools {
             },
             {
                 name: 'cancel_workflow',
-                description: '取消一个排队中、运行中或等待审批的 workflow run。',
+                description: '取消排队中、运行中或等待审批的运行。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -206,7 +206,7 @@ export class WorkflowTools {
             },
             {
                 name: 'resume_workflow',
-                description: '恢复 waiting_approval 或 interrupted 的 workflow run；审批决策 approval 必填，interrupted 运行可省略 decision。',
+                description: '恢复 waiting_approval 或 interrupted 的运行；审批场景 decision 必填。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -218,7 +218,7 @@ export class WorkflowTools {
                         },
                         inputs: {
                             type: 'object',
-                            description: '重启后恢复包含脱敏输入的运行时，重新提供工作流输入',
+                            description: '恢复运行时重新提供的工作流输入',
                             additionalProperties: true,
                         },
                     },

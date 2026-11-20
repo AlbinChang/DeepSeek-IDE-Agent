@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: 代码检视/代码审查（review）的方法、检查维度、问题分级与报告格式。涉及代码检视、代码审查、code review、评审改动、找出代码问题时使用。
+description: 代码检视/评审的方法、检查维度、问题分级与报告格式。涉及代码审查、评审改动、找问题时使用。
 triggers:
   - 代码检视
   - 代码审查

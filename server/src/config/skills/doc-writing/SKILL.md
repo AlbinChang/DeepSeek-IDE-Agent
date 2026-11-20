@@ -1,6 +1,6 @@
 ---
 name: doc-writing
-description: Markdown 文档/报告/方案/长文的写作规范：素材充分性、结构、内容质量与参考资料归档。涉及写文档、写报告、写方案、教程、总结、长文时使用。
+description: Markdown 文档/报告/方案/长文写作规范与素材归档。涉及写文档、报告、方案、教程时使用。
 triggers:
   - 写文档
   - 写报告

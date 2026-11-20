@@ -35,6 +35,21 @@ describe('FileTools.readFile', () => {
         expect(result.hasMore).toBe(true);
     });
 
+    it('clamps an oversized explicit lineCount to the 1000-line hard cap', async () => {
+        const workspaceRoot = await createWorkspace();
+        const filePath = path.join(workspaceRoot, 'huge.txt');
+        const totalLines = 1200;
+        const content = Array.from({ length: totalLines }, (_, index) => `line-${index + 1}`).join('\n');
+        await fs.writeFile(filePath, content, 'utf8');
+
+        const result = await FileTools.readFile(workspaceRoot, 'huge.txt', 1, 5000);
+
+        expect(globalConfig.readFile.maxLines).toBe(1000);
+        expect(result.startLine).toBe(1);
+        expect(result.endLine).toBe(1000);
+        expect(result.hasMore).toBe(true);
+    });
+
     it('rejects oversized whole-file reads above the configured 200KB limit', async () => {
         const workspaceRoot = await createWorkspace();
         const filePath = path.join(workspaceRoot, 'oversized.txt');

@@ -252,7 +252,7 @@ export class FileTools {
     }
 
     /**
-     * Agent 受控文件读取 (按行读取，默认单次上限 3000 行)
+     * Agent 受控文件读取 (按行读取，单次上限 1000 行)
      * 相关限制统一由 config.readFile 控制，避免工具描述与实际行为漂移。
      */
     static async readFile(workspaceRoot: string, unsafePath: string, startLine: number = 1, lineCount?: number) {

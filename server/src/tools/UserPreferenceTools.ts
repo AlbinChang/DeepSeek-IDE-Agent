@@ -91,11 +91,11 @@ export class UserPreferenceTools {
                     properties: {
                         limit: {
                             type: 'number',
-                            description: '返回最多条数，默认 50，最大 200。',
+                            description: '返回条数，默认 50，最大 200',
                         },
                         minConfidence: {
                             type: 'number',
-                            description: '最低置信度过滤（0.0-1.0），默认 0（返回全部）。',
+                            description: '最低置信度 0.0-1.0，默认 0',
                         },
                     },
                     required: [],
@@ -109,22 +109,19 @@ export class UserPreferenceTools {
                     properties: {
                         type: {
                             type: 'string',
-                            description: [
-                                '偏好类型标签（自由分类，建议使用英文或中文短词）。',
-                                '推荐分类参考：model（模型选择）/ style（输出风格）/ language（语言/语种）/ behavior（行为习惯）/ timezone（时区）/ format（格式规范）/ tool（工具偏好）/ domain（领域偏好）',
-                            ].join(' ')
+                            description: '偏好类型标签（英文短词），如 model/style/language/behavior/timezone/format/tool/domain'
                         },
                         content: {
                             type: 'string',
-                            description: '描述希望 Agent 遵循的偏好，如时间、语言或输出风格。',
+                            description: '希望 Agent 遵循的偏好内容。',
                         },
                         source: {
                             type: 'string',
                             enum: ['explicit', 'inferred'],
-                            description: '偏好来源：explicit=用户明确表达，inferred=Agent 从上下文推断。默认 explicit。',
+                            description: 'explicit=用户明说，inferred=Agent 推断；默认 explicit。',
                         },
                         conflictIds: {
-                            description: '冲突后需淘汰的旧记录 ID。',
+                            description: '需淘汰的冲突记录 ID。',
                             anyOf: [
                                 { type: 'string' },
                                 { type: 'array', items: { type: 'string' } }

@@ -1,6 +1,6 @@
 ---
 name: svg-diagram
-description: SVG 精准绘图与图表/图片/图标选型规范。涉及 SVG、架构图、流程图、时序图、类图、数据可视化、图表绘制时使用。
+description: SVG 精准绘图与图表/图标选型规范。涉及 SVG、架构图、流程图、时序图、数据可视化时使用。
 triggers:
   - svg
   - diagram

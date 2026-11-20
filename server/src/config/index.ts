@@ -149,7 +149,8 @@ export const config = {
 
     // read_file 工具限制
     readFile: {
-        maxLines: parsePositiveInt(process.env.AGENT_READ_FILE_MAX_LINES, 3000, 1),
+        // 单次最多读取的行数，硬上限 1000（环境变量只能下调，不能突破）
+        maxLines: Math.min(parsePositiveInt(process.env.AGENT_READ_FILE_MAX_LINES, 1000, 1), 1000),
         maxFileSizeBytes: parsePositiveInt(process.env.AGENT_READ_FILE_MAX_FILE_SIZE_BYTES, 200 * 1024, 1),
         maxContentBytes: parsePositiveInt(process.env.AGENT_READ_FILE_MAX_CONTENT_BYTES, 200 * 1024, 1),
         longLineThreshold: parsePositiveInt(process.env.AGENT_READ_FILE_LONG_LINE_THRESHOLD, 1000, 1),
