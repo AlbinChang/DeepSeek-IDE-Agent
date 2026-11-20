@@ -201,37 +201,20 @@ export function registerSettingsIpc(ipcMain: IpcMain) {
     }) => {
         try {
             const { provider } = params;
-            const apiKey = (provider.apiKey || '').trim();
-            const baseURL = (provider.baseURL || '').trim();
-            const modelId = (provider.modelId || '').trim();
 
-            if (!apiKey || !baseURL || !modelId) {
-                return { success: false, error: '缺少必要参数（apiKey/baseURL/modelId）' };
+            // 与 Agent 对话共用同一套连接测试实现：流式请求 + 首包超时，
+            // 避免非流式 + 15s 超时在思考型模型上必然超时（Agent 能正常对话，但测试连接报 timeout）。
+            const { ProviderConnectionTester } = await import('@/services/ProviderConnectionTester.js');
+            const result = await ProviderConnectionTester.test(
+                { ...provider, type: 'openai-compatible' },
+                { workspace: params.workspaceRoot },
+            );
+            if (!result.success) {
+                console.warn(
+                    `[SettingsIPC] Connection test failed for provider "${provider.id}" (${result.status}): ${result.error}`,
+                );
             }
-
-            // 使用 openai SDK 测试连接
-            const openai = await import('openai');
-            const client = new openai.default({
-                apiKey,
-                baseURL,
-                timeout: 15000,
-                maxRetries: 0,
-            });
-
-            const startTime = Date.now();
-            const response = await client.chat.completions.create({
-                model: modelId,
-                messages: [{ role: 'user', content: 'ping' }],
-                max_tokens: 1,
-            });
-            const latencyMs = Date.now() - startTime;
-
-            return {
-                success: true,
-                status: 'ok',
-                latencyMs,
-                model: response.model || modelId,
-            };
+            return result;
         } catch (err: any) {
             return {
                 success: false,

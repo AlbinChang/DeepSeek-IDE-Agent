@@ -220,7 +220,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 throw new Error(result.error || '连接测试失败');
             }
 
-            const latencyText = typeof result?.latencyMs === 'number' ? `（${result.latencyMs}ms）` : '';
+            // latencyMs 为「首包延迟」：收到第一个流式分片的时间，不是完整生成的耗时
+            const latencyText = typeof result?.latencyMs === 'number' ? `（首包 ${result.latencyMs}ms）` : '';
             setConnectionTests((prev) => ({
                 ...prev,
                 [providerConfig.id]: {
