@@ -206,9 +206,22 @@ export const StatusBar: React.FC = () => {
             }
         };
 
+        // 每次模型调用结束都会派发用量事件；超长任务（数小时、上千轮）下若每次都
+        // 全表读取 IndexedDB 并聚合，会持续占用主线程并拖慢整个界面。
+        // 合并为最多每秒刷新一次。
+        let tokenUsageRefreshTimer: number | null = null;
+
+        const scheduleTokenUsageRefresh = () => {
+            if (tokenUsageRefreshTimer !== null) return;
+            tokenUsageRefreshTimer = window.setTimeout(() => {
+                tokenUsageRefreshTimer = null;
+                if (isActive) void refreshTokenUsage();
+            }, 1000);
+        };
+
         const handleTokenUsageUpdate = (event: Event) => {
             const updatedWorkspace = (event as CustomEvent<{ workspaceRoot?: string }>).detail?.workspaceRoot;
-            if (!updatedWorkspace || updatedWorkspace === workspaceRoot) void refreshTokenUsage();
+            if (!updatedWorkspace || updatedWorkspace === workspaceRoot) scheduleTokenUsageRefresh();
         };
 
         setTokenUsage({ daily: [], todayTokens: 0, totalTokens: 0 });
@@ -217,6 +230,10 @@ export const StatusBar: React.FC = () => {
 
         return () => {
             isActive = false;
+            if (tokenUsageRefreshTimer !== null) {
+                window.clearTimeout(tokenUsageRefreshTimer);
+                tokenUsageRefreshTimer = null;
+            }
             window.removeEventListener(TOKEN_USAGE_UPDATED_EVENT, handleTokenUsageUpdate);
         };
     }, [workspaceRoot]);

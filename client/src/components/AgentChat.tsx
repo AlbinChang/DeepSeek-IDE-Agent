@@ -3,11 +3,12 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Virtuoso } from 'react-virtuoso';
 import { useAgentSSE } from '@/hooks/useAgentSSE';
-import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, CheckCircle2, XCircle, Brain, Copy, ClipboardCheck, ChevronDown, Bot, AlertCircle, AlertTriangle } from 'lucide-react';
+import { Send, Loader2, Settings, Box, User, Cpu, Square, Trash2, Brain, Copy, ClipboardCheck, ChevronDown, Bot, AlertCircle } from 'lucide-react';
 import { TodoList } from './TodoList';
 import { SettingsModal } from '@/components/SettingsModal';
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter';
-import { useAgentContext, useTodoContext } from '@/providers/AgentContext';
+import { MessagePartList } from './chat/MessagePartList';
+import { useAgentContext } from '@/providers/AgentContext';
 import type { Message, MessagePart, StreamProgress } from '@/hooks/useAgentSSE';
 import { USER_ID } from '@/config';
 import { electronBridge, type AgentRecoveryInfo } from '@/services/electron-bridge';
@@ -30,22 +31,10 @@ interface ChatMessageItemProps {
 const USER_GESTURE_WINDOW_MS = 150;
 // MAX_FOLLOW_ATTEMPTS：滚动后校验未到位时的自愈重试上限。
 const MAX_FOLLOW_ATTEMPTS = 3;
-
-const toolArgNumberFormatter = new Intl.NumberFormat('zh-CN');
-
-const formatToolArgMeta = (meta: any): string | null => {
-    if (!meta || !meta.redacted) return null;
-    const parts: string[] = [];
-    const totalContentChars = Number(meta.totalContentChars || 0);
-    const redactedStringChars = Number(meta.redactedStringChars || 0);
-    const fileCount = Number(meta.fileCount || 0);
-    if (fileCount > 0) parts.push(`${toolArgNumberFormatter.format(fileCount)} 个文件`);
-    if (totalContentChars > 0) parts.push(`${toolArgNumberFormatter.format(totalContentChars)} 个正文字符`);
-    else if (redactedStringChars > 0) parts.push(`${toolArgNumberFormatter.format(redactedStringChars)} 个长文本字符`);
-    if (Number(meta.truncatedItems || 0) > 0) parts.push(`省略 ${toolArgNumberFormatter.format(Number(meta.truncatedItems))} 项`);
-    if (Number(meta.truncatedKeys || 0) > 0) parts.push(`省略 ${toolArgNumberFormatter.format(Number(meta.truncatedKeys))} 个字段`);
-    return parts.length > 0 ? `已隐藏大文本参数：${parts.join('，')}` : '已隐藏大文本参数';
-};
+// FOLLOW_MIN_INTERVAL_MS：两次自动跟随之间的最小间隔。
+// scrollToIndex 会触发 Virtuoso 重新测量并重排，超长任务里每次流式提交都跟随
+// 会让「测量 → 重排 → 再测量」占满主线程；120ms 的节流对视觉跟随几乎无感。
+const FOLLOW_MIN_INTERVAL_MS = 120;
 
 const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
     message,
@@ -59,6 +48,8 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
     const parts = message.parts && message.parts.length > 0 ? message.parts : [];
     // 流式传输中且当前消息尚未完成 → 文本用纯文本渲染，避免 ReactMarkdown 每 16ms 重新解析整棵 AST
     const isStreaming = isLoading && isLastItem && !message.isFinal;
+    // 当前这一轮是否正在流式输出（用于光标/脉冲等动态指示）
+    const isActiveStream = isLoading && isLastItem;
 
     return (
         <div className={'message-item flex flex-col ' + (message.role === 'user' ? 'items-end' : 'items-start')}>
@@ -81,115 +72,16 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
             </div>
             <div className={'max-w-[100%] w-full rounded-lg p-3 text-[8pt] ' + (message.role === 'user' ? 'bg-white/5 border border-white/10' : 'bg-transparent border-l border-emerald-500/20')}>
                 {parts.length > 0 ? (
-                    parts.map(part => (
-                        <div key={part.id} className='mb-3 last:mb-0'>
-                            {part.type === 'reasoning' && (
-                                <div className='group flex flex-col gap-1.5'>
-                                    <div
-                                        onClick={onToggleThinking}
-                                        className='flex items-center gap-2 text-[9px] text-emerald-500/60 font-medium cursor-pointer hover:bg-emerald-500/10 transition-all uppercase tracking-widest bg-emerald-500/5 px-2 py-0.5 rounded border border-emerald-500/10 w-fit'
-                                    >
-                                        <div className={'w-1 h-1 rounded-full bg-emerald-500/40 ' + (isLoading && isLastItem ? 'animate-pulse' : '')} />
-                                        {isThinkingExpanded ? '收起内核推理' : '展开思维链'}
-                                    </div>
-                                    {isThinkingExpanded && (
-                                        <div className='text-[8pt] text-white/70 font-mono bg-white/[0.01] p-2.5 rounded border border-white/5 italic whitespace-pre-wrap leading-snug shadow-inner overflow-hidden relative'>
-                                            <div className='absolute top-0 left-0 w-0.5 h-full bg-emerald-500/20' />
-                                            {part.content}
-                                            {isLoading && isLastItem && part.content && !message.content && (
-                                                <span className='inline-block w-1.5 h-3 ml-1 bg-emerald-500/40 animate-pulse align-middle' />
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                            {part.type === 'text' && (
-                                message.role === 'user' ? (
-                                    <div className='text-white/85 leading-normal font-sans text-[8pt] whitespace-pre-wrap'>
-                                        {part.content || ''}
-                                    </div>
-                                ) : isStreaming ? (
-                                    /* 流式传输中：纯文本渲染，跳过 ReactMarkdown AST 解析，消除每帧卡顿 */
-                                    <div className='text-white/85 leading-normal font-sans text-[8pt] whitespace-pre-wrap break-words'>
-                                        {part.content || ''}
-                                    </div>
-                                ) : (
-                                    <div className='prose prose-invert prose-emerald prose-sm max-w-none text-white/85 leading-normal font-sans text-[8pt]'>
-                                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponentsWithCode}>
-                                            {part.content || ''}
-                                        </ReactMarkdown>
-                                    </div>
-                                )
-                            )}
-                            {part.type === 'annotation' && part.method === 'tool/call' && (
-                                <div className='my-2 overflow-hidden rounded border border-white/10 bg-white/[0.02]'>
-                                    <div className='flex items-center gap-2 px-3 py-1.5 bg-white/5 border-b border-white/10'>
-                                        <div className='w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse' />
-                                        <span className='text-[8pt] font-bold text-amber-500/80 tracking-tighter'>正在调用: {part.params?.toolName}</span>
-                                    </div>
-                                    <div className='p-2 bg-black/20'>
-                                        {formatToolArgMeta(part.params?.argsMeta) && (
-                                            <div className='mb-2 rounded border border-amber-500/15 bg-amber-500/5 px-2 py-1 text-[7.5pt] font-medium text-amber-200/70'>
-                                                {formatToolArgMeta(part.params?.argsMeta)}
-                                            </div>
-                                        )}
-                                        <pre className='text-[7pt] text-white/40 overflow-x-auto font-mono'>
-                                            {/* 使用预处理后的 JSON 字符串，避免 render 中重复 JSON.stringify */}
-                                            {part.params?._argsJson ?? ''}
-                                        </pre>
-                                    </div>
-                                </div>
-                            )}
-                            {part.type === 'annotation' && (part.method === 'tool/result' || part.method === 'tool/error') && (() => {
-                                const res = part.params?.result;
-                                const isErr = !!part.params?.error || res?.status === 'error';
-                                const toolName = part.params?.toolName;
-                                return (
-                                    <div className={`my-2 overflow-hidden rounded border ${isErr ? 'border-red-500/20 bg-red-500/5' : 'border-white/10 bg-emerald-500/5'}`}>
-                                        <div className={`flex items-center gap-2 px-3 py-1 border-b border-white/5 ${isErr ? 'bg-red-500/10' : 'bg-emerald-500/10'}`}>
-                                            {isErr
-                                                ? <XCircle className='w-3 h-3 text-red-400/70' />
-                                                : <CheckCircle2 className='w-3 h-3 text-emerald-500/60' />}
-                                            <span className={`text-[8pt] font-bold tracking-tighter ${isErr ? 'text-red-400/70' : 'text-emerald-500/60'}`}>
-                                                {isErr ? '执行失败' : '执行成功'}: {toolName}
-                                            </span>
-                                        </div>
-                                    </div>
-                                );
-                            })()}
-                            {part.type === 'error' && (
-                                <div className='my-2 p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[8pt] flex items-center gap-2'>
-                                    <div className='w-1 h-1 rounded-full bg-red-500' />
-                                    {part.content}
-                                </div>
-                            )}
-                            {part.type === 'notice' && (
-                                <div className={`my-2 p-2 rounded border text-[8pt] flex items-start gap-2 ${part.params?.resolved
-                                    ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-200/90'
-                                    : 'bg-amber-500/10 border-amber-500/25 text-amber-200/90'}`}>
-                                    <AlertTriangle className={`w-3 h-3 mt-0.5 shrink-0 ${part.params?.resolved
-                                        ? 'text-emerald-400/80'
-                                        : 'text-amber-400/80'}`} />
-                                    <div className='min-w-0 whitespace-pre-wrap break-words'>
-                                        <div className={`font-bold mb-0.5 ${part.params?.resolved
-                                            ? 'text-emerald-300/90'
-                                            : 'text-amber-300/90'}`}>
-                                            {part.method === 'MODEL_SUBSTITUTION'
-                                                ? (part.params?.resolved ? '模型来源已恢复' : '模型来源异常')
-                                                : '提示'}
-                                        </div>
-                                        <div>{part.content}</div>
-                                        {Array.isArray(part.params?.servedModels) && part.params.servedModels.length > 0 && (
-                                            <div className='mt-1 font-mono text-[7pt] text-amber-200/60 break-all'>
-                                                请求模型：{part.params?.requestedModel || '-'}
-                                                {' → '}实际返回：{part.params.servedModels.join(', ')}
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    ))
+                    <MessagePartList
+                        parts={parts}
+                        role={message.role}
+                        isStreaming={isStreaming}
+                        isActiveStream={isActiveStream}
+                        isThinkingExpanded={isThinkingExpanded}
+                        hasMessageText={!!message.content}
+                        onToggleThinking={onToggleThinking}
+                        markdownComponentsWithCode={markdownComponentsWithCode}
+                    />
                 ) : (
                     message.role === 'user' ? (
                         <div className='text-white/85 leading-normal font-sans text-[8pt] whitespace-pre-wrap'>
@@ -248,9 +140,8 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({
     return true;
 });
 
-export const AgentChat: React.FC = () => {
+const AgentChatInner: React.FC = () => {
     const { messages, input, setInput, handleInputChange, handleSubmit, isLoading, stop, data, streamProgress, clearHistory, resume } = useAgentSSE();
-    useTodoContext();
     const { workspaceRoot, provider, model, settings, setProvider } = useAgentContext();
     const [pendingRecovery, setPendingRecovery] = useState<AgentRecoveryInfo | null>(null);
     const [isRecoveryPromptOpen, setIsRecoveryPromptOpen] = useState(false);
@@ -563,6 +454,12 @@ export const AgentChat: React.FC = () => {
     // 代际标记：使过期的自愈校验 rAF 链失效，避免与新一轮跟随冲突
     const followGenerationRef = useRef<number>(0);
     const lastMessagesSnapshotRef = useRef<Message[]>(messages);
+    // 节流后的跟随排期：避免每个流式 chunk 都触发一次 scrollToIndex
+    const pendingFollowTimerRef = useRef<number | null>(null);
+    const lastFollowAtRef = useRef<number>(0);
+    // 节流后的跟随回调可能晚于最新一次渲染执行，用 ref 读取最新消息数，
+    // 避免排期回调持有过期的 messages.length（滚动到倒数第二条消息）。
+    const messagesLengthRef = useRef<number>(messages.length);
 
     const normalizeExternalHref = useCallback((href?: string) => {
         const raw = String(href || '').trim();
@@ -641,10 +538,11 @@ export const AgentChat: React.FC = () => {
         const gestureTimeAtFollow = lastGestureTimeRef.current;
         // 本次跟随的代际：使此前过期的自愈校验链失效
         const generation = ++followGenerationRef.current;
+        lastFollowAtRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
         userScrolledUpRef.current = false;
 
         virtuoso.scrollToIndex({
-            index: messages.length - 1,
+            index: Math.max(0, messagesLengthRef.current - 1),
             align: 'end',
             behavior: 'auto',
         });
@@ -666,7 +564,36 @@ export const AgentChat: React.FC = () => {
                 }
             });
         });
-    }, [messages.length]);
+        // 使用 messagesLengthRef 读取最新消息数，回调本身保持稳定，
+        // 避免每次新增消息都重建跟随回调并触发依赖它的 effect 重跑。
+    }, []);
+
+    const cancelPendingFollow = useCallback(() => {
+        if (pendingFollowTimerRef.current !== null) {
+            window.clearTimeout(pendingFollowTimerRef.current);
+            pendingFollowTimerRef.current = null;
+        }
+    }, []);
+
+    // 节流排期：高频流式提交期间只在间隔窗口到期后跟随一次，
+    // 而不是每次 messages 引用变化都触发 Virtuoso 重测 + 滚动。
+    const scheduleFollowToBottom = useCallback(() => {
+        if (pendingFollowTimerRef.current !== null) return;
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const wait = Math.max(0, FOLLOW_MIN_INTERVAL_MS - (now - lastFollowAtRef.current));
+        pendingFollowTimerRef.current = window.setTimeout(() => {
+            pendingFollowTimerRef.current = null;
+            if (userScrolledUpRef.current) return;
+            // 第一帧：等浏览器完成当前帧的 Style/Layout
+            requestAnimationFrame(() => {
+                // 第二帧：确保 Paint 也完成，Virtuoso 内部尺寸测量为最新值
+                requestAnimationFrame(() => {
+                    if (userScrolledUpRef.current) return;
+                    followToBottom(0);
+                });
+            });
+        }, wait);
+    }, [followToBottom]);
 
     useEffect(() => {
         if (messages.length === 0) return;
@@ -676,6 +603,7 @@ export const AgentChat: React.FC = () => {
         const prev = lastMessagesSnapshotRef.current;
         if (prev === messages) return;
         lastMessagesSnapshotRef.current = messages;
+        messagesLengthRef.current = messages.length;
 
         // 同步判定（不信任异步 scroll 事件）：若用户当前实际就在底部附近，
         // 即便 userScrolledUpRef 因手势窗口期被误置，也视为未滚离并继续跟随。
@@ -687,28 +615,25 @@ export const AgentChat: React.FC = () => {
                 userScrolledUpRef.current = false;
             }
         }
-        if (userScrolledUpRef.current) return; // 用户主动滚离 → 不跟随
+        if (userScrolledUpRef.current) {
+            // 用户主动滚离 → 取消排期中的跟随
+            cancelPendingFollow();
+            return;
+        }
 
-        let cancelled = false;
-        // 第一帧：等浏览器完成当前帧的 Style/Layout
-        requestAnimationFrame(() => {
-            if (cancelled) return;
-            // 第二帧：确保 Paint 也完成，Virtuoso 内部尺寸测量为最新值
-            requestAnimationFrame(() => {
-                if (cancelled) return;
-                followToBottom(0);
-            });
-        });
+        scheduleFollowToBottom();
+    }, [messages, followToBottom, cancelPendingFollow, scheduleFollowToBottom]);
 
-        return () => { cancelled = true; };
-    }, [messages, followToBottom]);
-
-    // 卸载时清理手势定时器并失效所有未完成的自愈校验链
+    // 卸载时清理手势/跟随定时器并失效所有未完成的自愈校验链
     useEffect(() => {
         return () => {
             if (userGestureTimerRef.current !== null) {
                 window.clearTimeout(userGestureTimerRef.current);
                 userGestureTimerRef.current = null;
+            }
+            if (pendingFollowTimerRef.current !== null) {
+                window.clearTimeout(pendingFollowTimerRef.current);
+                pendingFollowTimerRef.current = null;
             }
             followGenerationRef.current++;
         };
@@ -725,9 +650,10 @@ export const AgentChat: React.FC = () => {
             ? Infinity
             : Date.now() - lastGestureTimeRef.current;
         if (messages.length > 0 && idleMs > 800) {
+            cancelPendingFollow();
             followToBottom(0);
         }
-    }, [isLoading, messages.length, followToBottom]);
+    }, [isLoading, messages.length, followToBottom, cancelPendingFollow]);
 
     useEffect(() => {
         return () => {
@@ -1056,6 +982,11 @@ export const AgentChat: React.FC = () => {
             </div>
         );
     }, [isLoading, currentStage, isThinkingExpanded]);
+
+    // Virtuoso 的 components 对象若每次渲染都新建，会触发其内部列表重渲染；
+    // Scroller / Footer 本身已稳定，这里再把外层对象也固定下来。
+    const virtuosoComponents = useMemo(() => ({ Scroller, Footer }), [Scroller, Footer]);
+
     return (
         <div className='flex flex-col h-full bg-black text-white font-sans'>
              <div className='flex items-center justify-between px-4 pt-px pb-1 border-b border-white/5 bg-black/50 backdrop-blur-md sticky top-0 z-10'>
@@ -1135,7 +1066,7 @@ export const AgentChat: React.FC = () => {
                     ref={virtuosoRef}
                     data={messages}
                     itemContent={itemContent}
-                    components={{ Scroller, Footer }}
+                    components={virtuosoComponents}
                     className='flex-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent'
                 />
             )}
@@ -1363,3 +1294,7 @@ export const AgentChat: React.FC = () => {
         </div>
     );
 };
+
+// 父级（App）因诊断/面板等无关状态变化而重渲染时，聊天区无需跟着重渲染：
+// 超长任务期间诊断结果、终端状态等更新非常频繁，避免把整棵聊天树拖入无谓协调。
+export const AgentChat = React.memo(AgentChatInner);

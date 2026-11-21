@@ -40,6 +40,11 @@ export interface StreamProgress {
 
 const MAX_HISTORY_MESSAGES = 80;
 const MAX_STAGE_ITEMS = 120;
+// 流式 UI 提交节流间隔（毫秒）。
+// 此前每个 rAF（约 16ms / 60fps）都会把整条消息提交给 React；超长任务下单条消息
+// 会累积上万个 part，60fps 的全量协调会直接吃满主线程（表现为对话越久越卡）。
+// 模型 token 的到达速率远低于 20fps，50ms（约 20fps）既看不出停顿，又把渲染开销降到 1/3。
+const STREAM_FLUSH_INTERVAL_MS = 50;
 const INLINE_STRING_LIMIT = 1200;
 const RENDERED_TEXT_LIMIT = 200_000;
 const LIVE_TEXT_PART_LIMIT = 120_000;
@@ -479,6 +484,10 @@ export function useAgentSSE() {
 
         const pendingBufferRef: { current: PendingChunk[] } = { current: [] };
         let rafId: number | null = null;
+        // 与 rafId 配合的节流定时器：保证两次 React 提交之间至少间隔
+        // STREAM_FLUSH_INTERVAL_MS，避免高频 chunk 驱动 60fps 全量重渲染。
+        let flushTimerId: ReturnType<typeof setTimeout> | null = null;
+        let lastFlushAt = 0;
         // 目录树刷新去抖计时器：命令类工具（如下载图片的 run_powershell_command）
         // 会在文件写入工具集之外创建/修改文件，需在工具结果流式到达期间
         // 批量收敛为少量 ui:file-tree:refresh 事件，避免高频触发 listFiles
@@ -500,8 +509,44 @@ export function useAgentSSE() {
         // 标记是否需要在本次 flush 前取消已有 rAF（用于 terminal 事件立即刷新）
         let needsImmediateFlush = false;
 
+        // 相邻同类增量合并：节流/后台（rAF 停摆）期间 pending 缓冲区可能堆积数万个
+        // token 级 chunk。相邻 text/reasoning 直接拼成一个 chunk，progress/todo 只保留
+        // 最后一条，既保持事件顺序，又让缓冲区大小与「类型切换次数」而非 token 数相关。
+        const pushPendingChunk = (chunk: PendingChunk) => {
+            const buffer = pendingBufferRef.current;
+            const last = buffer.length > 0 ? buffer[buffer.length - 1] : null;
+            if (last && last.kind === chunk.kind) {
+                if ((chunk.kind === 'text' && last.kind === 'text') || (chunk.kind === 'reasoning' && last.kind === 'reasoning')) {
+                    if (last.turn === chunk.turn) {
+                        buffer[buffer.length - 1] = { ...last, content: last.content + chunk.content };
+                        return;
+                    }
+                } else if (chunk.kind === 'progress' || chunk.kind === 'todo') {
+                    buffer[buffer.length - 1] = chunk;
+                    return;
+                }
+            }
+            buffer.push(chunk);
+        };
+
+        const cancelScheduledFlush = () => {
+            if (rafId !== null) {
+                cancelAnimationFrame(rafId);
+                rafId = null;
+            }
+            if (flushTimerId !== null) {
+                clearTimeout(flushTimerId);
+                flushTimerId = null;
+            }
+        };
+
         const flushAllPending = () => {
             rafId = null;
+            if (flushTimerId !== null) {
+                clearTimeout(flushTimerId);
+                flushTimerId = null;
+            }
+            lastFlushAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
             const buffer = pendingBufferRef.current;
             if (buffer.length === 0) return;
             pendingBufferRef.current = [];
@@ -665,8 +710,12 @@ export function useAgentSSE() {
                     // done
                     if (isDone) {
                         last.isFinal = true;
-                        db.chatHistory.put({ ...sanitizeMessageForClient(userMsg), workspaceRoot }).catch(console.error);
-                        db.chatHistory.put({ ...sanitizeMessageForClient(last), workspaceRoot }).catch(console.error);
+                        // part 在写入时已逐条 sanitize（sanitizeAnnotationParams / capRenderedText），
+                        // 这里只做浅拷贝落库。历史上这里对整条消息再跑一次
+                        // sanitizeMessageForClient（深拷贝每个 part 的 params），
+                        // 超长任务下会在主线程产生数百毫秒的额外开销。
+                        db.chatHistory.put({ ...userMsg, workspaceRoot }).catch(console.error);
+                        db.chatHistory.put({ ...last, workspaceRoot }).catch(console.error);
                     }
 
                     return trimMessagesForMemory(next);
@@ -700,9 +749,27 @@ export function useAgentSSE() {
             }
         };
 
+        // 窗口最小化/被遮挡时 rAF 不会回调，但 Agent 仍在持续产出 token。
+        // 此时改为直接提交，避免 pending 缓冲区在后台无限增长、回到前台时一次性爆发。
+        const scheduleFlushFrame = () => {
+            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+                flushAllPending();
+                return;
+            }
+            rafId = requestAnimationFrame(flushAllPending);
+        };
+
         const scheduleFlush = () => {
-            if (rafId === null && !needsImmediateFlush) {
-                rafId = requestAnimationFrame(flushAllPending);
+            if (rafId !== null || flushTimerId !== null || needsImmediateFlush) return;
+            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            const elapsed = now - lastFlushAt;
+            if (elapsed >= STREAM_FLUSH_INTERVAL_MS) {
+                scheduleFlushFrame();
+            } else {
+                flushTimerId = setTimeout(() => {
+                    flushTimerId = null;
+                    scheduleFlushFrame();
+                }, STREAM_FLUSH_INTERVAL_MS - elapsed);
             }
         };
 
@@ -712,20 +779,17 @@ export function useAgentSSE() {
             const isTerminal = chunk.type === 'init' || chunk.type === 'error' || chunk.type === 'done';
 
             if (isTerminal) {
-                if (rafId !== null) {
-                    cancelAnimationFrame(rafId);
-                    rafId = null;
-                }
+                cancelScheduledFlush();
                 needsImmediateFlush = true;
             }
 
             // ── 路由到 pending buffer ──
             if (chunk.type === 'stage') {
-                pendingBufferRef.current.push({ kind: 'stage', message: chunk.content });
+                pushPendingChunk({ kind: 'stage', message: chunk.content });
             } else if (chunk.method === 'todo/update' && chunk.params?.todos) {
-                pendingBufferRef.current.push({ kind: 'todo', todos: chunk.params.todos });
+                pushPendingChunk({ kind: 'todo', todos: chunk.params.todos });
             } else if (chunk.type === 'progress') {
-                pendingBufferRef.current.push({
+                pushPendingChunk({
                     kind: 'progress',
                     progress: {
                         receivedChars: Number(chunk.receivedChars) || 0,
@@ -740,11 +804,11 @@ export function useAgentSSE() {
                     },
                 });
             } else if (chunk.type === 'text') {
-                pendingBufferRef.current.push({ kind: 'text', content: chunk.content || '', turn: chunk.turn });
+                pushPendingChunk({ kind: 'text', content: chunk.content || '', turn: chunk.turn });
             } else if (chunk.type === 'reasoning') {
-                pendingBufferRef.current.push({ kind: 'reasoning', content: chunk.content || '', turn: chunk.turn });
+                pushPendingChunk({ kind: 'reasoning', content: chunk.content || '', turn: chunk.turn });
             } else if (chunk.type === 'notice') {
-                pendingBufferRef.current.push({
+                pushPendingChunk({
                     kind: 'notice',
                     content: chunk.content || chunk.message || '',
                     method: chunk.code || chunk.method || 'notice',
@@ -752,7 +816,7 @@ export function useAgentSSE() {
                 });
             } else if (chunk.type === 'annotation') {
                 const sanitized = sanitizeAnnotationParams(chunk.method, chunk.params);
-                pendingBufferRef.current.push({
+                pushPendingChunk({
                     kind: 'annotation',
                     content: chunk.content || chunk.method || '',
                     method: chunk.method,
@@ -773,7 +837,7 @@ export function useAgentSSE() {
                             checker: sc.checker,
                             timestamp: Date.now(),
                         }));
-                        pendingBufferRef.current.push({ kind: 'diagnostics', entries });
+                        pushPendingChunk({ kind: 'diagnostics', entries });
                     }
                 }
                 // 文件写入/编辑工具执行成功后，通知编辑器刷新
@@ -816,19 +880,19 @@ export function useAgentSSE() {
             } else if (chunk.type === 'usage') {
                 const usage = chunk.usage as TokenUsage | null;
                 if (usage && typeof usage === 'object') {
-                    pendingBufferRef.current.push({ kind: 'usage', usage });
+                    pushPendingChunk({ kind: 'usage', usage });
                 }
             } else if (chunk.type === 'init') {
-                pendingBufferRef.current.push({ kind: 'init', traceId: chunk.traceId });
+                pushPendingChunk({ kind: 'init', traceId: chunk.traceId });
             } else if (chunk.type === 'error') {
                 receivedErrorRef.current = true;
-                pendingBufferRef.current.push({ kind: 'error', content: chunk.content || chunk.message || 'An internal error occurred' });
+                pushPendingChunk({ kind: 'error', content: chunk.content || chunk.message || 'An internal error occurred' });
             } else if (chunk.type === 'done') {
                 const doneText = typeof chunk.content === 'string' ? chunk.content.trim() : '';
                 if (doneText && doneText !== 'Processing complete') {
-                    pendingBufferRef.current.push({ kind: 'doneText', content: doneText });
+                    pushPendingChunk({ kind: 'doneText', content: doneText });
                 }
-                pendingBufferRef.current.push({ kind: 'done', usage: chunk.usage || null });
+                pushPendingChunk({ kind: 'done', usage: chunk.usage || null });
                 // 回合结束：无论工具类型，兜底刷新目录树，
                 // 覆盖命令类工具（下载图片等）造成的文件系统变化
                 scheduleTreeRefresh(true);
@@ -888,18 +952,12 @@ export function useAgentSSE() {
             );
             
             // 流结束后刷新 pending
-            if (rafId !== null) {
-                cancelAnimationFrame(rafId);
-                rafId = null;
-            }
+            cancelScheduledFlush();
             flushAllPending();
             return !receivedErrorRef.current && !controller.signal.aborted;
         } catch (e: any) { 
             // 异常时也刷新剩余的 pending
-            if (rafId !== null) {
-                cancelAnimationFrame(rafId);
-                rafId = null;
-            }
+            cancelScheduledFlush();
             flushAllPending();
             // 异常终止同样兜底刷新目录树
             scheduleTreeRefresh(true);
@@ -923,6 +981,7 @@ export function useAgentSSE() {
             }
             return false;
         } finally { 
+            cancelScheduledFlush();
             setIsLoading(false); 
             abortControllerRef.current = null;
             if (treeRefreshTimer !== null) {
