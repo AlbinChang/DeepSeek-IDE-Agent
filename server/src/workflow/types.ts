@@ -14,7 +14,7 @@ export type WorkflowRunStatus =
     | 'cancelled'
     | 'interrupted';
 
-export type WorkflowValidationSeverity = 'error' | 'warning';
+export type WorkflowValidationSeverity = 'error' | 'warning' | 'info';
 
 export interface WorkflowInputDefinition {
     name: string;
@@ -42,12 +42,19 @@ export interface WorkflowValidationIssue {
     path: string;
     message: string;
     severity: WorkflowValidationSeverity;
+    /** 编译检查诊断码（结构校验问题没有 code） */
+    code?: string;
 }
 
 export interface WorkflowValidationResult {
     ok: boolean;
     issues: WorkflowValidationIssue[];
     validator: 'builtin';
+    /** info 级提示（不参与 ok 判定） */
+    infos?: WorkflowValidationIssue[];
+    errorCount?: number;
+    warningCount?: number;
+    infoCount?: number;
 }
 
 export interface WorkflowDetail {

@@ -119,4 +119,95 @@ describe('WorkflowTools', () => {
         await expect(tool('run_workflow').execute({ name: 'demo' }, context(root)))
             .rejects.toThrow('WORKFLOW_QUEUE_FULL');
     });
+
+    it('compiles workflows with semantic diagnostics and strict mode', async () => {
+        await writeFile(
+            path.join(root, '.workflow', 'broken.workflow.yaml'),
+            `document:
+  dsl: 1.0.0
+  name: broken
+  input:
+    schema:
+      properties:
+        requirement: { type: string }
+do:
+  - first:
+      when: "\${ .inputs.requirement == }"
+      set: { a: 1 }
+  - first:
+      set: { a: "\${steps.missing.output}" }
+  - after:
+      call: agent
+      with:
+        prompt: "hi"
+        tools: [run_workflow]
+      then: stop
+`,
+            'utf8',
+        );
+
+        const result: any = await tool('validate_workflow').execute({ name: 'broken' }, context(root));
+        expect(result.validation.ok).toBe(false);
+        expect(result.validation.errorCount).toBeGreaterThan(0);
+        const found = result.validation.issues.map((issue: any) => issue.code);
+        expect(found).toContain('expr_syntax');
+        expect(found).toContain('duplicate_step_name');
+        expect(found).toContain('steps_ref_unknown');
+        expect(result.summary).toContain('❌');
+
+        const filtered: any = await tool('validate_workflow').execute({
+            name: 'broken',
+            codes: ['steps_ref_unknown'],
+        }, context(root));
+        expect(filtered.validation.issues.map((issue: any) => issue.code)).toEqual(['steps_ref_unknown']);
+    });
+
+    it('fails strict compile when only warnings remain', async () => {
+        await writeFile(
+            path.join(root, '.workflow', 'warn.workflow.yaml'),
+            `document:
+  dsl: 1.0.0
+  name: warn
+do:
+  - only:
+      call: agent
+      with:
+        prompt: "hi \${inputs.ghost}"
+      then: stop
+`,
+            'utf8',
+        );
+
+        const loose: any = await tool('validate_workflow').execute({ name: 'warn' }, context(root));
+        expect(loose.validation.ok).toBe(true);
+        expect(loose.validation.warningCount).toBeGreaterThan(0);
+
+        const strict: any = await tool('validate_workflow').execute({ name: 'warn', strict: true }, context(root));
+        expect(strict.validation.ok).toBe(false);
+        expect(strict.summary).toContain('❌');
+    });
+
+    it('links with.tools against registered tool names when provided', async () => {
+        await writeFile(
+            path.join(root, '.workflow', 'tools.workflow.yaml'),
+            `document:
+  dsl: 1.0.0
+  name: tools
+do:
+  - use:
+      call: agent
+      with:
+        prompt: "hi"
+        tools: [read_file, totally_missing_tool]
+`,
+            'utf8',
+        );
+
+        const withRegistry = WorkflowTools.getDefinitions({ knownTools: () => ['read_file'] })
+            .find((entry) => entry.name === 'validate_workflow')!;
+        const result: any = await withRegistry.execute({ name: 'tools' }, context(root));
+        const codes = result.validation.issues.map((issue: any) => issue.code);
+        expect(codes).toContain('tool_unknown');
+        expect(result.validation.ok).toBe(true); // 链接问题按 warning 处理
+    });
 });

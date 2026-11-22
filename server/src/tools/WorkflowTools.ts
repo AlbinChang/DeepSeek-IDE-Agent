@@ -19,7 +19,10 @@ function service(): WorkflowService {
  * 只做参数整理与错误转换，执行逻辑在 WorkflowService/WorkflowEngine。
  */
 export class WorkflowTools {
-    public static getDefinitions(): ToolDefinition[] {
+    public static getDefinitions(options: {
+        /** 提供已注册工具名，validate_workflow 会做工具链接检查 */
+        knownTools?: () => string[];
+    } = {}): ToolDefinition[] {
         return [
             {
                 name: 'list_workflows',
@@ -65,11 +68,19 @@ export class WorkflowTools {
             },
             {
                 name: 'validate_workflow',
-                description: '校验工作流定义；不传 name 则校验全部。',
+                description: '编译检查工作流：结构+表达式+引用+权限+schema；deep 校验资产/子工作流；不传 name 校验全部。',
                 parameters: {
                     type: 'object',
                     properties: {
                         name: { type: 'string', description: '可选：工作流名称或相对路径' },
+                        strict: { type: 'boolean', description: 'true 时 warning 也算不通过' },
+                        deep: { type: 'boolean', description: 'true 时检查资产文件与子工作流是否存在' },
+                        maxIssues: { type: 'integer', minimum: 1, maximum: 500, description: '返回问题条数上限，默认 100' },
+                        codes: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description: '只返回指定诊断码（如 steps_ref_unknown）',
+                        },
                     },
                     additionalProperties: false,
                 },
@@ -78,8 +89,36 @@ export class WorkflowTools {
                     const name = typeof params?.name === 'string' && params.name.trim()
                         ? params.name.trim()
                         : undefined;
-                    const validation = await service().validate(root, name);
-                    return { validation };
+                    const knownTools = options.knownTools?.() || undefined;
+                    const validation = await service().validate(root, name, {
+                        knownTools,
+                        deep: params?.deep === true,
+                        maxIssues: Number.isFinite(Number(params?.maxIssues))
+                            ? Number(params.maxIssues)
+                            : undefined,
+                        codes: Array.isArray(params?.codes)
+                            ? params.codes.map(String).filter(Boolean)
+                            : undefined,
+                    });
+                    const strict = params?.strict === true;
+                    const issues = validation.issues || [];
+                    const infos = validation.infos || [];
+                    const errorCount = issues.filter((issue) => issue.severity === 'error').length;
+                    const warningCount = issues.filter((issue) => issue.severity === 'warning').length;
+                    const infoCount = infos.length;
+                    return {
+                        validation: {
+                            ...validation,
+                            ok: errorCount === 0 && (!strict || warningCount === 0),
+                            strict,
+                            errorCount,
+                            warningCount,
+                            infoCount,
+                        },
+                        summary: errorCount === 0 && (!strict || warningCount === 0)
+                            ? `✅ 编译通过（warning ${warningCount} / info ${infoCount}）`
+                            : `❌ ${errorCount} 个 error${strict ? ` / ${warningCount} 个 warning` : ''}`,
+                    };
                 },
             },
             {

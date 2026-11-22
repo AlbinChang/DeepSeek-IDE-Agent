@@ -1,5 +1,5 @@
 import { config as globalConfig } from '@/config/index.js';
-import { WorkflowRegistry } from '@/workflow/WorkflowRegistry.js';
+import { WorkflowRegistry, type WorkflowRegistryOptions } from '@/workflow/WorkflowRegistry.js';
 import { WorkflowTriggerManager } from '@/workflow/WorkflowTriggerManager.js';
 import {
     NULL_WORKFLOW_EVENT_BUS,
@@ -92,8 +92,12 @@ export class WorkflowService {
         return new WorkflowRegistry(root).get(name);
     }
 
-    public async validate(root: string, name?: string): Promise<WorkflowValidationResult> {
-        return new WorkflowRegistry(root).validate(name);
+    public async validate(
+        root: string,
+        name?: string,
+        options: WorkflowRegistryOptions = {},
+    ): Promise<WorkflowValidationResult> {
+        return new WorkflowRegistry(root, options).validate(name);
     }
 
     public async run(request: WorkflowRunRequest): Promise<WorkflowRunStartResult> {

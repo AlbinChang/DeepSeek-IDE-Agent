@@ -4,6 +4,14 @@ document:
   title: 子工作流示例
   version: 1.0.0
   summary: 接收输入并返回一条 note。
+  input:
+    schema:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: 由父工作流传入的文本
 
 do:
   - makeNote:

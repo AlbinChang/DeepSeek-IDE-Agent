@@ -383,12 +383,60 @@ do:
 |---|---|
 | `list_workflows` | 列出 `.workflow` 工作流 |
 | `get_workflow` | 查看 YAML + 元数据 + 校验 |
-| `validate_workflow` | 校验单个或全部 |
+| `validate_workflow` | 编译检查（结构 + 表达式 + 引用 + 权限 + schema）；`strict`/`deep`/`codes` |
 | `run_workflow` | 入队执行；`wait=true` 等待终态/审批；可选 `concurrencyGroup` 同组串行 |
 | `get_workflow_run` | 查询运行/步骤/用量/审批 |
 | `list_workflow_runs` | 列出运行记录 |
 | `cancel_workflow` | 取消排队/运行/等待审批 |
 | `resume_workflow` | `approve` / `reject` 审批；`interrupted` 可省略 decision；重启后可用 `inputs` 补充原始敏感输入 |
+
+## 5.1 编译检查（`validate_workflow`）
+
+`validate_workflow` 是 workflow 的**编译检查**：结构校验（字段类型）之外，还会解析表达式、解析 `steps.*` / `inputs.*` 引用、按工具策略检查 `with.tools`、校验 `output.schema` 自身合法性，并把结论收敛为 `ok`。
+
+```text
+validate_workflow { name: "feature-delivery", strict: true, deep: true }
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `name` | 省略时校验 `.workflow` 下全部文件 |
+| `strict` | `true` 时 warning 也算不通过（发布门禁用） |
+| `deep` | 额外的链接检查：`.workflow/**` 资产是否存在、子工作流是否存在 |
+| `codes` | 只返回指定诊断码，便于聚焦某类问题 |
+| `maxIssues` | 返回条数上限（默认 100，最大 500） |
+
+返回结构：`{ validation: { ok, issues, infos, errorCount, warningCount, infoCount }, summary }`。`issues` 只含 error/warning，info 单独放在 `infos`，不参与 `ok`。
+
+**诊断码总览**
+
+| 阶段 | 诊断码 | 级别 |
+| --- | --- | --- |
+| 表达式 | `expr_syntax`（`when`/`switch.when`/`for.while`/`${...}` 模板语法错误、未闭合） | error |
+| 引用 | `steps_ref_unknown`（引用不存在的步骤） | error |
+| 引用 | `steps_ref_forward`（前向引用，运行时为 undefined） | warning |
+| 引用 | `inputs_ref_undeclared`（引用未声明输入）、`input_unused`（声明未使用） | warning / info |
+| 命名 | `duplicate_step_name`（`steps.<name>` 全局命名空间冲突） | error |
+| 命名 | `step_name_not_referenceable`（名字无法用 `steps.x` 引用） | warning |
+| 步骤类型 | `call_unknown`、`run_unknown`、`step_no_operation`、`step_event_unsupported` | error |
+| 必填字段 | `with_missing_prompt` / `_tool` / `_command` / `_url` / `_target` / `_workflow` | error |
+| 控制流 | `then_unknown`（`then` 只支持 `exit`）、`step_after_exit` | warning |
+| 控制流 | `sequence_after_exit`（exit 之后的步骤数提示） | info |
+| 工具权限 | `tools_invalid`、tool 步骤调用禁用工具（`tool_forbidden`） | error |
+| 工具权限 | `with.tools` 含被静默移除的禁用工具（`tool_forbidden`）、evaluator 请求写工具（`tool_readonly`）、未注册工具（`tool_unknown`） | warning |
+| 配置 | `wait_invalid`、`retry_invalid`、`for_in_missing` | error |
+| 配置 | `timeout_invalid`、`retry_delay_invalid` | warning |
+| 输出 | `output_schema_invalid`（type/required/properties/items/enum/组合器不合法） | error |
+| 安全 | `secret_literal`（`with.*` 里疑似明文密钥） | warning |
+| 结构 | `nesting_too_deep`（嵌套 > 8 层） | warning |
+| deep | `asset_missing`（引用的 `.workflow/**` 文件不存在）、`subworkflow_unknown` | error |
+
+**使用建议**
+
+1. 写完 YAML 立即 `validate_workflow { name }`，`ok:true` 再运行。
+2. 合并/发布前跑 `strict:true`（warning 也必须清零），涉及脚本/子工作流时加 `deep:true`。
+3. 引用一律走 `${ .steps.<name>.output }` / `${ .inputs.x }`；不要依赖前向引用。
+4. 长流程用 `call: workflow` 拆子流程，避免嵌套超过 8 层。
 
 ## 6. Desktop IPC / 客户端
 

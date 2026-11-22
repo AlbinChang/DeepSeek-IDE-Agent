@@ -134,14 +134,23 @@ function isForbiddenKey(key: string): boolean {
     return FORBIDDEN_KEYS.has(key);
 }
 
+/** 编译检查用的符号值：语法有效但类型未知，所有运算退化为无副作用的值。 */
+const SYMBOLIC = Symbol('workflow-expression-symbolic');
+
+function isSymbolic(value: unknown): boolean {
+    return value === SYMBOLIC;
+}
+
 function readProperty(value: unknown, key: string | number): unknown {
     if (value === null || value === undefined) return undefined;
+    if (isSymbolic(value)) return SYMBOLIC;
     if (typeof key === 'string' && isForbiddenKey(key)) return undefined;
     if (typeof value !== 'object' && typeof value !== 'string') return undefined;
     return (value as any)[key];
 }
 
 function toNumber(value: unknown): number {
+    if (isSymbolic(value)) return 0;
     if (typeof value === 'number') return value;
     if (typeof value === 'boolean') return value ? 1 : 0;
     if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) {
@@ -151,6 +160,7 @@ function toNumber(value: unknown): number {
 }
 
 function comparable(value: unknown): unknown {
+    if (isSymbolic(value)) return 0;
     if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) {
         return Number(value);
     }
@@ -158,6 +168,7 @@ function comparable(value: unknown): unknown {
 }
 
 function truthy(value: unknown): boolean {
+    if (isSymbolic(value)) return true;
     return Boolean(value);
 }
 
@@ -178,6 +189,7 @@ function assertResultSize(value: unknown): void {
 }
 
 export function stringifyValue(value: unknown): string {
+    if (isSymbolic(value)) return '';
     if (value === null || value === undefined) return '';
     if (typeof value === 'string') return value;
     if (typeof value === 'number' || typeof value === 'boolean') return String(value);
@@ -438,6 +450,7 @@ class ExpressionParser {
             case 'default':
                 return input === undefined || input === null ? args[0] : input;
             case 'json':
+            case 'string':
                 return stringifyValue(input);
             case 'join':
                 return Array.isArray(input)
@@ -448,13 +461,13 @@ class ExpressionParser {
             case 'lower':
                 return stringifyValue(input).toLowerCase();
             case 'length':
+                if (isSymbolic(input)) return 0;
                 if (Array.isArray(input) || typeof input === 'string') return input.length;
                 if (input && typeof input === 'object') return Object.keys(input).length;
                 return 0;
             case 'keys':
+                if (isSymbolic(input)) return [];
                 return input && typeof input === 'object' ? Object.keys(input) : [];
-            case 'string':
-                return stringifyValue(input);
             case 'number':
                 return toNumber(input);
             case 'boolean':
@@ -473,6 +486,28 @@ export function evaluateExpression(expression: string, ctx: WorkflowExpressionCo
     }
     const tokens = tokenize(source);
     return new ExpressionParser(tokens, ctx).parse();
+}
+
+/**
+ * 只做语法检查（不求值）：用于 workflow 编译检查。
+ * 语法/过滤器名/结构错误会抛出 WorkflowExpressionError；类型问题不会。
+ */
+export function checkExpressionSyntax(expression: string): void {
+    const source = String(expression ?? '').trim();
+    if (!source) throw new WorkflowExpressionError('表达式为空');
+    if (source.length > MAX_EXPRESSION_LENGTH) {
+        throw new WorkflowExpressionError(`表达式超过 ${MAX_EXPRESSION_LENGTH} 字符上限`);
+    }
+    const ctx = {
+        inputs: SYMBOLIC,
+        env: SYMBOLIC,
+        workspace: SYMBOLIC,
+        run: SYMBOLIC,
+        steps: SYMBOLIC,
+        context: SYMBOLIC,
+        vars: {},
+    } as unknown as WorkflowExpressionContext;
+    new ExpressionParser(tokenize(source), ctx).parse();
 }
 
 /**

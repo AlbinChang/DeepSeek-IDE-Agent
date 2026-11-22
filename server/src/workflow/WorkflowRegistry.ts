@@ -5,6 +5,7 @@ import yaml from 'js-yaml';
 
 import { PathUtils } from '@/utils/PathUtils.js';
 import { buildWorkflowGraph } from '@/workflow/WorkflowGraph.js';
+import { lintWorkflowDocument } from '@/workflow/workflowLint.js';
 import { parseWorkflowTriggers } from '@/workflow/WorkflowTriggers.js';
 import type {
     WorkflowDefinition,
@@ -44,16 +45,34 @@ interface ParsedDocumentResult {
     summary: WorkflowSummary;
     issues: WorkflowValidationIssue[];
     steps?: unknown[];
+    /** 解析后的原始文档（编译检查用）；YAML 解析失败时为空 */
+    data?: Record<string, any>;
+}
+
+export interface WorkflowRegistryOptions {
+    /** 已知工具名，用于 validate_workflow 的 with.tools 链接检查 */
+    knownTools?: Iterable<string>;
+    /** 已知工作流名/相对路径，deep 模式下做子工作流链接检查 */
+    knownWorkflows?: Iterable<string>;
+    /** deep 模式下校验 .workflow 资产是否存在 */
+    deep?: boolean;
+    maxIssues?: number;
+    codes?: Iterable<string>;
 }
 
 /**
  * 只读的 `.workflow` 目录注册表。
  *
- * 当前使用内置轻量校验（YAML + document/do 结构），不引入执行期依赖；
- * 后续可替换为 `@serverlessworkflow/sdk` 校验，保持相同返回结构即可。
+ * 校验分两层：
+ * - 结构校验（YAML + document/do 字段类型）；
+ * - 编译检查（{@link lintWorkflowDocument}：表达式/引用/权限/可达性/schema）。
+ * 两者合并到 `validation.issues`，`ok` 只由 error 决定。
  */
 export class WorkflowRegistry {
-    constructor(private readonly root: string) {}
+    constructor(
+        private readonly root: string,
+        private readonly options: WorkflowRegistryOptions = {},
+    ) {}
 
     public get directory(): string {
         return path.join(this.root, WORKFLOW_DIRECTORY);
@@ -91,16 +110,70 @@ export class WorkflowRegistry {
         const fallbackName = path.basename(filePath, path.extname(filePath));
         const raw = await this.readWorkflowFile(filePath);
         const parsed = this.parseDocument(raw, fallbackName);
-        const issues = parsed.issues;
+        const { issues, infos } = await this.collectIssues(parsed, relativePath, false);
         return {
             summary: { ...parsed.summary, path: relativePath },
             yaml: raw,
-            validation: {
-                ok: issues.every((issue) => issue.severity !== 'error'),
-                issues,
-                validator: 'builtin',
-            },
+            validation: this.buildValidation(issues, infos),
             ...(parsed.steps ? { graph: buildWorkflowGraph(parsed.steps) } : {}),
+        };
+    }
+
+    /** 结构问题 + 编译检查合并；bulk 模式给所有 path 加上文件前缀。 */
+    private async collectIssues(
+        parsed: ParsedDocumentResult,
+        relativePath: string,
+        prefix: boolean,
+    ): Promise<{ issues: WorkflowValidationIssue[]; infos: WorkflowValidationIssue[] }> {
+        const prefixPath = (issuePath: string) => (prefix ? `${relativePath}${issuePath}` : issuePath);
+        const issues = parsed.issues.map((issue) => ({ ...issue, path: prefixPath(issue.path) }));
+        const infos: WorkflowValidationIssue[] = [];
+        if (!parsed.data) return { issues, infos };
+        const lint = await lintWorkflowDocument(parsed.data, {
+            knownTools: this.options.knownTools,
+            knownWorkflows: this.options.knownWorkflows,
+            deep: this.options.deep,
+            maxIssues: this.options.maxIssues,
+            codes: this.options.codes,
+            subworkflowExists: this.options.deep
+                ? async (target) => Boolean(await this.resolveFilePath(target))
+                : undefined,
+            fileExists: this.options.deep
+                ? async (relative) => {
+                    try {
+                        await fs.access(path.resolve(this.root, relative));
+                        return true;
+                    } catch {
+                        return false;
+                    }
+                }
+                : undefined,
+        });
+        const toIssue = (diagnostic: { code: string; path: string; message: string; hint?: string; severity: 'error' | 'warning' | 'info' }) => ({
+            path: prefixPath(diagnostic.path),
+            message: `[${diagnostic.code}] ${diagnostic.message}${diagnostic.hint ? `（${diagnostic.hint}）` : ''}`,
+            severity: diagnostic.severity,
+            code: diagnostic.code,
+        });
+        issues.push(...lint.diagnostics.map(toIssue));
+        infos.push(...lint.infos.map(toIssue));
+        return { issues, infos };
+    }
+
+    private buildValidation(
+        issues: WorkflowValidationIssue[],
+        infos: WorkflowValidationIssue[] = [],
+    ): WorkflowValidationResult {
+        const errorCount = issues.filter((issue) => issue.severity === 'error').length;
+        const warningCount = issues.filter((issue) => issue.severity === 'warning').length;
+        return {
+            ok: errorCount === 0,
+            issues,
+            validator: 'builtin',
+            ...(infos.length ? { infos } : {}),
+            errorCount,
+            warningCount,
+            infoCount: infos.length,
         };
     }
 
@@ -154,16 +227,16 @@ export class WorkflowRegistry {
 
         const files = await this.scanFiles(this.directory, 0);
         const issues: WorkflowValidationIssue[] = [];
+        const infos: WorkflowValidationIssue[] = [];
         for (const file of files) {
             const relativePath = PathUtils.getRelativePath(file, this.root);
             const fallbackName = path.basename(file, path.extname(file));
             try {
                 const raw = await this.readWorkflowFile(file);
                 const parsed = this.parseDocument(raw, fallbackName);
-                issues.push(...parsed.issues.map((issue) => ({
-                    ...issue,
-                    path: `${relativePath}${issue.path}`,
-                })));
+                const collected = await this.collectIssues(parsed, relativePath, true);
+                issues.push(...collected.issues);
+                infos.push(...collected.infos);
             } catch (error: any) {
                 issues.push({
                     path: relativePath,
@@ -173,11 +246,7 @@ export class WorkflowRegistry {
             }
         }
 
-        return {
-            ok: issues.every((issue) => issue.severity !== 'error'),
-            issues,
-            validator: 'builtin',
-        };
+        return this.buildValidation(issues, infos);
     }
 
     private async scanFiles(directory: string, depth: number): Promise<string[]> {
@@ -341,6 +410,7 @@ export class WorkflowRegistry {
                 stepCount: Array.isArray(steps) ? steps.length : 0,
             },
             issues,
+            data: data as Record<string, any>,
             ...(Array.isArray(steps) ? { steps } : {}),
         };
     }

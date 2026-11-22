@@ -10,40 +10,16 @@ import { WorkflowBudgetExceededError, WorkflowError } from '@/workflow/errors.js
 import { executeWorkflowHttp } from '@/workflow/httpStep.js';
 import { parseDurationMs } from '@/workflow/expressions.js';
 import { validateJsonSchema } from '@/workflow/schema.js';
+import {
+    FORBIDDEN_WORKFLOW_TOOLS,
+    resolveAgentTools,
+    resolveEvaluatorTools,
+} from '@/workflow/workflowToolPolicy.js';
 import type {
     WorkflowApprovalState,
     WorkflowUsage,
 } from '@/workflow/types.js';
 import type { TokenUsage } from '@/utils/TokenUsage.js';
-
-const READONLY_AGENT_TOOLS = [
-    'read_skill',
-    'read_file',
-    'read_file_by_byte',
-    'list_files',
-    'calculate',
-];
-
-const READONLY_EVALUATOR_TOOLS = [
-    'read_skill',
-    'read_file',
-    'read_file_by_byte',
-    'list_files',
-];
-
-/** 禁止在 workflow 内部递归/管理的工具 */
-const FORBIDDEN_WORKFLOW_TOOLS = new Set([
-    'list_workflows',
-    'get_workflow',
-    'validate_workflow',
-    'run_workflow',
-    'get_workflow_run',
-    'cancel_workflow',
-    'resume_workflow',
-]);
-
-/** v1 禁止 workflow 内部写全局 TODO SSOT */
-const FORBIDDEN_TODO_WRITE_TOOLS = new Set(['append_todo', 'update_todo', 'delete_todo']);
 
 const WORKFLOW_STEP_CONTRACT = [
     '',
@@ -225,24 +201,6 @@ function readAcceptedExitCodes(
         throw new WorkflowError('acceptedExitCodes 只能包含非负整数', 'validation', stepPath);
     }
     return raw as number[];
-}
-
-function resolveAgentTools(requested?: string[]): ReadonlySet<string> {
-    const tools = new Set(requested && requested.length > 0 ? requested : READONLY_AGENT_TOOLS);
-    for (const name of FORBIDDEN_WORKFLOW_TOOLS) tools.delete(name);
-    for (const name of FORBIDDEN_TODO_WRITE_TOOLS) tools.delete(name);
-    return tools;
-}
-
-function resolveEvaluatorTools(requested?: string[]): ReadonlySet<string> {
-    const tools = new Set(requested && requested.length > 0 ? requested : READONLY_EVALUATOR_TOOLS);
-    for (const name of FORBIDDEN_WORKFLOW_TOOLS) tools.delete(name);
-    for (const name of FORBIDDEN_TODO_WRITE_TOOLS) tools.delete(name);
-    // evaluator 默认只读；即使显式传入写工具也拒绝
-    for (const name of ['file_write', 'delete_path', 'file_replace', 'file_insert', 'file_replace_all', 'run_powershell_command', 'run_cmd_command']) {
-        tools.delete(name);
-    }
-    return tools;
 }
 
 function extractOutputSchema(definition: Record<string, any>): any | undefined {

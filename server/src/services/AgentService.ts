@@ -691,7 +691,9 @@ export class AgentService extends EventEmitter {
 
         console.log('[AgentService] Registering WorkflowTools (declarative .workflow)...');
         if (globalConfig.workflow.enabled) {
-            for (const definition of WorkflowTools.getDefinitions()) {
+            for (const definition of WorkflowTools.getDefinitions({
+                knownTools: () => this.toolManager.getAllTools().map((tool) => tool.name),
+            })) {
                 this.toolManager.registerTool(definition);
             }
         } else {

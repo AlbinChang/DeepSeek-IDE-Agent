@@ -233,6 +233,69 @@ do:
         expect(result.issues.every((issue) => !issue.path.startsWith('.workflow/good.yaml'))).toBe(true);
     });
 
+    it('deep-compiles subworkflows and .workflow assets', async () => {
+        await writeFile(path.join(root, '.workflow', 'child.yaml'), `document:
+  dsl: 1.0.0
+  name: child
+  input:
+    schema:
+      properties:
+        text: { type: string }
+do:
+  - note:
+      set:
+        note: "\${ .inputs.text }"
+`, 'utf8');
+        await writeFile(path.join(root, '.workflow', 'parent.yaml'), `document:
+  dsl: 1.0.0
+  name: parent
+do:
+  - childStep:
+      call: workflow
+      with:
+        name: child
+  - run:
+      run:
+        shell:
+          command: pwsh -File .workflow/tools/check.ps1
+`, 'utf8');
+
+        const missing = await new WorkflowRegistry(root, { deep: true }).validate('parent');
+        expect(missing.ok).toBe(false);
+        expect(missing.issues.map((issue) => issue.code)).toEqual(['asset_missing']);
+        expect(missing.issues[0].path).toContain('/do/1/run');
+
+        await mkdir(path.join(root, '.workflow', 'tools'), { recursive: true });
+        await writeFile(path.join(root, '.workflow', 'tools', 'check.ps1'), '# ok', 'utf8');
+
+        const settled = await new WorkflowRegistry(root, { deep: true }).validate('parent');
+        expect(settled.ok).toBe(true);
+        expect(settled.issues).toEqual([]);
+    });
+
+    it('links with.tools against registered tool names', async () => {
+        await writeFile(path.join(root, '.workflow', 'tools-check.yaml'), `document:
+  dsl: 1.0.0
+  name: tools-check
+do:
+  - agent:
+      call: agent
+      with:
+        prompt: hi
+        tools: [read_file, typo_tool]
+  - tool:
+      call: tool
+      with:
+        tool: also_missing
+`, 'utf8');
+
+        const registry = new WorkflowRegistry(root, { knownTools: ['read_file'] });
+        const result = await registry.validate('tools-check');
+        const codes = result.issues.map((issue) => issue.code);
+        expect(codes.filter((code) => code === 'tool_unknown')).toHaveLength(2);
+        expect(result.ok).toBe(true); // 链接问题按 warning 处理
+    });
+
     it('validates the bundled *.workflow.yaml examples', async () => {
         const registry = new WorkflowRegistry(PROJECT_ROOT);
         const workflows = await registry.list();
