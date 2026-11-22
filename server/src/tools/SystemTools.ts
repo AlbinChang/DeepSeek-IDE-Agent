@@ -24,6 +24,34 @@ export function terminatePosixCommandGroup(child: Pick<ChildProcess, 'pid' | 'ki
     child.kill('SIGKILL');
 }
 
+/**
+ * 失败时给出可执行的下一步建议。
+ *
+ * 只覆盖日志里高频出现的四类失败（内联脚本被 shell 破坏、路径不存在、
+ * 外部接口不可达、已有部分输出），最多两条，避免污染 stderr。
+ */
+export function buildFailureHints(command: string, stdout: string, stderr: string): string {
+    const hints: string[] = [];
+    const inlinePython = /\bpython(?:3|\.exe)?\s+-c\b/i.test(command);
+    const syntaxLike = /SyntaxError|IndentationError|invalid syntax|unexpected token|Unexpected token|Missing '\(|Expressions are only allowed/i.test(stderr);
+    if (inlinePython && syntaxLike) {
+        hints.push('内联 python -c 在 PowerShell 下易被引号/花括号解析破坏：改用 file_write 落盘 .py 再执行。');
+    } else if (syntaxLike) {
+        hints.push('PowerShell 把 { } 当作脚本块：把 Python/JS 代码落盘成文件后执行，或改用单引号 here-string。');
+    }
+    if (/Cannot find path|ItemNotFound|No such file|cannot access|does not exist/i.test(stderr)) {
+        hints.push('路径不存在：先用 Test-Path 守卫或 -ErrorAction SilentlyContinue，避免整条命令以 exit 1 结束。');
+    }
+    if (/Max retries exceeded|HTTPSConnectionPool|Connection(?:Error|Refused|Reset)|ConnectTimeout|timed out/i.test(stderr)) {
+        hints.push('外部接口不可达或限流：加重试/退避并复用本地缓存，避免整批重跑。');
+    }
+    if (!hints.length) return '';
+    if (stdout.trim()) {
+        hints.push('已产生部分输出：先检查 stdout 再决定是否整条重跑。');
+    }
+    return `\n[提示] ${hints.slice(0, 2).join(' ')}`;
+}
+
 export class SystemTools {
     /** 命令输出持久化目录（相对于工作区根目录） */
     private static readonly COMMAND_OUTPUT_DIR = '.command';
@@ -519,7 +547,8 @@ export class SystemTools {
                 outputFilePath: string | null
             ) => {
                 const stdoutFinal = isTruncated ? '[截断，仅保留尾部]\n' + stdout : stdout;
-                const resultStderr = stderr + extraStderr;
+                const hint = status === 'error' ? buildFailureHints(command, stdout, stderr + extraStderr) : '';
+                const resultStderr = stderr + extraStderr + hint;
 
                 // 仅当输出被截断或熔断时才追加简短提示，避免每次命令执行都浪费 ~150 字符
                 // 完整输出始终持久化到 .command/output.txt（已在系统提示词中说明）

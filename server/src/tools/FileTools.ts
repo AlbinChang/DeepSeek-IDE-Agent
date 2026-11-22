@@ -12,6 +12,10 @@ import { assertAgentStatePathWritable } from '@/utils/AgentSystemPaths.js';
 export class FileTools {
     private static readonly LIST_FILES_MAX_DEPTH = 10;
     private static readonly LIST_FILES_MAX_ITEMS = 1200;
+    /** 相同参数重复读取的去重窗口（同会话内），避免同一份正文反复占用上下文 */
+    private static readonly REPEAT_READ_TTL_MS = 30 * 60_000;
+    private static readonly REPEAT_READ_MAX_ENTRIES = 256;
+    private static readonly recentReads = new Map<string, { hash: string; count: number; at: number }>();
     private static readonly AGENT_SYSTEM_DIR_NAMES = new Set([
         '.ide-agent',
         '.llm',
@@ -251,11 +255,27 @@ export class FileTools {
         return treeLines.length > 0 ? treeLines.join('\n') : " (Empty or access denied)";
     }
 
+    /** 记录/更新重复读取签名（超过上限时清理最旧条目）。 */
+    private static rememberRead(signature: string, hash: string, count: number, at: number): void {
+        if (FileTools.recentReads.size >= FileTools.REPEAT_READ_MAX_ENTRIES && !FileTools.recentReads.has(signature)) {
+            const oldest = Array.from(FileTools.recentReads.entries())
+                .sort((a, b) => a[1].at - b[1].at)[0];
+            if (oldest) FileTools.recentReads.delete(oldest[0]);
+        }
+        FileTools.recentReads.set(signature, { hash, count, at });
+    }
+
     /**
      * Agent 受控文件读取 (按行读取，单次上限 1000 行)
      * 相关限制统一由 config.readFile 控制，避免工具描述与实际行为漂移。
      */
-    static async readFile(workspaceRoot: string, unsafePath: string, startLine: number = 1, lineCount?: number) {
+    static async readFile(
+        workspaceRoot: string,
+        unsafePath: string,
+        startLine: number = 1,
+        lineCount?: number,
+        force: boolean = false,
+    ) {
         let fullPath: string;
         try {
             fullPath = PathUtils.resolveReadPath(unsafePath, workspaceRoot);
@@ -338,14 +358,32 @@ export class FileTools {
                 truncated = true;
             }
 
-            return {
-                content,
-                encoding: fileEncoding,
+            const range = {
                 startLine: startIdx + 1,
                 endLine: startIdx + selectedLines.length,
                 totalLines,
                 truncated,
-                hasMore: (startIdx + selectedLines.length) < totalLines
+                hasMore: (startIdx + selectedLines.length) < totalLines,
+            };
+            const signature = `${fullPath}\u0000${startLine}\u0000${lineCount ?? 'all'}`;
+            const digest = crypto.createHash('sha256').update(content).digest('hex').slice(0, 12);
+            const previous = FileTools.recentReads.get(signature);
+            const now = Date.now();
+            if (!force && previous && previous.hash === digest && now - previous.at < FileTools.REPEAT_READ_TTL_MS) {
+                FileTools.rememberRead(signature, digest, previous.count + 1, now);
+                return {
+                    content: `[重复读取已省略] 本会话第 ${previous.count + 1} 次以相同参数读取同一范围，内容未变化（sha256:${digest}，${range.startLine}-${range.endLine}/${range.totalLines} 行）。`
+                        + `\n需要正文时再调用一次并传 force:true，或换用不同的 startLine/lineCount 只取需要的片段。`,
+                    deduplicated: true,
+                    encoding: fileEncoding,
+                    ...range,
+                };
+            }
+            FileTools.rememberRead(signature, digest, 1, now);
+            return {
+                content,
+                encoding: fileEncoding,
+                ...range,
             };
         } catch (err: any) {
             if (err.code === 'ENOENT') {
@@ -763,7 +801,7 @@ export class FileTools {
                     status: 'error',
                     path: unsafePath,
                     error: 'OLD_TEXT_NOT_FOUND',
-                    message: `未在文件中找到 oldText。请使用 read_file 确认文件当前内容，确保 oldText 与原文完全一致（含空白、缩进、换行）。`
+                    message: `未在文件中找到 oldText。${buildNearestMatchHint(normContent, normOldText)}`
                 };
             }
 
@@ -1051,4 +1089,42 @@ export class FileTools {
     }
 
     static async searchFiles(workspaceRoot: string, query: string) { return []; }
+}
+
+/**
+ * `file_replace` 未命中时给出最相近的行，减少「重新读全文再猜一遍」的往返。
+ *
+ * 用 oldText 首行的高频词做行级打分，只扫描前 20000 行、最多返回 3 行提示。
+ * 纯启发式：只用于提示，不改变替换语义。
+ */
+export function buildNearestMatchHint(normContent: string, normOldText: string): string {
+    const fallback = '请使用 read_file 确认文件当前内容，确保 oldText 与原文完全一致（含空白、缩进、换行）。';
+    const firstLine = normOldText.split('\n').find((line) => line.trim()) || '';
+    const tokens = Array.from(new Set(
+        firstLine.toLowerCase()
+            .split(/[^a-z0-9_$\u4e00-\u9fff]+/i)
+            .filter((token) => token.length >= 3),
+    )).slice(0, 8);
+    if (!tokens.length) return fallback;
+
+    const lines = normContent.split('\n');
+    const limit = Math.min(lines.length, 20000);
+    const scored: { line: number; score: number; text: string }[] = [];
+    for (let index = 0; index < limit; index += 1) {
+        const text = lines[index];
+        if (!text || text.length > 4000) continue;
+        const lower = text.toLowerCase();
+        let score = 0;
+        for (const token of tokens) {
+            if (lower.includes(token)) score += 1;
+        }
+        if (score > 0) scored.push({ line: index + 1, score, text: text.trim() });
+    }
+    if (!scored.length) return fallback;
+    scored.sort((left, right) => right.score - left.score || left.line - right.line);
+    const best = scored.slice(0, 3)
+        .filter((entry) => entry.text)
+        .map((entry) => `${entry.line}: ${entry.text.length > 120 ? `${entry.text.slice(0, 120)}…` : entry.text}`);
+    if (!best.length) return fallback;
+    return `最相近的行：${best.join(' | ')}。可用 read_file 的 startLine/lineCount 精确查看后再重试。`;
 }

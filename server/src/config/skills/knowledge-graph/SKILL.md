@@ -70,7 +70,7 @@ kg_identity(key_hash PK, node_id, keys_json)：identity 组合键的 md5 索引
 - `json` 类型不可索引；`indexed:true` 仅支持 string/number/boolean/date。
 - 变更已有属性类型需 `confirm:true`；省略 `indexed/required/enum` 时保留原值。
 - `kg_find` 的 `filter` 里写了未声明属性不会报错，结果会带 `undeclaredKeys` 并提示不走索引。
-- `kg_admin validate` 直接给结论：`✅ 合规` / `❌ N 项违规`（`severity:error` 必须为 0，`info` 仅参考）。
+- `kg_admin validate` 直接给结论：`✅ 合规` / `❌ N 项违规`（`severity:error` 必须为 0，`info` 仅参考）；默认只列非 0 项，`verbose:true` 看全表。
 
 ## 2.2 语义唯一性与 RDF 对齐（强约束）
 
@@ -81,11 +81,13 @@ kg_identity(key_hash PK, node_id, keys_json)：identity 组合键的 md5 索引
 | 属性只允许某些类型 | `kg_attr_define {domain:[...]}` | `kg_upsert` 拒绝；`kg_lint` 报 `attr_domain_violation` |
 | 值全局唯一（owl:InverseFunctionalProperty） | `kg_attr_define {unique:true}` | `kg_upsert` 冲突拒绝；`kg_lint` 报 `attr_unique_duplicate` |
 | 实体自然键（同一性） | `kg_attr_define {identity:true}`（可多个组合） | `kg_identity` 索引 + `kg_lint`：`identity_duplicate` / `identity_incomplete` / `identity_index_drift` |
+| 唯一性只作用于某类（rdfs:domain 收敛） | `kg_attr_define {unique/identity, domain:["company"]}` | 只有 `domain` 内类型（含子类）参与唯一/身份键判定与 lint 统计；不声明 `domain` 表示全局唯一 |
 | 对称关系 | `kg_vocab {symmetric:true}` | `kg_lint`：`symmetric_missing_inverse` |
 | 传递关系 | `kg_vocab {transitive:true}` | `kg_lint {deep:true}`：`transitive_missing_shortcut` |
 | 重复实体归一（owl:sameAs） | `kg_merge {source, target, confirm:true}` | 合并后 `kg_lint` 复检 |
 
 - **先声明再写入**：声明后 `kg_upsert` 才强校验；`strictSchema:true` 可拒绝未声明的节点/关系类型。
+- **多类型图必须声明 domain**：`code` 这类只属于某类节点的自然键，声明 `domain` 后身份键/唯一性只在域内生效，不会把其他类型的同值属性误报为冲突或缺键。
 - **唯一性冲突不可绕过**：写入被拒时先用 `kg_merge` 归一重复实体，或修正值；不要指望 `kg_query` 改数据（只读）。
 - **词表演进是受控变更**：收紧 `domain/range` 后旧数据不会自动改写，`kg_lint` 会立刻报违规，修完才算发布。
 - **发布门禁**：`kg_lint {strict:true}` 返回 `ok:true` 才算语义一致；仅 `kg_admin validate` 通过不代表语义合规。

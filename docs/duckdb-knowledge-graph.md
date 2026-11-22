@@ -235,8 +235,15 @@ kg_query { sql: "SELECT p.val_text AS risk, count(*) c
 1. **声明优于隐含**：词表/属性未声明时写入仍可用（兼容探索期），但只有声明后才会获得强校验；`strictSchema:true` 可强制拒绝未声明类型。
 2. **唯一性只能靠声明**：RDF 本身没有全局唯一约束，`unique`/`identity` 就是本实现提供的 `owl:InverseFunctionalProperty` 能力；声明即生效，写入冲突必须先用 `kg_merge` 归一。
 3. **身份键是实体同一性的唯一判据**：`identity` 属性组合哈希存于 `kg_identity`，写入即校验；`kg_lint` 会对历史数据报 `identity_duplicate` / `identity_incomplete` / `identity_index_drift`。
-4. **词表演进会立刻暴露历史违规**：收紧 `domain/range` 后，旧数据不会自动改写，而是由 `kg_lint` 报 `edge_domain_violation` / `edge_range_violation`，必须先修复再发布。
-5. **删除词表不删数据**：`kg_vocab delete` 只移除约束声明，数据保留；重新声明即可恢复校验。
+4. **唯一性与身份键按 `domain` 收敛（关键）**：`unique` / `identity` 只在属性 `domain` 声明的类型（含子类）内生效与统计。多类型图（`company` / `industry` / `person`）里 `code` 通常只属于 `company`，此时：
+   - `kg_identity` 只为 `domain` 内节点建键，`person` 带同名属性不参与身份判定；
+   - `kg_lint` 的 `identity_incomplete` 只统计 `domain` 内缺键的节点（提示文案标注统计范围）；
+   - `attr_unique_duplicate` / `identity_duplicate` 不会把其他类型的同值误报为冲突；
+   - 未声明 `domain` 时保持「全局唯一」的旧语义，需要跨类型唯一就别声明 `domain`。
+   多个 `identity` 属性都声明 `domain` 时取交集，取交集为空表示没有节点需要身份键。
+5. **词表演进会立刻暴露历史违规**：收紧 `domain/range` 后，旧数据不会自动改写，而是由 `kg_lint` 报 `edge_domain_violation` / `edge_range_violation`，必须先修复再发布。
+6. **删除词表不删数据**：`kg_vocab delete` 只移除约束声明，数据保留；重新声明即可恢复校验。
+7. **存量数据后补身份键**：对已有数据 `kg_attr_define(identity:true)` 会自动重建 `kg_identity`；若历史上已存在重复身份值，索引保留第一条，由 `kg_lint(identity_duplicate)` 报出并用 `kg_merge` 归一。
 
 
 ## 4. 工具契约
@@ -335,6 +342,7 @@ kg_find        { scope:"nodes", types:["company"],
 - `kg_find`：`filter` 支持 `eq/ne/gt/gte/lt/lte/contains/starts_with/exists/in`；命中已索引属性时使用属性索引（返回 `usedIndex` 标识）。
 - `kg_find` 遇到未声明属性会照常按 props 过滤，但返回 `undeclaredKeys` 并在结果头部告警——这是「该属性没有索引」的提示，不是错误。
 - `kg_admin validate` 返回明确结论：`✅ 合规` 或 `❌ N 项违规`，并附 `severity`（`error` 必零 / `info` 仅供参考，如自环、孤立节点、未声明属性）。`error` 类含孤儿边、空 ID、必填缺失、类型/枚举越界、索引漂移、孤儿索引行。
+- `kg_admin validate` 默认**紧凑输出**：只列非 0 的 `error`/`info` 项 + 一行检查项清单（15 个表全 0 时不再逐行刷屏）；需要逐表明细传 `verbose:true`。
 
 ### 4.6 词表与语义编译
 

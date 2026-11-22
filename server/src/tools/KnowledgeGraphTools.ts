@@ -121,6 +121,7 @@ export class KnowledgeGraphTools {
                             enum: ['status', 'schema', 'optimize', 'validate', 'reindex'],
                             description: '默认 status',
                         },
+                        verbose: { type: 'boolean', description: 'validate 时展示全部检查项（默认只展示非 0 项）' },
                     },
                     required: ['action'],
                 },

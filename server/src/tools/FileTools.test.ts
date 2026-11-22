@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { config as globalConfig } from '@/config/index.js';
-import { FileTools } from '@/tools/FileTools.js';
+import { FileTools, buildNearestMatchHint } from '@/tools/FileTools.js';
 
 describe('FileTools.readFile', () => {
     const tempDirs: string[] = [];
@@ -74,6 +74,38 @@ describe('FileTools.readFile', () => {
         expect(result.startLine).toBe(200);
         expect(result.endLine).toBe(219);
         expect(result.content).toContain('200: line-200-');
+    });
+
+    it('collapses an identical repeated read into a digest unless force is set', async () => {
+        const workspaceRoot = await createWorkspace();
+        await fs.writeFile(path.join(workspaceRoot, 'repeat.txt'), 'alpha\nbeta\ngamma', 'utf8');
+
+        const first = await FileTools.readFile(workspaceRoot, 'repeat.txt', 1, 3);
+        expect(first.content).toContain('1: alpha');
+        expect(first.deduplicated).toBeUndefined();
+
+        const second = await FileTools.readFile(workspaceRoot, 'repeat.txt', 1, 3);
+        expect(second.deduplicated).toBe(true);
+        expect(second.content).not.toContain('1: alpha');
+        expect(second.content).toContain('force:true');
+        expect(second.totalLines).toBe(3);
+
+        const forced = await FileTools.readFile(workspaceRoot, 'repeat.txt', 1, 3, true);
+        expect(forced.deduplicated).toBeUndefined();
+        expect(forced.content).toContain('1: alpha');
+    });
+
+    it('returns fresh content when a repeat read sees changed text', async () => {
+        const workspaceRoot = await createWorkspace();
+        const filePath = path.join(workspaceRoot, 'changing.txt');
+        await fs.writeFile(filePath, 'one\ntwo', 'utf8');
+        await FileTools.readFile(workspaceRoot, 'changing.txt', 1, 2);
+
+        await fs.writeFile(filePath, 'one\nchanged', 'utf8');
+        const result = await FileTools.readFile(workspaceRoot, 'changing.txt', 1, 2);
+
+        expect(result.deduplicated).toBeUndefined();
+        expect(result.content).toContain('2: changed');
     });
 
     it('exposes workspace skill directories in the system prompt directory tree', async () => {
@@ -188,5 +220,23 @@ describe('FileTools.editFileByReplace & EOL Normalization', () => {
 
         const fileAfter = await fs.readFile(filePath, 'utf8');
         expect(fileAfter).toBe('item 1:\r\n  status: disabled\r\n\r\nitem 2:\r\n  status: disabled');
+    });
+});
+
+describe('file_replace nearest-match hint', () => {
+    it('points at the closest line when oldText is not found', () => {
+        const content = [
+            'def collect_universe(run_dir):',
+            '    rows = fetch_quote()',
+            '    return rows',
+        ].join('\n');
+        const hint = buildNearestMatchHint(content, '    rows = fetch_quote(pages=3)\n    return rows');
+        expect(hint).toContain('最相近的行');
+        expect(hint).toContain('2: rows = fetch_quote()');
+    });
+
+    it('falls back to the read_file guidance when nothing matches', () => {
+        const hint = buildNearestMatchHint('alpha\nbeta', 'zzzz_unknown_token_value');
+        expect(hint).toContain('read_file');
     });
 });

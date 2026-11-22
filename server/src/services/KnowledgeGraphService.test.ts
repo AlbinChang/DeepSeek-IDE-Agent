@@ -73,8 +73,7 @@ describe('knowledge graph tool surface', () => {
         await expect(service.analyze({ algorithm: 'nope' })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
     });
 
-    it('renders property objects and undeclared-key warnings without raw JSON text', async () => {
-        const responses: Record<string, any> = {
+    it('renders property objects and undeclared-key warnings without raw JSON text', async () => {        const responses: Record<string, any> = {
             path: {
                 from: 'a', to: 'b', direction: 'out', maxDepth: 2, truncated: false, elapsedMs: 1,
                 paths: [{ nodes: ['a', 'b'], edges: [{ src: 'a', dst: 'b', type: 'link' }], length: 1 }],
@@ -101,6 +100,80 @@ describe('knowledge graph tool surface', () => {
             const findText = await service.find({ scope: 'nodes' });
             expect(findText).toContain('未声明属性 region');
             expect(findText).not.toContain('[object Object]');
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it('keeps validate output compact unless verbose is requested', async () => {
+        const checks = [
+            { check: 'orphan_edges_src', value: 0, severity: 'error', hint: '边的 src 指向不存在的节点' },
+            { check: 'node_attr_code_index_drift', value: 0, severity: 'error', hint: '属性索引行数 - 应有行数' },
+            { check: 'self_loops', value: 2, severity: 'info', hint: '自环边数量（不一定是错误）' },
+        ];
+        const fakeClient = { run: async (_root: string, op: string) => (op === 'validate' ? { checks, issues: [] } : {}) };
+        const spy = vi.spyOn(DuckDbProcessClient, 'getInstance')
+            .mockReturnValue(fakeClient as unknown as DuckDbProcessClient);
+        try {
+            const service = new KnowledgeGraphService(tempRoot);
+            const compact = await service.admin({ action: 'validate' });
+            expect(compact).toContain('✅ 合规');
+            expect(compact).toContain('self_loops');
+            expect(compact).not.toContain('orphan_edges_src');
+            expect(compact).toContain('verbose:true');
+
+            const verbose = await service.admin({ action: 'validate', verbose: true });
+            expect(verbose).toContain('orphan_edges_src');
+            expect(verbose).toContain('node_attr_code_index_drift');
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it('reports strict lint failures caused only by warnings', async () => {
+        const fakeClient = {
+            run: async (_root: string, op: string) => (op === 'lint' ? {
+                ok: false,
+                errorCount: 0,
+                warningCount: 1,
+                infoCount: 0,
+                errorRows: 0,
+                warningRows: 5,
+                diagnostics: [{
+                    severity: 'warning', code: 'identity_incomplete', count: 5,
+                    message: '节点缺少完整身份键（code）', hint: '补齐身份属性',
+                }],
+                vocab: { classes: 2, properties: 1, identityKeys: ['code'] },
+                elapsedMs: 3,
+            } : {}),
+        };
+        const spy = vi.spyOn(DuckDbProcessClient, 'getInstance')
+            .mockReturnValue(fakeClient as unknown as DuckDbProcessClient);
+        try {
+            const service = new KnowledgeGraphService(tempRoot);
+            const text = await service.lint({ strict: true });
+            expect(text).toContain('strict 未通过');
+            expect(text).not.toContain('0 类 error / 0 行受影响');
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it('does not claim an index rebuild when nothing changed', async () => {
+        const fakeClient = {
+            run: async (_root: string, op: string) => (op === 'attr_define' ? {
+                scope: 'node', key: 'code', type: 'string', required: false,
+                indexed: true, unique: false, identity: false, domain: null,
+                enumValues: null, indexRows: 42, indexRebuilt: false, identityRows: 0, typeChanged: false,
+            } : {}),
+        };
+        const spy = vi.spyOn(DuckDbProcessClient, 'getInstance')
+            .mockReturnValue(fakeClient as unknown as DuckDbProcessClient);
+        try {
+            const service = new KnowledgeGraphService(tempRoot);
+            const text = await service.attrDefine({ scope: 'node', key: 'code', type: 'string', indexed: true });
+            expect(text).toContain('索引未变更（现有 42 行）');
+            expect(text).not.toContain('已重建属性索引');
         } finally {
             spy.mockRestore();
         }

@@ -1,7 +1,41 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { SystemTools, terminatePosixCommandGroup } from '@/tools/SystemTools.js';
+import { SystemTools, buildFailureHints, terminatePosixCommandGroup } from '@/tools/SystemTools.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
+
+describe('SystemTools failure hints', () => {
+    it('suggests writing a file for broken inline python', () => {
+        const hint = buildFailureHints(
+            'python -c "print(1)"',
+            'partial',
+            'IndentationError: expected an indented block',
+        );
+        expect(hint).toContain('.py');
+        expect(hint).toContain('部分输出');
+    });
+
+    it('suggests guarding missing paths', () => {
+        const hint = buildFailureHints(
+            'Get-Content .temp/missing.json',
+            'other output',
+            'Get-Content : Cannot find path ... because it does not exist.',
+        );
+        expect(hint).toContain('Test-Path');
+    });
+
+    it('suggests retry/backoff for network failures', () => {
+        const hint = buildFailureHints(
+            'python collect.py',
+            '',
+            'HTTPSConnectionPool(host=\'push2.eastmoney.com\'): Max retries exceeded',
+        );
+        expect(hint).toContain('重试');
+    });
+
+    it('adds nothing for unrecognized failures', () => {
+        expect(buildFailureHints('echo hi', '', 'boom')).toBe('');
+    });
+});
 
 describe('SystemTools.executePowerShellCommand validation', () => {
     it('rejects missing timeout', async () => {

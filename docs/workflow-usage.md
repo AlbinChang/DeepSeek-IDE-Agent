@@ -384,8 +384,8 @@ do:
 | `list_workflows` | 列出 `.workflow` 工作流 |
 | `get_workflow` | 查看 YAML + 元数据 + 校验 |
 | `validate_workflow` | 编译检查（结构 + 表达式 + 引用 + 权限 + schema）；`strict`/`deep`/`codes` |
-| `run_workflow` | 入队执行；`wait=true` 等待终态/审批；可选 `concurrencyGroup` 同组串行 |
-| `get_workflow_run` | 查询运行/步骤/用量/审批 |
+| `run_workflow` | 入队执行；`wait=true` 等待终态/审批；可选 `concurrencyGroup` 同组串行；步骤输出默认裁剪 |
+| `get_workflow_run` | 查询运行/步骤/用量/审批；`includeStepOutput:true` 才返回步骤输出全文 |
 | `list_workflow_runs` | 列出运行记录 |
 | `cancel_workflow` | 取消排队/运行/等待审批 |
 | `resume_workflow` | `approve` / `reject` 审批；`interrupted` 可省略 decision；重启后可用 `inputs` 补充原始敏感输入 |
@@ -437,6 +437,7 @@ validate_workflow { name: "feature-delivery", strict: true, deep: true }
 2. 合并/发布前跑 `strict:true`（warning 也必须清零），涉及脚本/子工作流时加 `deep:true`。
 3. 引用一律走 `${ .steps.<name>.output }` / `${ .inputs.x }`；不要依赖前向引用。
 4. 长流程用 `call: workflow` 拆子流程，避免嵌套超过 8 层。
+5. `run_workflow` / `get_workflow_run` 的结果默认裁剪（步骤最多 100 条、每个步骤只给 ≤300 字符 `outputPreview`、不含 `output` 全文）以控制上下文开销；需要某个步骤的输出全文时再传 `includeStepOutput:true`（每个 output ≤2000 字符）——不要为了看输出重复整轮运行结果。
 
 ## 6. Desktop IPC / 客户端
 

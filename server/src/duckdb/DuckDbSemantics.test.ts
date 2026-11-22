@@ -208,6 +208,68 @@ describe('DuckDbWorkerCore semantic governance', () => {
         await core.query({ sql: 'SELECT 1' });
     });
 
+    it('scopes identity and unique attributes by rdfs:domain', async () => {
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'kg-domain-test-'));
+        const root = path.join(dir, 'workspace');
+        await fs.mkdir(path.join(root, '.duckdb'), { recursive: true });
+        const scoped = new DuckDbWorkerCore();
+        try {
+            await scoped.open({
+                dbPath: path.join(root, '.duckdb', 'kg.duckdb'),
+                workspaceRoot: root,
+                tempDir: path.join(root, '.duckdb', 'tmp'),
+                memoryLimitMb: 256,
+                threads: 1,
+            });
+            await scoped.defineVocab({ kind: 'class', name: 'company' });
+            await scoped.defineVocab({ kind: 'class', name: 'person' });
+            // 先写入历史数据（尚未声明属性），模拟存量图迁移
+            await scoped.upsert({
+                nodes: [
+                    { id: 'c1', type: 'company', props: { code: 'A' } },
+                    { id: 'c2', type: 'company', props: { code: 'A' } },
+                    { id: 'c3', type: 'company' },
+                    { id: 'p1', type: 'person', props: { code: 'A' } },
+                    { id: 'p3', type: 'person', props: { code: 'C' } },
+                    { id: 'p4', type: 'person', props: { code: 'C' } },
+                ],
+            });
+            await scoped.defineAttribute({
+                scope: 'node', key: 'code', type: 'string',
+                unique: true, identity: true, domain: ['company'],
+            });
+
+            const identity = await scoped.query({
+                sql: 'SELECT count(*)::BIGINT AS c FROM kg_identity',
+            }) as any;
+            expect(Number(identity.rows[0].c)).toBe(1);
+
+            const report = await scoped.lint({
+                codes: ['identity_incomplete', 'identity_duplicate', 'attr_unique_duplicate'],
+            }) as any;
+            const incomplete = report.diagnostics.find((item: any) => item.code === 'identity_incomplete');
+            expect(incomplete.count).toBe(1);
+            expect(incomplete.message).toContain('仅统计 company');
+
+            const identityDup = report.diagnostics.find((item: any) => item.code === 'identity_duplicate');
+            expect(identityDup.count).toBe(1);
+
+            const uniqueDup = report.diagnostics.find((item: any) => item.code === 'attr_unique_duplicate');
+            expect(uniqueDup.count).toBe(1);
+            expect(JSON.stringify(uniqueDup.sample)).not.toContain('"C"');
+
+            await expect(scoped.upsert({
+                nodes: [{ id: 'c9', type: 'company', props: { code: 'A' } }],
+            })).rejects.toThrow(/unique|身份键/);
+            await expect(scoped.upsert({
+                nodes: [{ id: 'p9', type: 'person', props: { code: 'D' } }],
+            })).rejects.toThrow(/属性域/);
+        } finally {
+            await scoped.close();
+            await fs.rm(dir, { recursive: true, force: true });
+        }
+    });
+
     it('migrates a v2 database to v3 semantic columns', async () => {
         const legacyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kg-semantic-legacy-'));
         const legacyRoot = path.join(legacyDir, 'workspace');

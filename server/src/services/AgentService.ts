@@ -265,13 +265,14 @@ export class AgentService extends EventEmitter {
         // 注册文件核心工具 (原子化 IO)
         this.toolManager.registerTool({
             name: 'read_file',
-            description: `按行读工作区文件，上限 ${globalConfig.readFile.maxLines} 行/约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段，超长行改用 read_file_by_byte。`,
+            description: `按行读工作区文件，上限 ${globalConfig.readFile.maxLines} 行/约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段，超长行改用 read_file_by_byte。相同范围重复读取只返回摘要，需要正文传 force:true。`,
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '工作区相对路径' },
                     startLine: { type: 'number', description: '起始行号，默认 1' },
-                    lineCount: { type: 'number', description: '读取行数' }
+                    lineCount: { type: 'number', description: '读取行数' },
+                    force: { type: 'boolean', description: '重复读取同一范围时强制返回正文（默认返回摘要提示）' }
                 },
                 required: ['path']
             },
@@ -281,7 +282,9 @@ export class AgentService extends EventEmitter {
                 if (!params || !params.path || typeof params.path !== 'string') {
                     throw new Error('The "path" parameter is missing or invalid.');
                 }
-                const result = await FileTools.readFile(root, params.path, params.startLine, params.lineCount);
+                const result = await FileTools.readFile(
+                    root, params.path, params.startLine, params.lineCount, params.force === true,
+                );
                 // 【Token 优化】将结构化 JSON 对象扁平化为纯文本字符串。
                 // 消除 JSON.stringify 导致的 \n → \\n 和 \" → \\\" 双重转义（实测节省 10-15% token）。
                 // AgentTurnEngine 对 string 类型 result 直接作为 tool message content 使用，不经过 JSON 序列化。
@@ -293,6 +296,7 @@ export class AgentService extends EventEmitter {
                 const flags: string[] = [];
                 if (ok.truncated) flags.push('truncated');
                 if (ok.hasMore) flags.push('has more');
+                if (ok.deduplicated) flags.push('duplicate-omitted');
                 const flagStr = flags.length > 0 ? ` (${flags.join(', ')})` : '';
                 const header = `[read_file] path=${params.path} lines=${ok.startLine}-${ok.endLine}/${ok.totalLines}${flagStr}`;
                 return header + '\n' + (ok.content || '');

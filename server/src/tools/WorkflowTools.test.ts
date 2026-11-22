@@ -187,8 +187,7 @@ do:
         expect(strict.summary).toContain('❌');
     });
 
-    it('links with.tools against registered tool names when provided', async () => {
-        await writeFile(
+    it('links with.tools against registered tool names when provided', async () => {        await writeFile(
             path.join(root, '.workflow', 'tools.workflow.yaml'),
             `document:
   dsl: 1.0.0
@@ -209,5 +208,51 @@ do:
         const codes = result.validation.issues.map((issue: any) => issue.code);
         expect(codes).toContain('tool_unknown');
         expect(result.validation.ok).toBe(true); // 链接问题按 warning 处理
+    });
+
+    it('summarizes run payloads unless includeStepOutput is requested', async () => {
+        const bigOutput = { stdout: 'x'.repeat(5000), stderr: '', status: 'success', code: 0 };
+        const run = {
+            schemaVersion: 1,
+            runId: 'wf-run-1',
+            workflow: { name: 'demo', path: '.workflow/demo.workflow.yaml' },
+            workflowName: 'demo',
+            userId: 'user-1',
+            root: '/workspace',
+            status: 'succeeded',
+            inputs: {},
+            createdAt: 1,
+            steps: [{
+                path: '/do/0/work',
+                name: 'work',
+                status: 'succeeded',
+                attempts: 1,
+                output: bigOutput,
+                outputPreview: JSON.stringify(bigOutput),
+            }],
+        };
+        (engine.startRun as any).mockResolvedValueOnce({
+            ok: true, runId: 'wf-run-1', status: 'succeeded', run,
+        });
+
+        const compact: any = await tool('run_workflow').execute({ name: 'demo', wait: true }, context(root));
+        expect(compact.run.outputIncluded).toBe(false);
+        expect(compact.run.steps[0].output).toBeUndefined();
+        expect(compact.run.steps[0].outputPreview.length).toBeLessThan(400);
+
+        (engine.startRun as any).mockResolvedValueOnce({
+            ok: true, runId: 'wf-run-1', status: 'succeeded', run,
+        });
+        const full: any = await tool('run_workflow').execute({
+            name: 'demo', wait: true, includeStepOutput: true,
+        }, context(root));
+        expect(full.run.outputIncluded).toBe(true);
+        expect(typeof full.run.steps[0].output).toBe('string');
+        expect(full.run.steps[0].output.length).toBeLessThan(2100);
+
+        (engine.getRun as any).mockResolvedValueOnce(run);
+        const detail: any = await tool('get_workflow_run').execute({ runId: 'wf-run-1' }, context(root));
+        expect(detail.steps[0].output).toBeUndefined();
+        expect(detail.stepCount).toBe(1);
     });
 });

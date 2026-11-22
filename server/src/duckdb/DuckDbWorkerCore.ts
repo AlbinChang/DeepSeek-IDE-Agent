@@ -1953,14 +1953,15 @@ export class DuckDbWorkerCore {
                     `SELECT count(*)::BIGINT AS c FROM ${this.attrIndexTable(scope)} WHERE key = ?`,
                     [key],
                 ) || 0);
-            const identityRows = scope === 'node' && (identityChanged || (existing && existing.value_type !== valueType))
-                ? await this.rebuildIdentityIndex()
-                : 0;
+            const needIdentityRebuild = scope === 'node'
+                && (identityChanged || (!existing && identity) || (Boolean(existing) && existing!.value_type !== valueType));
+            const identityRows = needIdentityRebuild ? await this.rebuildIdentityIndex() : 0;
             return {
                 scope, key, type: valueType, required, indexed, unique: uniqueValue, identity,
                 domain,
                 enumValues,
                 indexRows,
+                indexRebuilt: needIndexRebuild,
                 identityRows,
                 indexedRows: indexRows,
                 typeChanged: Boolean(existing && existing.value_type !== valueType),
@@ -2272,6 +2273,42 @@ export class DuckDbWorkerCore {
             .sort((a, b) => a.key.localeCompare(b.key));
     }
 
+    /**
+     * 身份键适用类型（RDFS domain 语义）。
+     *
+     * 多类型图谱（company / org / industry）里，`code` 通常只属于 company；
+     * 若不做 domain 收敛，`identity_incomplete` 会把所有其他类型都算成缺键。
+     * 返回 null 表示未声明 domain，适用于全部节点。
+     */
+    private async identityScope(defs: AttributeDefinition[]): Promise<Set<string> | null> {
+        const constrained = defs.filter((def) => def.domain?.length);
+        if (!constrained.length) return null;
+        const { classes } = await this.loadSemanticRules();
+        let allowed: Set<string> | null = null;
+        for (const def of constrained) {
+            const expanded = this.expandTypes(def.domain as string[], classes.descendants);
+            allowed = allowed
+                ? new Set(Array.from<string>(allowed).filter((type) => expanded.has(type)))
+                : expanded;
+        }
+        return allowed;
+    }
+
+    /** 身份键 SQL 类型过滤（空字符串表示不过滤；domain 交集为空则永不为真）。 */
+    private identityTypeFilter(scope: Set<string> | null): string {
+        if (!scope) return '';
+        if (!scope.size) return '1 = 0';
+        const list = Array.from(scope).map((type) => `'${this.escapeLiteral(type)}'`).join(', ');
+        return `type IN (${list})`;
+    }
+
+    /** 属性的 domain 作用域（展开子类）；null 表示不限类型。 */
+    private async attrDomainScope(def: AttributeDefinition): Promise<Set<string> | null> {
+        if (!def.domain?.length) return null;
+        const { classes } = await this.loadSemanticRules();
+        return this.expandTypes(def.domain as string[], classes.descendants);
+    }
+
     /** props 可能是 null / 'null' / 对象 / JSON 文本，统一成普通对象。 */
     private parsePropsObject(value: unknown): Record<string, unknown> {
         if (value === null || value === undefined) return {};
@@ -2324,10 +2361,12 @@ export class DuckDbWorkerCore {
             }
             const exprs = this.identitySqlExprs(defs);
             const keysJson = `json_object(${defs.map((def) => `'${def.key}', json_extract(props, '$."${def.key}"')`).join(', ')})::VARCHAR`;
+            const typeFilter = this.identityTypeFilter(await this.identityScope(defs));
             const result = await con.run(
                 `INSERT INTO kg_identity (key_hash, node_id, keys_json)
                  SELECT md5(concat_ws(chr(31), ${exprs.select})), id, ${keysJson}
-                 FROM kg_nodes WHERE ${exprs.present}`,
+                 FROM kg_nodes WHERE ${exprs.present}${typeFilter ? ` AND ${typeFilter}` : ''}
+                 ON CONFLICT (key_hash) DO NOTHING`,
             );
             await con.run('COMMIT');
             return result.rowsChanged;
@@ -2352,12 +2391,13 @@ export class DuckDbWorkerCore {
         if (!defs.length) return 0;
         const exprs = this.identitySqlExprs(defs);
         const keysJson = `json_object(${defs.map((def) => `'${def.key}', json_extract(props, '$."${def.key}"')`).join(', ')})::VARCHAR`;
+        const typeFilter = this.identityTypeFilter(await this.identityScope(defs));
         const result = await con.run(
             `INSERT INTO kg_identity (key_hash, node_id, keys_json)
              SELECT md5(concat_ws(chr(31), ${exprs.select})), id, ${keysJson}
              FROM kg_nodes
              WHERE id IN (SELECT json_extract_string(value, '$') FROM json_each(?::JSON))
-               AND ${exprs.present}`,
+               AND ${exprs.present}${typeFilter ? ` AND ${typeFilter}` : ''}`,
             [idJson],
         );
         return result.rowsChanged;
@@ -2380,8 +2420,15 @@ export class DuckDbWorkerCore {
             if (!defs.length) continue;
             const propsList = items.map((item) => this.parsePropsObject(item.props));
             for (const def of defs) {
+                const domainScope = await this.attrDomainScope(def);
+                if (domainScope && !domainScope.size) continue;
+                const allowedList = domainScope
+                    ? Array.from(domainScope).map((type) => `'${this.escapeLiteral(type)}'`).join(', ')
+                    : '';
                 const entries = items
-                    .map((item, index) => ({
+                    .map((item, index) => ({ item, index }))
+                    .filter(({ item }) => !domainScope || domainScope.has(String(item.type)))
+                    .map(({ item, index }) => ({
                         id: scope === 'node'
                             ? String(item.id)
                             : `${item.src}\u001f${item.dst}\u001f${item.type}`,
@@ -2415,15 +2462,23 @@ export class DuckDbWorkerCore {
                 const keyExpr = scope === 'node'
                     ? 'p.node_id'
                     : `concat_ws(chr(31), p.src, p.dst, p.type)`;
+                const domainJoin = allowedList
+                    ? (scope === 'node'
+                        ? ' JOIN kg_nodes dn ON dn.id = p.node_id'
+                        : '')
+                    : '';
+                const domainWhere = allowedList
+                    ? ` AND ${scope === 'node' ? 'dn.type' : 'p.type'} IN (${allowedList})`
+                    : '';
                 const conflict = await this.rows(
                     `SELECT ${keyExpr} AS id, p.${valueColumn} AS value
-                     FROM ${indexTable} p
+                     FROM ${indexTable} p${domainJoin}
                      JOIN (
                         SELECT json_extract_string(value, '$.id') AS id,
                                ${numeric ? 'TRY_CAST(json_extract_string(value, \'$.v\') AS DOUBLE)' : 'json_extract_string(value, \'$.v\')'} AS v
                         FROM json_each(?::JSON)
                      ) b ON p.${valueColumn} = b.v
-                     WHERE p.key = ? AND ${keyExpr} <> b.id
+                     WHERE p.key = ? AND ${keyExpr} <> b.id${domainWhere}
                      LIMIT 3`,
                     [payload, def.key],
                 );
@@ -2439,9 +2494,11 @@ export class DuckDbWorkerCore {
         const identityDefs = attrDefs.filter((def) => def.scope === 'node' && def.identity);
         if (!identityDefs.length || !nodes.length) return;
         const ordered = identityDefs.slice().sort((a, b) => a.key.localeCompare(b.key));
+        const identityScope = await this.identityScope(ordered);
         const batchHashes = new Map<string, string>();
         const rows: { id: string; hash: string; keys: Record<string, unknown> }[] = [];
         for (const node of nodes) {
+            if (identityScope && !identityScope.has(String(node.type))) continue;
             const tuple = this.identityHash(ordered, String(node.props ?? 'null'));
             if (!tuple) continue;
             const id = String(node.id);
@@ -2806,18 +2863,38 @@ export class DuckDbWorkerCore {
         for (const def of rules.attrDefs.filter((item) => item.unique_value)) {
             const indexTable = this.attrIndexTable(def.scope);
             const valueColumn = def.value_type === 'number' ? 'val_num' : 'val_text';
+            const domainScope = await this.attrDomainScope(def);
+            if (domainScope && !domainScope.size) continue;
+            const allowed = domainScope
+                ? Array.from(domainScope).map((type) => `'${this.escapeLiteral(type)}'`).join(', ')
+                : '';
+            const domainJoin = allowed && def.scope === 'node'
+                ? ' JOIN kg_nodes dn ON dn.id = p.node_id'
+                : '';
+            const domainWhere = allowed
+                ? ` AND ${def.scope === 'node' ? 'dn.type' : 'p.type'} IN (${allowed})`
+                : '';
             const duplicates = await this.rows(
-                `SELECT ${valueColumn} AS value, count(*)::BIGINT AS c
-                 FROM ${indexTable} WHERE key = ? AND ${valueColumn} IS NOT NULL
+                `SELECT p.${valueColumn} AS value, count(*)::BIGINT AS c
+                 FROM ${indexTable} p${domainJoin}
+                 WHERE p.key = ? AND p.${valueColumn} IS NOT NULL${domainWhere}
                  GROUP BY 1 HAVING count(*) > 1 ORDER BY c DESC LIMIT ?`,
                 [def.key, Math.max(sampleLimit, 1)],
             );
             if (duplicates.length) {
+                const total = Number(await this.scalar(
+                    `SELECT count(*)::BIGINT AS c FROM (
+                        SELECT p.${valueColumn} FROM ${indexTable} p${domainJoin}
+                        WHERE p.key = ? AND p.${valueColumn} IS NOT NULL${domainWhere}
+                        GROUP BY 1 HAVING count(*) > 1
+                     )`,
+                    [def.key],
+                ) || 0);
                 push({
                     code: 'attr_unique_duplicate',
                     severity: 'error',
-                    count: duplicates.length,
-                    message: `唯一属性 ${def.key} 存在重复值`,
+                    count: total,
+                    message: `唯一属性 ${def.key} 存在重复值${allowed ? '（按 domain 统计）' : ''}`,
                     hint: '用 kg_merge 合并实体，或修正重复值后 kg_admin reindex。',
                     sample: duplicates,
                 });
@@ -2829,15 +2906,18 @@ export class DuckDbWorkerCore {
             .sort((a, b) => a.key.localeCompare(b.key));
         if (identityDefs.length) {
             const exprs = this.identitySqlExprs(identityDefs);
+            const scope = await this.identityScope(identityDefs);
+            const scopeFilter = this.identityTypeFilter(scope);
+            const scoped = (predicate: string) => (scopeFilter ? `${predicate} AND ${scopeFilter}` : predicate);
             const grouped = await this.rows(
-                `WITH t AS (SELECT ${exprs.aliased} FROM kg_nodes WHERE ${exprs.present})
+                `WITH t AS (SELECT ${exprs.aliased} FROM kg_nodes WHERE ${scoped(exprs.present)})
                  SELECT *, count(*)::BIGINT AS c FROM t GROUP BY ALL HAVING count(*) > 1
                  ORDER BY c DESC LIMIT ?`,
                 [Math.max(sampleLimit, 1)],
             );
             if (grouped.length) {
                 const total = Number(await this.scalar(
-                    `WITH t AS (SELECT ${exprs.aliased} FROM kg_nodes WHERE ${exprs.present})
+                    `WITH t AS (SELECT ${exprs.aliased} FROM kg_nodes WHERE ${scoped(exprs.present)})
                      SELECT count(*)::BIGINT AS c FROM (
                         SELECT * FROM t GROUP BY ALL HAVING count(*) > 1
                      )`,
@@ -2852,14 +2932,15 @@ export class DuckDbWorkerCore {
                 });
             }
             const incomplete = Number(await this.scalar(
-                `SELECT count(*)::BIGINT AS c FROM kg_nodes WHERE NOT (${exprs.present})`,
+                `SELECT count(*)::BIGINT AS c FROM kg_nodes WHERE ${scoped(`NOT (${exprs.present})`)}`,
             ) || 0);
             push({
                 code: 'identity_incomplete',
                 severity: 'warning',
                 count: incomplete,
-                message: `节点缺少完整身份键（${identityDefs.map((def) => def.key).join(' + ')}）`,
-                hint: '补齐身份属性；缺失身份键的节点无法参与唯一性判定。',
+                message: `节点缺少完整身份键（${identityDefs.map((def) => def.key).join(' + ')}）`
+                    + `${scope ? `（仅统计 ${Array.from(scope).join('/')}）` : ''}`,
+                hint: '补齐身份属性；不属于身份域的类型不参与判定。',
             });
             const orphans = Number(await this.scalar(
                 `SELECT count(*)::BIGINT AS c FROM kg_identity i
@@ -2874,7 +2955,7 @@ export class DuckDbWorkerCore {
             });
             const drift = Number(await this.scalar(
                 `WITH t AS (SELECT id, md5(concat_ws(chr(31), ${exprs.select})) AS h
-                            FROM kg_nodes WHERE ${exprs.present})
+                            FROM kg_nodes WHERE ${scoped(exprs.present)})
                  SELECT count(*)::BIGINT AS c FROM kg_identity i
                  LEFT JOIN t ON t.id = i.node_id
                  WHERE t.h IS NULL OR t.h <> i.key_hash`,

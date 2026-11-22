@@ -87,14 +87,26 @@ export class KnowledgeGraphService {
                 const result = await this.run('validate', {}, context);
                 const checks: any[] = (result as any).checks || [];
                 const issues: string[] = (result as any).issues || [];
+                const verbose = params.verbose === true;
+                const failing = checks.filter((item) => item.severity === 'error' && Number(item.value) !== 0);
+                const informative = checks.filter((item) => item.severity === 'info'
+                    && item.value !== '0' && Number(item.value) !== 0);
                 const drift = checks.filter((item) => String(item.check).endsWith('_index_drift')
                     && Number(item.value) !== 0);
+                const shown = verbose
+                    ? checks
+                    : [...failing, ...informative];
                 const lines = [
                     issues.length
                         ? `[kg_admin validate] ❌ ${issues.length} 项违规：${issues.slice(0, 10).join(', ')}${issues.length > 10 ? ' …' : ''}`
-                        : '[kg_admin validate] ✅ 合规：未发现违规项（info 项仅供参考）',
-                    this.formatTable(['severity', 'check', 'value', 'hint'], checks),
+                        : `[kg_admin validate] ✅ 合规：${checks.length} 项检查全部为 0${verbose ? '' : '（仅展示非 0 项，verbose:true 看全部）'}（数据完整性；语义门禁请跑 kg_lint）`,
                 ];
+                if (shown.length) {
+                    lines.push(this.formatTable(['severity', 'check', 'value', 'hint'], shown));
+                }
+                if (!verbose && !shown.length) {
+                    lines.push(`检查项：${checks.map((item) => item.check).slice(0, 12).join(', ')}${checks.length > 12 ? ' …' : ''}`);
+                }
                 if (drift.length) {
                     lines.push('', '修复：执行 kg_admin reindex 重建属性索引后重新校验。');
                 }
@@ -137,6 +149,9 @@ export class KnowledgeGraphService {
         let text = `${header}\n${this.formatTable(result.columns, result.rows)}`;
         if (result.truncated) {
             text += `\n提示：结果超过 maxRows=${result.rowCount}，请加 WHERE/LIMIT 缩小范围，或传 outputPath 导出完整结果。`;
+        }
+        if (!result.rowCount) {
+            text += '\n提示：0 行通常是属性键名/取值不匹配（props->>\'键\' 区分大小写）或关系方向反了；先用 kg_attr_list 或 kg_find 确认键名与取值，再调整 SQL。';
         }
         return await this.finalize('kg_query', text, result);
     }
@@ -202,6 +217,7 @@ export class KnowledgeGraphService {
             '[kg_delete] 完成',
             `删除节点 ${result.changedNodes} 行，删除关系 ${result.changedEdges} 行 · ${result.elapsedMs}ms`,
             params.cascade === false ? '注意：cascade=false，指向被删节点的边可能成为孤儿（可用 kg_admin validate 核验）。' : '',
+            params.all === true ? '提示：整库重置也可以直接用 kg_import mode:"replace" + confirm:true（省一次全表删除）。' : '',
         ].filter(Boolean).join('\n');
     }
 
@@ -417,6 +433,9 @@ export class KnowledgeGraphService {
             `源列：${(result.columns || []).join(', ')}`,
             result.indexedRows !== undefined ? `已重建属性索引 ${result.indexedRows} 行${result.identityRows ? `，身份键 ${result.identityRows} 行` : ''}。` : '',
             result.mode === 'replace' ? '⚠ 已先清空目标表。' : '',
+            result.mode === 'merge'
+                ? '提示：merge 只增改不删除，快照同步（行数需与源一致）请改用 mode:"replace" + confirm:true。'
+                : '',
             '提示：导入后执行 kg_lint 做语义校验（必填/类型/枚举/词表/唯一性）。',
         ].filter(Boolean).join('\n');
     }
@@ -441,10 +460,16 @@ export class KnowledgeGraphService {
             + `${result.unique ? ' · unique' : ''}${result.identity ? ' · identity' : ''}`,
             result.domain?.length ? `属性域（rdfs:domain）：${result.domain.join(' / ')}` : '',
             result.indexed
-                ? `已回填属性索引 ${result.indexRows ?? result.indexedRows ?? 0} 行，可用于 kg_find 等值/范围检索。`
+                ? (result.indexRebuilt === false
+                    ? `索引未变更（现有 ${result.indexRows ?? 0} 行）；如需强制重建用 kg_admin reindex。`
+                    : `已重建属性索引 ${result.indexRows ?? 0} 行，可用于 kg_find 等值/范围检索。`)
                 : '未建索引；如需属性检索加速请传 indexed:true。',
             result.enumValues?.length ? `枚举：${result.enumValues.join(', ')}` : '',
-            result.identity ? `已重建身份键索引 ${result.identityRows} 行（实体同一性判定）。` : '',
+            result.identity
+                ? (Number(result.identityRows) > 0
+                    ? `身份键索引已写入 ${result.identityRows} 行（实体同一性判定）。`
+                    : '身份键索引已重建（当前没有同时具备全部身份键属性的节点）。')
+                : '',
             result.unique ? '唯一性在 kg_upsert 写入时强校验（唯一值冲突会被拒绝）。' : '',
             result.typeChanged ? '⚠ 类型已变更；历史数据可能不符合新类型，请执行 kg_lint。' : '',
         ].filter(Boolean).join('\n');
@@ -603,8 +628,11 @@ export class KnowledgeGraphService {
         const diagnostics: any[] = result.diagnostics || [];
         const header = result.ok
             ? `[kg_lint] ✅ 语义一致（error 0${result.warningCount ? `，warning ${result.warningCount}` : ''}${result.infoCount ? `，info ${result.infoCount}` : ''}）· ${result.elapsedMs}ms`
-            : `[kg_lint] ❌ ${result.errorCount} 类 error / ${result.errorRows} 行受影响`
-                + `${result.warningCount ? `，warning ${result.warningCount} 类` : ''} · ${result.elapsedMs}ms`;
+            : (result.errorCount > 0
+                ? `[kg_lint] ❌ ${result.errorCount} 类 error / ${result.errorRows} 行受影响`
+                    + `${result.warningCount ? `，warning ${result.warningCount} 类` : ''} · ${result.elapsedMs}ms`
+                : `[kg_lint] ❌ strict 未通过：error 0，warning ${result.warningCount} 类`
+                    + `${result.warningRows ? ` / ${result.warningRows} 行` : ''}（strict:true 要求 warning 为 0）· ${result.elapsedMs}ms`);
         const lines = [
             header,
             `词表：class ${result.vocab?.classes ?? 0} / property ${result.vocab?.properties ?? 0}`

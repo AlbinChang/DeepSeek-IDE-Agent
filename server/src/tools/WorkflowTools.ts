@@ -14,6 +14,56 @@ function service(): WorkflowService {
     return WorkflowService.getInstance();
 }
 
+/** 单步输出回传给模型的上限，避免 run/get 结果重复塞满上下文。 */
+const STEP_PREVIEW_CHARS = 300;
+const STEP_OUTPUT_CHARS = 2000;
+const MAX_STEP_ENTRIES = 100;
+
+function truncateText(value: string, limit: number): string {
+    return value.length > limit ? `${value.slice(0, limit)}…[+${value.length - limit} chars]` : value;
+}
+
+function truncateJson(value: unknown, limit: number): unknown {
+    if (typeof value === 'string') return truncateText(value, limit);
+    try {
+        const text = JSON.stringify(value) ?? '';
+        if (text.length <= limit) return value;
+        return `${text.slice(0, limit)}…[truncated ${text.length - limit} chars]`;
+    } catch {
+        return value;
+    }
+}
+
+/**
+ * 精简 run 快照：默认不返回每步完整 output（原始 outputPreview 已足够定位），
+ * 需要全文时显式 includeStepOutput:true。
+ */
+function summarizeRun(run: any, includeStepOutput: boolean): any {
+    if (!run || typeof run !== 'object') return run;
+    const steps = Array.isArray(run.steps) ? run.steps : [];
+    return {
+        ...run,
+        steps: steps.slice(0, MAX_STEP_ENTRIES).map((step: any) => ({
+            path: step.path,
+            name: step.name,
+            status: step.status,
+            attempts: step.attempts,
+            startedAt: step.startedAt,
+            finishedAt: step.finishedAt,
+            ...(step.error ? { error: truncateText(String(step.error), 500) } : {}),
+            ...(step.outputPreview
+                ? { outputPreview: truncateText(String(step.outputPreview), STEP_PREVIEW_CHARS) }
+                : {}),
+            ...(includeStepOutput && step.output !== undefined
+                ? { output: truncateJson(step.output, STEP_OUTPUT_CHARS) }
+                : {}),
+        })),
+        stepCount: steps.length,
+        stepsTruncated: steps.length > MAX_STEP_ENTRIES,
+        outputIncluded: includeStepOutput,
+    };
+}
+
 /**
  * 暴露给 Agent 的 workflow 工具面。
  * 只做参数整理与错误转换，执行逻辑在 WorkflowService/WorkflowEngine。
@@ -132,6 +182,7 @@ export class WorkflowTools {
                         wait: { type: 'boolean', description: '是否等待运行结束（默认 false）' },
                         timeoutSeconds: { type: 'number', description: 'wait=true 时的最长等待秒数', minimum: 1 },
                         concurrencyGroup: { type: 'string', description: '可选并发组（同组串行）' },
+                        includeStepOutput: { type: 'boolean', description: '返回每步完整 output（默认 false，仅预览）' },
                     },
                     required: ['name'],
                     additionalProperties: false,
@@ -157,7 +208,12 @@ export class WorkflowTools {
                     if (!result.ok) {
                         throw new Error(result.error || 'workflow run failed to start');
                     }
-                    return result;
+                    return {
+                        ...result,
+                        ...(result.run
+                            ? { run: summarizeRun(result.run, params?.includeStepOutput === true) }
+                            : {}),
+                    };
                 },
             },
             {
@@ -168,6 +224,7 @@ export class WorkflowTools {
                     properties: {
                         runId: { type: 'string', description: '运行 ID' },
                         includeEvents: { type: 'boolean', description: '是否附带最近事件（默认 false）' },
+                        includeStepOutput: { type: 'boolean', description: '返回每步完整 output（默认 false，仅预览）' },
                     },
                     required: ['runId'],
                     additionalProperties: false,
@@ -183,7 +240,7 @@ export class WorkflowTools {
                         includeEvents: params?.includeEvents === true,
                     });
                     if (!run) throw new Error(`Workflow run not found: ${runId}`);
-                    return run;
+                    return summarizeRun(run, params?.includeStepOutput === true);
                 },
             },
             {
