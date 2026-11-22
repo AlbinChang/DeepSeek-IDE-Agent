@@ -1,8 +1,9 @@
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { DuckDbProcessClient } from '@/duckdb/DuckDbProcessClient.js';
 import { KnowledgeGraphService } from '@/services/KnowledgeGraphService.js';
 import { KnowledgeGraphTools } from '@/tools/KnowledgeGraphTools.js';
 
@@ -29,6 +30,13 @@ describe('knowledge graph tool surface', () => {
             'kg_path',
             'kg_analyze',
             'kg_import',
+            'kg_attr_define',
+            'kg_attr_list',
+            'kg_attr_delete',
+            'kg_find',
+            'kg_vocab',
+            'kg_lint',
+            'kg_merge',
         ]);
         const requiredByTool = new Map<string, string[]>(
             definitions.map((def) => [def.name, ((def.parameters as any).required as string[]) || []]),
@@ -63,5 +71,38 @@ describe('knowledge graph tool surface', () => {
         const service = new KnowledgeGraphService(tempRoot);
         await expect(service.query({ sql: '   ' })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
         await expect(service.analyze({ algorithm: 'nope' })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    });
+
+    it('renders property objects and undeclared-key warnings without raw JSON text', async () => {
+        const responses: Record<string, any> = {
+            path: {
+                from: 'a', to: 'b', direction: 'out', maxDepth: 2, truncated: false, elapsedMs: 1,
+                paths: [{ nodes: ['a', 'b'], edges: [{ src: 'a', dst: 'b', type: 'link' }], length: 1 }],
+                nodes: [{ id: 'a', type: 'person', name: 'A', props: { risk: 'high' } }],
+                edges: [{ src: 'a', dst: 'b', type: 'link', weight: 1, props: { amount: 20000 } }],
+            },
+            find: {
+                scope: 'nodes', total: 1, limit: 50, truncated: false, usedIndex: false, elapsedMs: 1,
+                undeclaredKeys: ['region'],
+                items: [{ id: 'a', type: 'person', name: 'A', props: { region: 'east' } }],
+            },
+        };
+        const fakeClient = {
+            run: async (_root: string, op: string) => responses[op],
+        };
+        const spy = vi.spyOn(DuckDbProcessClient, 'getInstance')
+            .mockReturnValue(fakeClient as unknown as DuckDbProcessClient);
+        try {
+            const service = new KnowledgeGraphService(tempRoot);
+            const pathText = await service.path({ from: 'a', to: 'b' });
+            expect(pathText).toContain('{"amount":20000}');
+            expect(pathText).not.toContain('[object Object]');
+
+            const findText = await service.find({ scope: 'nodes' });
+            expect(findText).toContain('未声明属性 region');
+            expect(findText).not.toContain('[object Object]');
+        } finally {
+            spy.mockRestore();
+        }
     });
 });

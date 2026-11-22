@@ -192,7 +192,8 @@ export class AgentService extends EventEmitter {
 
         console.log('[AgentService] Registering KnowledgeGraphTools (atomic)...');
         // 注册 DuckDB 知识图谱原子工具集 (kg_admin / kg_query / kg_upsert / kg_delete /
-        // kg_traverse / kg_path / kg_analyze / kg_import)；全部经独立 Worker 进程访问 .duckdb。
+        // kg_traverse / kg_path / kg_analyze / kg_import / kg_attr_* / kg_find /
+        // kg_vocab / kg_lint / kg_merge)；全部经独立 Worker 进程访问 .duckdb。
         for (const def of KnowledgeGraphTools.getDefinitions()) {
             const toolName = def.name;
             this.toolManager.registerTool({
@@ -210,6 +211,13 @@ export class AgentService extends EventEmitter {
                         case 'kg_path': return await tools.path(params, context);
                         case 'kg_analyze': return await tools.analyze(params, context);
                         case 'kg_import': return await tools.importData(params, context);
+                        case 'kg_attr_define': return await tools.attrDefine(params, context);
+                        case 'kg_attr_list': return await tools.attrList(params, context);
+                        case 'kg_attr_delete': return await tools.attrDelete(params, context);
+                        case 'kg_find': return await tools.find(params, context);
+                        case 'kg_vocab': return await tools.vocab(params, context);
+                        case 'kg_lint': return await tools.lint(params, context);
+                        case 'kg_merge': return await tools.merge(params, context);
                         default: throw new Error(`Unknown knowledge-graph tool: ${toolName}`);
                     }
                 }

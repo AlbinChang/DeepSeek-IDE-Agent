@@ -185,7 +185,7 @@ pnpm run electron:dev
 | 🔀 Git 版本控制 | 查看状态、历史、差异、分支 |
 | 🔌 MCP 工具 | 用户自定义 MCP 服务器工具动态注入 |
 | 🧩 专项技能 | `read_skill` 按需加载内置技能（PPT 设计、SVG 图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱） |
-| 🕸️ 知识图谱 | `kg_*`：DuckDB 独立进程（NDJSON IPC），百万级实体关系建模、遍历、路径与 PageRank/社区分析；数据仅存于工作区 `.duckdb/` |
+| 🕸️ 知识图谱 | `kg_*`：DuckDB 独立进程（NDJSON IPC），百万级实体/关系/属性建模、RDF 风格词表（domain/range）、语义唯一性（unique/identity）、`kg_lint` 编译式校验、`kg_merge` 实体归一、多跳属性推理、PageRank/社区分析；数据仅存于工作区 `.duckdb/` |
 
 ### 4.2.1 系统提示词与专项技能
 
