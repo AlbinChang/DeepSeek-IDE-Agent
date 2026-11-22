@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@duckdb/node-api": "2.0.1-r.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@playwright/mcp": "^0.0.75",
     "dotenv": "^16.4.7",

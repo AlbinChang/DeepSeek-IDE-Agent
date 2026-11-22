@@ -184,14 +184,15 @@ pnpm run electron:dev
 | 📋 文件列表 | 受控递归目录结构获取 |
 | 🔀 Git 版本控制 | 查看状态、历史、差异、分支 |
 | 🔌 MCP 工具 | 用户自定义 MCP 服务器工具动态注入 |
-| 🧩 专项技能 | `read_skill` 按需加载内置技能（PPT 设计、SVG 图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索） |
+| 🧩 专项技能 | `read_skill` 按需加载内置技能（PPT 设计、SVG 图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱） |
+| 🕸️ 知识图谱 | `kg_*`：DuckDB 独立进程（NDJSON IPC），百万级实体关系建模、遍历、路径与 PageRank/社区分析；数据仅存于工作区 `.duckdb/` |
 
 ### 4.2.1 系统提示词与专项技能
 
 系统提示词按「静态前缀 → 低频区 → 动态区」组装，并遵循「长规范下沉、按需加载」原则：
 
 - **常驻部分**只保留角色、核心契约、工作区元信息、工具策略与技能索引；
-- **专业任务规范**（PPT/幻灯片、SVG/图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索）以 `SKILL.md` 形式内置在 `server/src/config/skills/`，命中用户指令关键词时由服务端自动装配，未命中时由模型调用 `read_skill("<name>")` 按需拉取；
+- **专业任务规范**（PPT/幻灯片、SVG/图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱）以 `SKILL.md` 形式内置在 `server/src/config/skills/`，命中用户指令关键词时由服务端自动装配，未命中时由模型调用 `read_skill("<name>")` 按需拉取；
 - 同一内容不再在 `main-agent.json`、`evaluator-agent.json` 与各服务内重复注入，避免提示词膨胀。
 
 新增内置技能：在 `server/src/config/skills/<name>/SKILL.md` 写入 YAML frontmatter（`name` / `description` / `triggers`）与正文即可，无需改代码。
@@ -376,7 +377,8 @@ pnpm --filter deepseek-ide-agent-electron rebuild node-pty
 │           ├── preload.ts  ← 安全桥接
 │           └── ipc/        ← IPC 处理器（agent/file/terminal/git/...）
 └── docs/
-    └── STARTUP.md          ← 启动指南
+    ├── STARTUP.md                  ← 启动指南
+    └── duckdb-knowledge-graph.md   ← DuckDB 知识图谱架构与使用规范
 ```
 
 ---

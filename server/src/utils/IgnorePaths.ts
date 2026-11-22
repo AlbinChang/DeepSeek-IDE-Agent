@@ -17,7 +17,7 @@ export const SEARCH_SKIP_DIRS: ReadonlySet<string> = new Set([
     // 虚拟环境
     '.venv', 'venv', 'env', '.env', 'virtualenv', '.conda', 'conda-meta',
     // IDE 与 Agent 内部目录
-    '.idea', '.vscode', '.vs', '.ide-agent', '.llm', '.tools', '.memory', '.cursor',
+    '.idea', '.vscode', '.vs', '.ide-agent', '.llm', '.tools', '.memory', '.cursor', '.duckdb',
     // 语言与框架缓存
     '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.gradle', '.cargo', 'tmp', 'temp',
 ]);
@@ -29,7 +29,7 @@ export const SEARCH_SKIP_DIRS: ReadonlySet<string> = new Set([
  */
 export const FILE_TREE_SKIP_DIRS: ReadonlySet<string> = new Set([
     '.git', 'node_modules', '.ide-agent', '.llm', '.tools',
-    '.memory', '__pycache__', '.vscode', 'dist', '.next',
+    '.memory', '__pycache__', '.vscode', 'dist', '.next', '.duckdb',
 ]);
 
 /** 文件树可展示但不再向下递归的目录。 */

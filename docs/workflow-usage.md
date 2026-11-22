@@ -9,6 +9,10 @@
   .workflow/
     feature-delivery.workflow.yaml   # 推荐命名
     hello.yaml                       # 兼容普通 *.yaml / *.yml
+    tools/                           # 工作流专用脚本（保留目录，不参与工作流扫描）
+      collect.py
+      rules.json
+    assets/                          # 模板、样例等静态资产（保留目录）
     .runs/                           # 系统生成，建议加入 .gitignore
       <runId>/
         run.json                     # 运行快照
@@ -19,7 +23,21 @@
 - 单文件上限 256 KB；最多扫描 3 层；隐藏目录（如 `.runs`）不会被当作工作流。
 - `.workflow/.runs/` 由系统管理，Agent 只读。
 
-### 1.1 执行模型
+### 1.1 工作流资产布局
+
+工作流相关的一切都收敛在 `.workflow/` 下，工作区根目录只保留业务产物：
+
+- **脚本**：`.workflow/tools/<name>/`，与工作流 YAML 同仓管理，便于整体迁移或删除。
+- **配置与静态资产**：`.workflow/assets/`（模板、样例、规则文件）。
+- `.workflow/tools/`、`.workflow/assets/` 是保留目录，`list_workflows` 不会把其中的 YAML 当成工作流定义。
+- shell 步骤的 cwd 是工作区根目录，因此可写 `.workflow/tools/collect.py`；引擎还会注入以下环境变量（可被 `run.shell.environment` 覆盖）方便脚本定位资产：
+  - `WORKFLOW_DIR`：`<workspace>/.workflow` 绝对路径
+  - `WORKFLOW_NAME`：当前工作流 `document.name`
+  - `WORKFLOW_RUN_ID`：当前运行 ID |
+
+- `validate_workflow` 会对引用工作区根目录 `tools/`、`scripts/` 的 shell 命令给出 warning，提示把脚本移入 `.workflow/tools/`。
+
+### 1.2 执行模型
 
 - Electron 下每个 run 独占一个 `utilityProcess` Worker（worker-per-run）；不同 run 可并行，默认 `maxWorkers = min(4, CPU-1)`。
 - 主进程是 `run.json` / `events.jsonl` 的唯一写者；Worker 只上报事件、步骤、checkpoint。
@@ -172,12 +190,13 @@ do:
 - collect:
     run:
       shell:
-        command: python collect.py
+        command: python .workflow/tools/collect.py
         acceptedExitCodes: [0, 4]
 ```
 
 - 统一走 `run_powershell_command`（Windows: powershell，macOS/Linux: pwsh）与 `ProcessSafetyGuard`。
-- `run.shell.environment` 会追加/覆盖子进程环境变量（仅字符串值）。
+- 工作流脚本放 `.workflow/tools/`，命令用 `.workflow/tools/...` 或 `$env:WORKFLOW_DIR` 引用；不要在工作区根目录另建 `tools/`、`scripts/`。
+- `run.shell.environment` 会追加/覆盖子进程环境变量（仅字符串值；覆盖同名的 `WORKFLOW_DIR`、`WORKFLOW_NAME`、`WORKFLOW_RUN_ID` 时以 YAML 为准）。
 - `run.shell.acceptedExitCodes` 可把业务约定的非零退出码视为成功（默认 `[0]`）。例如“部分公告缺失”返回 4 时写 `acceptedExitCodes: [0, 4]`，不要再把命令包成 `exit 0` 从而吞掉真正的 NameError/崩溃。
 - 需要“失败后继续”时组合使用步骤级 `continueOnError: true` 和后续 `when`，把容错策略显式表达在 YAML 中。
 - 取消/超时会通过 `AbortSignal` 终止命令；Windows 使用 `taskkill /T /F`，POSIX 使用独立进程组和组级终止。Windows 已做实际测试；POSIX 组信号目前只有模拟测试，部署时应在目标系统验证。

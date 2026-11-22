@@ -128,6 +128,21 @@ function buildWorkflowWorker() {
     }
 }
 
+// ── 步骤 2.5: 编译 DuckDB Worker ──
+function buildDuckdbWorker() {
+    log('DUCKDB', colors.magenta, 'Building DuckDB worker...');
+    try {
+        execSync('node scripts/build-duckdb-worker.mjs', {
+            cwd: ELECTRON_ROOT,
+            stdio: 'pipe',
+        });
+        log('DUCKDB', colors.green, 'DuckDB worker built → dist/workers/duckdbWorker.cjs');
+    } catch (err) {
+        log('DUCKDB', colors.red, 'DuckDB worker build failed:', err.message);
+        process.exit(1);
+    }
+}
+
 // ── 步骤 3: 编译 Main Process ──
 function buildMainProcess() {
     log('MAIN', colors.magenta, 'Building main process...');
@@ -475,6 +490,9 @@ async function main() {
 
     // 2. 编译 Workflow Worker（ESM）
     buildWorkflowWorker();
+
+    // 2.5 编译 DuckDB Worker（独立进程，CJS）
+    buildDuckdbWorker();
 
     // 3. 编译 Main Process（ESM）
     buildMainProcess();

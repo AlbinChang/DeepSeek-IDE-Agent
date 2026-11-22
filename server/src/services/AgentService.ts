@@ -9,6 +9,7 @@ import { TodoTools } from '@/tools/TodoTools.js';
 import { NeverMistakeTools } from '@/tools/NeverMistakeTools.js';
 import { UserPreferenceTools } from '@/tools/UserPreferenceTools.js';
 import { MainAgentReplyTools } from '@/tools/MainAgentReplyTools.js';
+import { KnowledgeGraphTools } from '@/tools/KnowledgeGraphTools.js';
 import { FileTools } from '@/tools/FileTools.js';
 import { BrowserMcpAdapter } from '@/services/BrowserMcpAdapter.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
@@ -189,8 +190,33 @@ export class AgentService extends EventEmitter {
             });
         }
 
-        console.log('[AgentService] Registering read_skill...');
-        // 专项技能按需加载（内置技能 + 工作区技能）：系统提示词只放索引，正文由模型按需拉取
+        console.log('[AgentService] Registering KnowledgeGraphTools (atomic)...');
+        // 注册 DuckDB 知识图谱原子工具集 (kg_admin / kg_query / kg_upsert / kg_delete /
+        // kg_traverse / kg_path / kg_analyze / kg_import)；全部经独立 Worker 进程访问 .duckdb。
+        for (const def of KnowledgeGraphTools.getDefinitions()) {
+            const toolName = def.name;
+            this.toolManager.registerTool({
+                ...def,
+                execute: async (params, context) => {
+                    const root = this.resolveWorkspaceRootFromContext(context);
+                    if (!root) throw new Error('Workspace not initialized');
+                    const tools = new KnowledgeGraphTools(root);
+                    switch (toolName) {
+                        case 'kg_admin': return await tools.admin(params, context);
+                        case 'kg_query': return await tools.query(params, context);
+                        case 'kg_upsert': return await tools.upsert(params, context);
+                        case 'kg_delete': return await tools.delete(params, context);
+                        case 'kg_traverse': return await tools.traverse(params, context);
+                        case 'kg_path': return await tools.path(params, context);
+                        case 'kg_analyze': return await tools.analyze(params, context);
+                        case 'kg_import': return await tools.importData(params, context);
+                        default: throw new Error(`Unknown knowledge-graph tool: ${toolName}`);
+                    }
+                }
+            });
+        }
+
+        console.log('[AgentService] Registering read_skill...');        // 专项技能按需加载（内置技能 + 工作区技能）：系统提示词只放索引，正文由模型按需拉取
         this.toolManager.registerTool({
             name: 'read_skill',
             description: '按名称加载专项技能完整规范（见系统提示词技能索引）。',

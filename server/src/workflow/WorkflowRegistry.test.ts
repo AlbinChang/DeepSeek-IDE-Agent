@@ -112,6 +112,47 @@ describe('WorkflowRegistry', () => {
         expect((await registry.list())[0].path).toBe('.workflow/team/nested.yaml');
     });
 
+    it('keeps reserved asset directories out of workflow discovery', async () => {
+        await mkdir(path.join(root, '.workflow', 'tools'), { recursive: true });
+        await mkdir(path.join(root, '.workflow', 'assets'), { recursive: true });
+        await writeFile(path.join(root, '.workflow', 'tools', 'helper.yaml'), validWorkflow, 'utf8');
+        await writeFile(path.join(root, '.workflow', 'assets', 'template.yaml'), validWorkflow, 'utf8');
+        await writeFile(path.join(root, '.workflow', 'feature-delivery.yaml'), validWorkflow, 'utf8');
+
+        const workflows = await new WorkflowRegistry(root).list();
+
+        expect(workflows.map((workflow) => workflow.path)).toEqual(['.workflow/feature-delivery.yaml']);
+    });
+
+    it('warns when shell steps reference workspace-root tools or scripts', async () => {
+        await writeFile(path.join(root, '.workflow', 'root-assets.yaml'), `document:
+  dsl: 1.0.0
+  name: root-assets
+do:
+  - legacy:
+      run:
+        shell:
+          command: python tools/stockvalue/collect.py
+  - preferred:
+      run:
+        shell:
+          command: python .workflow/tools/stockvalue/collect.py
+  - backslash:
+      call: shell
+      with:
+        command: python .\\scripts\\collect.py
+`, 'utf8');
+
+        const detail = await new WorkflowRegistry(root).get('root-assets');
+        const warnings = detail!.validation.issues.filter((issue) => issue.severity === 'warning');
+
+        expect(detail!.validation.ok).toBe(true);
+        expect(warnings.map((warning) => warning.path)).toEqual([
+            '/do/0/legacy/run/shell/command',
+            '/do/2/backslash/with/command',
+        ]);
+    });
+
     it('validates step-level when, continueOnError and acceptedExitCodes', async () => {
         await writeFile(path.join(root, '.workflow', 'conditional.yaml'), `document:
   dsl: 1.0.0

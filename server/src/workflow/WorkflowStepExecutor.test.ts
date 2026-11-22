@@ -69,6 +69,17 @@ describe('DefaultWorkflowStepExecutor', () => {
         expect(JSON.stringify(result.output)).toContain('workflow-shell-test');
     });
 
+    it('exposes workflow asset locations to shell steps', async () => {
+        const result = await executor.execute(
+            'shell',
+            { run: { shell: { command: 'Write-Output "$env:WORKFLOW_DIR|$env:WORKFLOW_NAME|$env:WORKFLOW_RUN_ID"' } } },
+            createContext(root),
+        );
+        const stdout = String((result.output as any)?.stdout ?? '').replace(/\\/g, '/');
+
+        expect(stdout.trim()).toBe(`${root.replace(/\\/g, '/').replace(/\/$/, '')}/.workflow|demo|wf-test-run`);
+    });
+
     it('accepts explicitly whitelisted non-zero shell exit codes', async () => {
         const result = await executor.execute(
             'shell',

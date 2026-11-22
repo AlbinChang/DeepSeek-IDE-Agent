@@ -83,6 +83,9 @@ release/
 # 忽略 .ide-agent
 .ide-agent/
 
+# 忽略 DuckDB 知识图谱数据目录（数据库文件只能通过 kg_* 工具访问）
+.duckdb/
+
 # 忽略用户自定义 LLM 配置目录（包含 API Key）
 .llm/
 

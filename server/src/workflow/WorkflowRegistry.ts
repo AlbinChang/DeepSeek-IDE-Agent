@@ -20,6 +20,13 @@ const WORKFLOW_EXTENSIONS = new Set(['.yaml', '.yml']);
 const MAX_WORKFLOW_FILE_BYTES = 256 * 1024;
 const MAX_SCAN_DEPTH = 3;
 
+/**
+ * `.workflow/` 下的保留资产目录：工作流脚本与静态模板放在这里，
+ * 不参与工作流定义扫描。脚本引用工作区根目录 tools/、scripts/ 时给出告警。
+ */
+const WORKFLOW_ASSET_DIRECTORIES = new Set(['tools', 'assets']);
+const ROOT_ASSET_REFERENCE = /(?<![\w./\\-])(?:\.{1,2}[/\\])?(?:tools|scripts)[/\\]/i;
+
 function asRecord(value: unknown): Record<string, any> | undefined {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, any>
@@ -187,6 +194,8 @@ export class WorkflowRegistry {
         const files: string[] = [];
         for (const entry of entries) {
             if (entry.name.startsWith('.') && entry.isDirectory()) continue;
+            if (depth === 0 && entry.isDirectory()
+                && WORKFLOW_ASSET_DIRECTORIES.has(entry.name.toLowerCase())) continue;
             const absolutePath = path.join(directory, entry.name);
             if (entry.isDirectory()) {
                 files.push(...await this.scanFiles(absolutePath, depth + 1));
@@ -432,6 +441,14 @@ export class WorkflowRegistry {
                 path: `${path}/run/shell/command`,
                 message: 'run.shell.command 必须是字符串',
                 severity: 'error',
+            });
+        }
+        const shellCommand = shellConfig?.command ?? asRecord(definition.with)?.command;
+        if (typeof shellCommand === 'string' && ROOT_ASSET_REFERENCE.test(shellCommand)) {
+            issues.push({
+                path: shellConfig?.command !== undefined ? `${path}/run/shell/command` : `${path}/with/command`,
+                message: '检测到 shell 命令引用工作区根目录的 tools/ 或 scripts/；若属于 workflow 专用脚本/资产，请移到 .workflow/tools/ 或 .workflow/assets/，并用相对路径或 $env:WORKFLOW_DIR 引用',
+                severity: 'warning',
             });
         }
         const shellAcceptedExitCodes = shellConfig?.acceptedExitCodes;

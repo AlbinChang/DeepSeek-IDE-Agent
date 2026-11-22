@@ -1,3 +1,5 @@
+import * as path from 'node:path';
+
 import { AgentService } from '@/services/AgentService.js';
 import { AgentTurnEngine } from '@/services/AgentTurnEngine.js';
 import { AIProviderFactory } from '@/services/AIProviderFactory.js';
@@ -191,6 +193,18 @@ function positiveInteger(value: unknown): number | undefined {
     const parsed = Number(value);
     if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
     return Math.floor(parsed);
+}
+
+/**
+ * shell 步骤默认 cwd 是工作区根目录；再注入 workflow 资产变量，
+ * 让脚本引用 `.workflow/` 内的文件时不必硬编码绝对路径。
+ */
+function workflowEnvironment(ctx: WorkflowStepExecutionContext): Record<string, string> {
+    return {
+        WORKFLOW_DIR: path.join(ctx.root, '.workflow'),
+        WORKFLOW_NAME: ctx.workflowName,
+        WORKFLOW_RUN_ID: ctx.runId,
+    };
 }
 
 /**
@@ -485,7 +499,10 @@ export class DefaultWorkflowStepExecutor implements WorkflowStepExecutor {
             {
                 command,
                 timeout: timeoutMs,
-                ...(environment && Object.keys(environment).length > 0 ? { environment } : {}),
+                environment: {
+                    ...workflowEnvironment(ctx),
+                    ...(environment ?? {}),
+                },
             },
             ctx.traceId,
             {

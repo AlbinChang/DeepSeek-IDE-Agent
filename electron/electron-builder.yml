@@ -45,3 +45,4 @@ asar: true
 asarUnpack:
   - node_modules/node-pty/**
   - node_modules/@playwright/**
+  - node_modules/@duckdb/**

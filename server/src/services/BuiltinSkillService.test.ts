@@ -10,6 +10,7 @@ const EXPECTED_SKILLS = [
     'code-review',
     'doc-writing',
     'jar-analysis',
+    'knowledge-graph',
     'md-to-pdf',
     'ppt-design',
     'svg-diagram',

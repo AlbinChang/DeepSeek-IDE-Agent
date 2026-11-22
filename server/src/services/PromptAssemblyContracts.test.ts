@@ -40,7 +40,8 @@ describe('system prompt assembly contracts', () => {
             .reduce((total, text) => total + text.length, 0);
 
         expect(Object.keys(config.operation_guidelines).length).toBeLessThanOrEqual(14);
-        expect(guidelineChars).toBeLessThanOrEqual(1900);
+        // 预算含「知识图谱」约束；新增常驻能力时同步评估，避免提示词持续膨胀。
+        expect(guidelineChars).toBeLessThanOrEqual(2200);
         expect(tipChars).toBeLessThanOrEqual(800);
     });
 
