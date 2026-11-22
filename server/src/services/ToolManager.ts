@@ -1,5 +1,6 @@
 import { ToolLogger } from '@/utils/ToolLogger.js';
 import { AgentService } from "@/services/AgentService.js";
+import { DuckDbProcessClient } from '@/duckdb/DuckDbProcessClient.js';
 import { resolveToolName } from '@/tools/toolNames.js';
 
 export interface ToolExecutionContext {
@@ -282,7 +283,12 @@ export class ToolManager {
         this.validateParams(safeArgs, tool.parameters, resolvedToolName);
 
         const workspaceRoot = executionContext?.workspaceRoot || AgentService.getInstance().getWorkspaceRoot(userId);
-        
+        // 长任务（run_workflow wait:true、长命令、大导入）期间给 DuckDB Worker 保活：
+        // 否则空闲回收会在任务中途停掉 Worker，后续 kg 步骤全部冷启动，日志也像报错。
+        const releaseKeepAlive = workspaceRoot
+            ? DuckDbProcessClient.getInstance().acquireKeepAlive(workspaceRoot)
+            : () => undefined;
+
         try {
             const result = await tool.execute(safeArgs, { userId, traceId, ...executionContext });
             
@@ -308,6 +314,8 @@ export class ToolManager {
                 });
             }
             throw error;
+        } finally {
+            releaseKeepAlive();
         }
     }
 

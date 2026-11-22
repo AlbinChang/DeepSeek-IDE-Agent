@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 import { ToolManager } from '@/services/ToolManager.js';
+import { DuckDbProcessClient } from '@/duckdb/DuckDbProcessClient.js';
 
 const createManager = () => {
     const manager = new ToolManager();
@@ -139,5 +142,28 @@ describe('ToolManager legacy tool-name aliases', () => {
             'trace',
             { allowedToolNames: new Set(['file_write']) },
         )).resolves.toEqual({ status: 'success' });
+    });
+});
+
+describe('ToolManager DuckDB keep-alive', () => {
+    it('pins the DuckDB worker while a tool call is running', async () => {
+        const workspaceRoot = path.join(os.tmpdir(), 'kg-keepalive-tool-test');
+        const manager = new ToolManager();
+        let seenDuringCall = -1;
+        manager.registerTool({
+            name: 'long_task',
+            description: 'test long task',
+            parameters: { type: 'object', properties: {} },
+            execute: async () => {
+                seenDuringCall = DuckDbProcessClient.getInstance()
+                    .describeIdlePolicy(workspaceRoot).keepAlive;
+                return { status: 'success' };
+            },
+        });
+
+        await manager.executeTool('user', 'long_task', {}, 'trace', { workspaceRoot });
+
+        expect(seenDuringCall).toBe(1);
+        expect(DuckDbProcessClient.getInstance().describeIdlePolicy(workspaceRoot).keepAlive).toBe(0);
     });
 });

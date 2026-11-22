@@ -74,3 +74,60 @@ describe('DuckDbProcessClient IPC', () => {
         expect(result.pong).toBe(true);
     });
 });
+
+describe('DuckDbProcessClient idle recycle', () => {
+    let idleRoot: string;
+    let idleClient: DuckDbProcessClient;
+
+    beforeAll(async () => {
+        idleRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'kg-idle-test-'));
+        await fs.mkdir(path.join(idleRoot, '.duckdb'), { recursive: true });
+        idleClient = new DuckDbProcessClient({
+            entryPath,
+            queryTimeoutMs: 5_000,
+            idleTimeoutMs: 250,
+            memoryLimitMb: 256,
+            threads: 1,
+        });
+    });
+
+    afterAll(async () => {
+        await idleClient.shutdownAll();
+        await fs.rm(idleRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+
+    it('keeps the worker alive while a long task holds the keep-alive lease', async () => {
+        await idleClient.run(idleRoot, 'ping');
+        const release = idleClient.acquireKeepAlive(idleRoot);
+        expect(idleClient.describeIdlePolicy(idleRoot).keepAlive).toBe(1);
+
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(idleClient.describeIdlePolicy(idleRoot).running).toBe(true);
+
+        release();
+        release(); // 重复释放不应把计数压成负数
+        expect(idleClient.describeIdlePolicy(idleRoot).keepAlive).toBe(0);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(idleClient.describeIdlePolicy(idleRoot).running).toBe(false);
+    }, 15_000);
+
+    it('recycles the idle worker and can restart it afterwards', async () => {
+        await idleClient.run(idleRoot, 'ping');
+        expect(idleClient.describeIdlePolicy(idleRoot).running).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(idleClient.describeIdlePolicy(idleRoot).running).toBe(false);
+
+        const result = await idleClient.run(idleRoot, 'ping') as any;
+        expect(result.pong).toBe(true);
+    }, 15_000);
+
+    it('does not count idle recycle as a crash for the restart guard', async () => {
+        // 反复 idle 回收 + 重启 6 次（> MAX_RESTARTS_IN_WINDOW），若回收被计为崩溃会触发暂停重启
+        for (let index = 0; index < 6; index += 1) {
+            await idleClient.run(idleRoot, 'ping');
+            await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+        const result = await idleClient.run(idleRoot, 'ping') as any;
+        expect(result.pong).toBe(true);
+    }, 90_000);
+});

@@ -63,6 +63,10 @@ describe('knowledge graph worker end-to-end (multi-type graph)', () => {
         expect(validate).toContain('语义门禁请跑 kg_lint');
         expect(validate.length).toBeLessThan(800);
 
+        const status = await service.admin({ action: 'status' });
+        expect(status).toContain('空闲回收');
+        expect(status).toContain('DUCKDB_IDLE_TIMEOUT_MS');
+
         await expect(service.upsert({
             nodes: [{ id: 'c9', type: 'company', props: { name: 'D', code: '600000' } }],
         })).rejects.toThrow(/unique|身份键/);

@@ -64,6 +64,8 @@ export class DuckDbProcessClient {
     private static instance?: DuckDbProcessClient;
 
     private readonly sessions = new Map<string, WorkspaceSession>();
+    /** 工作区 → 保活计数（长任务期间阻止空闲回收；即使 Worker 尚未启动也记录，启动后立即生效） */
+    private readonly keepAliveCounts = new Map<string, number>();
     private readonly options: Required<Pick<DuckDbClientOptions, 'memoryLimitMb' | 'threads' | 'queryTimeoutMs' | 'idleTimeoutMs' | 'maxWorkers'>> &
         Pick<DuckDbClientOptions, 'entryPath' | 'nodePath' | 'env'>;
 
@@ -116,6 +118,7 @@ export class DuckDbProcessClient {
 
     public async closeWorkspace(workspaceRoot: string): Promise<void> {
         const root = path.resolve(workspaceRoot);
+        this.keepAliveCounts.delete(root);
         const session = this.sessions.get(root);
         if (!session) return;
         this.sessions.delete(root);
@@ -125,6 +128,7 @@ export class DuckDbProcessClient {
     public async shutdownAll(): Promise<void> {
         const sessions = Array.from(this.sessions.values());
         this.sessions.clear();
+        this.keepAliveCounts.clear();
         await Promise.all(sessions.map((session) => session.stop()));
     }
 
@@ -136,6 +140,45 @@ export class DuckDbProcessClient {
             startedAt: session.startedAt,
             lastUsedAt: session.lastUsedAt,
         }));
+    }
+
+    /**
+     * 长任务保活：调用期间不回收 Worker。
+     *
+     * 典型场景：`run_workflow { wait:true, timeoutSeconds:2400 }` 期间可能几分钟不碰 kg_*，
+     * 空闲回收会把 Worker 停掉，之后每个 kg 步骤都要冷启动，日志还会误导用户以为出错。
+     * 返回释放函数（可重复调用）。
+     */
+    public acquireKeepAlive(workspaceRoot: string): () => void {
+        const root = path.resolve(workspaceRoot);
+        this.keepAliveCounts.set(root, (this.keepAliveCounts.get(root) ?? 0) + 1);
+        this.sessions.get(root)?.notifyPinChanged();
+        let released = false;
+        return () => {
+            if (released) return;
+            released = true;
+            const next = Math.max(0, (this.keepAliveCounts.get(root) ?? 1) - 1);
+            if (next === 0) this.keepAliveCounts.delete(root);
+            else this.keepAliveCounts.set(root, next);
+            this.sessions.get(root)?.notifyPinChanged();
+        };
+    }
+
+    /** 诊断：空闲回收策略与保活状态。 */
+    public describeIdlePolicy(workspaceRoot: string): {
+        idleTimeoutMs: number;
+        keepAlive: number;
+        running: boolean;
+        lastUsedAt?: number;
+    } {
+        const root = path.resolve(workspaceRoot);
+        const session = this.sessions.get(root);
+        return {
+            idleTimeoutMs: this.options.idleTimeoutMs,
+            keepAlive: this.keepAliveCounts.get(root) ?? 0,
+            running: session?.isRunning ?? false,
+            lastUsedAt: session?.lastUsedAt,
+        };
     }
 
     private getOrCreateSession(root: string): WorkspaceSession {
@@ -153,7 +196,11 @@ export class DuckDbProcessClient {
             }
         }
 
-        const session = new WorkspaceSession(root, this.options);
+        const session = new WorkspaceSession(
+            root,
+            this.options,
+            () => (this.keepAliveCounts.get(root) ?? 0) > 0,
+        );
         this.sessions.set(root, session);
         return session;
     }
@@ -188,7 +235,24 @@ class WorkspaceSession {
             nodePath?: string;
             env?: NodeJS.ProcessEnv;
         },
+        /** 长任务保活期间不得回收（由 client 的保活计数驱动） */
+        private readonly isPinned: () => boolean = () => false,
     ) {}
+
+    /** 保活计数变化时重排空闲回收计时器。 */
+    public notifyPinChanged(): void {
+        if (this.isPinned()) {
+            if (this.idleTimer) clearTimeout(this.idleTimer);
+            this.idleTimer = undefined;
+            return;
+        }
+        this.touchIdle();
+    }
+
+    /** 进程是否真的在跑（pid 会保留用于诊断，不能用来判断存活）。 */
+    public get isRunning(): boolean {
+        return Boolean(this.child);
+    }
 
     public async run(
         op: DuckDbOperation,
@@ -373,7 +437,8 @@ class WorkspaceSession {
 
         child.once('exit', (code) => {
             this.lastExit = { code, at: Date.now() };
-            this.restarts.push(Date.now());
+            // 只有非预期退出才计入崩溃窗口；空闲回收/主动关闭不算，否则反复回收会触发"暂停重启"。
+            if (!this.stopping) this.restarts.push(Date.now());
             const detail = this.stderrTail.slice(-2000);
             this.child = undefined;
             this.startPromise = undefined;
@@ -513,10 +578,17 @@ class WorkspaceSession {
 
     private touchIdle(): void {
         if (this.idleTimer) clearTimeout(this.idleTimer);
+        this.idleTimer = undefined;
         if (this.stopping) return;
+        // 长任务（run_workflow / run_*_command 等）执行期间不回收，避免中途停止后反复冷启动
+        if (this.isPinned()) return;
         this.idleTimer = setTimeout(() => {
-            if (this.busy) return;
-            console.log(`[DuckDbWorker] idle timeout, stopping worker for ${this.workspaceRoot}`);
+            if (this.busy || this.isPinned()) return;
+            const idleMinutes = Math.max(1, Math.round(this.options.idleTimeoutMs / 60_000));
+            console.log(
+                `[DuckDbWorker] 空闲 ${idleMinutes} 分钟，回收 Worker（${this.workspaceRoot}）；`
+                + '下次 kg_* 调用会自动重启（冷启动约 1 秒），可用 DUCKDB_IDLE_TIMEOUT_MS 调整。',
+            );
             void this.stop();
         }, this.options.idleTimeoutMs);
         this.idleTimer.unref?.();

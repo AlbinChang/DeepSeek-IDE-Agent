@@ -1,5 +1,6 @@
 import { config as globalConfig } from '@/config/index.js';
 import { isDeepStrictEqual } from 'node:util';
+import { DuckDbProcessClient } from '@/duckdb/DuckDbProcessClient.js';
 import {
     WorkflowApprovalPause,
     WorkflowBudgetExceededError,
@@ -111,6 +112,9 @@ export class WorkflowRunner {
     }
 
     public async run(): Promise<SequenceResult> {
+        // 整个 run 期间给 DuckDB Worker 保活：workflow 的 kg 步骤之间可能隔很久，
+        // 空闲回收会在中途停掉 Worker（下次 kg 调用只能冷启动，日志还像报错）。
+        const releaseKeepAlive = this.acquireKnowledgeGraphKeepAlive();
         try {
             return await this.executeSequence(
                 this.options.definition.steps,
@@ -128,6 +132,19 @@ export class WorkflowRunner {
                 undefined,
                 error,
             );
+        } finally {
+            releaseKeepAlive();
+        }
+    }
+
+    /** 只有已存在 Worker 会话时才需要保活；取不到工作区就返回空操作。 */
+    private acquireKnowledgeGraphKeepAlive(): () => void {
+        const root = this.options.session?.snapshot?.root;
+        if (!root) return () => undefined;
+        try {
+            return DuckDbProcessClient.getInstance().acquireKeepAlive(root);
+        } catch {
+            return () => undefined;
         }
     }
 

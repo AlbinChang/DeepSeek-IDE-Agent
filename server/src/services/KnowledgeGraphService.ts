@@ -698,11 +698,14 @@ export class KnowledgeGraphService {
 
     private formatStats(stats: unknown): string {
         const value = stats as any;
+        const idle = DuckDbProcessClient.getInstance().describeIdlePolicy(this.root);
+        const idleMinutes = Math.max(1, Math.round(idle.idleTimeoutMs / 60_000));
         return [
             `[kg_admin status] DuckDB ${value.duckdbVersion || '?'} · 数据库 ${this.toWorkspaceRelative(value.dbPath || '')}`,
             `节点 ${value.nodes} · 边 ${value.edges} · 指标 ${value.metrics} · 属性规范 ${value.attrDefs ?? 0}（索引 ${value.indexedAttrs ?? 0}）`,
             `文件 ${formatBytes(value.dbBytes || 0)}（WAL ${formatBytes(value.walBytes || 0)}）· 内存上限 ${value.memoryLimit || '?'} · threads ${value.threads || '?'}`,
             `temp_directory ${value.tempDirectory || '?'} · uptime ${Math.round((value.uptimeMs || 0) / 1000)}s · pid ${value.pid}`,
+            `空闲回收 ${idleMinutes} 分钟（DUCKDB_IDLE_TIMEOUT_MS）${idle.keepAlive > 0 ? '；长任务保活中，暂不回收' : '；下次调用会自动重启'}`,
         ].join('\n');
     }
 

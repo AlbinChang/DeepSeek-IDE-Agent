@@ -45,7 +45,10 @@ flowchart LR
 - **一个工作区一个 Worker 进程**：DuckDB 单文件单写者，串行执行所有请求。
 - **进程隔离**：原生 `duckdb.node` 只在 Worker 内加载，主进程不加载原生模块；Worker 崩溃不影响 IDE。
 - **内存隔离**：`memory_limit`（默认 2048MB）与 V8 堆上限（默认 2048MB）独立配置，超限溢写到 `.duckdb/tmp`。
-- **生命周期**：首次调用拉起；空闲 5 分钟回收；最多同时 3 个工作区实例（LRU 淘汰空闲）；60 秒内崩溃 5 次熔断并提示查 stderr。
+- **生命周期**：首次调用拉起；空闲 5 分钟回收（`DUCKDB_IDLE_TIMEOUT_MS`）；最多同时 3 个工作区实例（LRU 淘汰空闲）；60 秒内崩溃 5 次熔断并提示查 stderr。
+- **长任务保活（重要）**：任意工具调用、以及每次 workflow 运行（`WorkflowRunner.run`）执行期间都会持有保活租约，期间**不会被空闲回收**——所以 `run_workflow { wait:true, timeoutSeconds:2400 }` 中途不会出现 "idle timeout, stopping worker"。只有真正空闲（等模型、等用户）才回收；回收日志形如「空闲 5 分钟，回收 Worker（…）；下次 kg_* 调用会自动重启（冷启动约 1 秒）」，**不是错误**。
+- **回收不算崩溃**：空闲回收/主动关闭退出不进入崩溃计数，避免反复回收后误触发「暂停重启」熔断。
+- **诊断**：`kg_admin status` 末行显示空闲回收时长、是否处于长任务保活；`DuckDbProcessClient.describeIdlePolicy(root)` 可编程查询。
 - **协议**：请求 `{id, op, payload, timeoutMs}`，响应 `{id, ok, result|error}`；`ready` 握手校验协议版本；`cancel` 触发 `connection.interrupt()`。
 
 ### 2.1 目录布局
@@ -458,7 +461,7 @@ kg_import { target: "nodes", path: "data/nodes.parquet", mode: "replace", confir
 | `DUCKDB_MEMORY_LIMIT_MB` | 2048 | DuckDB `memory_limit` |
 | `DUCKDB_THREADS` | `min(4, CPU-1)` | DuckDB `threads` |
 | `DUCKDB_QUERY_TIMEOUT_MS` | 120000 | 单请求超时（上限 600000） |
-| `DUCKDB_IDLE_TIMEOUT_MS` | 300000 | 空闲回收 |
+| `DUCKDB_IDLE_TIMEOUT_MS` | 300000 | 空闲回收（长任务/工具调用期间自动保活） |
 | `DUCKDB_MAX_WORKERS` | 3 | 同时存活的工作区 Worker 数 |
 | `DUCKDB_WORKER_HEAP_MB` | 2048 | Worker V8 堆上限 |
 | `DUCKDB_DISABLED` | — | `1` 时关闭知识图谱能力 |
@@ -489,6 +492,8 @@ pnpm run electron:build
 | `SQL_REJECTED` | 写了非只读 SQL 或文件函数 | 改用 `kg_upsert`/`kg_import`/`kg_query` 只读 |
 | `PATH_REJECTED` | 路径越界或指向 `.duckdb` 文件 | 使用工作区相对路径；数据库只用工具访问 |
 | Worker 反复崩溃 | 内存不足/数据损坏 | 查看 stderr 尾部提示；`kg_admin validate`；必要时导出重建 |
+| 日志出现「空闲 N 分钟，回收 Worker」 | 正常空闲回收（长任务期间不会触发） | 无需处理；下次 `kg_*` 自动重启（约 1 秒）。想减少回收频率就调大 `DUCKDB_IDLE_TIMEOUT_MS` |
+| `DUCKDB Worker 在 60s 内崩溃 N 次，已暂停重启` | 连续非预期退出达到熔断阈值 | 看 stderr 定位真实崩溃原因；空闲回收与主动关闭不会计入该计数 |
 
 ## 11. 推荐工作流
 
