@@ -151,7 +151,7 @@ export class KnowledgeGraphService {
             text += `\n提示：结果超过 maxRows=${result.rowCount}，请加 WHERE/LIMIT 缩小范围，或传 outputPath 导出完整结果。`;
         }
         if (!result.rowCount) {
-            text += '\n提示：0 行通常是属性键名/取值不匹配（props->>\'键\' 区分大小写）或关系方向反了；先用 kg_attr_list 或 kg_find 确认键名与取值，再调整 SQL。';
+            text += '\n提示：0 行通常是属性键名/取值不匹配（props->>\'键\' 区分大小写）或关系方向反了；先用 kg_list_attrs 或 kg_find 确认键名与取值，再调整 SQL。';
         }
         return await this.finalize('kg_query', text, result);
     }
@@ -455,7 +455,7 @@ export class KnowledgeGraphService {
             confirm: params.confirm === true,
         }, context) as any;
         return [
-            `[kg_attr_define] ${result.scope}.${result.key} : ${result.type}`
+            `[kg_define_attr] ${result.scope}.${result.key} : ${result.type}`
             + `${result.required ? ' · required' : ''}${result.indexed ? ' · indexed' : ''}`
             + `${result.unique ? ' · unique' : ''}${result.identity ? ' · identity' : ''}`,
             result.domain?.length ? `属性域（rdfs:domain）：${result.domain.join(' / ')}` : '',
@@ -484,12 +484,12 @@ export class KnowledgeGraphService {
         }, context) as any;
         const definitions: any[] = result.definitions || [];
         if (!definitions.length) {
-            return '[kg_attr_list] 尚未声明任何属性。写入 props 前建议先用 kg_attr_define 声明类型/必填/枚举/索引。';
+            return '[kg_list_attrs] 尚未声明任何属性。写入 props 前建议先用 kg_define_attr 声明类型/必填/枚举/索引。';
         }
         const columns = ['scope', 'key', 'value_type', 'required', 'indexed', 'unique_value', 'identity', 'indexRows'];
         if (includeStats) columns.push('presentRows', 'distinctValues');
         const lines = [
-            `[kg_attr_list] ${definitions.length} 个属性规范`,
+            `[kg_list_attrs] ${definitions.length} 个属性规范`,
             this.formatTable(columns, definitions),
         ];
         for (const def of definitions) {
@@ -497,7 +497,7 @@ export class KnowledgeGraphService {
                 lines.push('', `## ${def.scope}.${def.key} Top`, this.formatTable(['value', 'count'], def.topValues));
             }
         }
-        return await this.finalize('kg_attr_list', lines.join('\n'), result);
+        return await this.finalize('kg_list_attrs', lines.join('\n'), result);
     }
 
     public async attrDelete(params: Record<string, unknown>, context?: ToolContextLike): Promise<string> {
@@ -506,7 +506,7 @@ export class KnowledgeGraphService {
             key: params.key,
         }, context) as any;
         return [
-            `[kg_attr_delete] ${result.scope}.${result.key}：${result.deleted ? '规范已删除' : '规范不存在'}，清理索引 ${result.removedIndexRows} 行。`,
+            `[kg_delete_attr] ${result.scope}.${result.key}：${result.deleted ? '规范已删除' : '规范不存在'}，清理索引 ${result.removedIndexRows} 行。`,
             result.note,
         ].join('\n');
     }
@@ -533,7 +533,7 @@ export class KnowledgeGraphService {
             + `${result.truncated ? '（已截断）' : ''} · 属性索引 ${result.usedIndex ? '已命中' : '未使用'} · ${result.elapsedMs}ms`;
         const undeclared: string[] = result.undeclaredKeys || [];
         const warning = undeclared.length
-            ? `\n⚠ 未声明属性 ${undeclared.join(', ')}：仍按 props 原值过滤且不走索引，建议先 kg_attr_define。`
+            ? `\n⚠ 未声明属性 ${undeclared.join(', ')}：仍按 props 原值过滤且不走索引，建议先 kg_define_attr。`
             : '';
         return await this.finalize(
             `kg_find_${scope}`,

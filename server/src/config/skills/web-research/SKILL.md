@@ -52,7 +52,7 @@ triggers:
 
 ## 3. 网页内容 → Markdown
 
-1. 用 `playwright__browser_navigate` 打开页面，`playwright__browser_evaluate` 提取正文（优先 `document.querySelector("article")?.innerText`，否则 `document.body.innerText`），用 `file_write` 写入 `.md`（`encoding: "utf-8"`）。
+1. 用 `playwright__browser_navigate` 打开页面，`playwright__browser_evaluate` 提取正文（优先 `document.querySelector("article")?.innerText`，否则 `document.body.innerText`），用 `write_file` 写入 `.md`（`encoding: "utf-8"`）。
 2. 长文分段提取、分段写入，禁止一次性抓整页导致截断。
 3. **严禁用截图代替内容保存**。截图只允许用于 UI 视觉验收、调试布局、用户明确要求看效果。
 

@@ -16,6 +16,7 @@ import {
     FORBIDDEN_TODO_WRITE_TOOLS,
     FORBIDDEN_WORKFLOW_TOOLS,
 } from '@/workflow/workflowToolPolicy.js';
+import { describeLegacyToolName, isLegacyToolName, resolveToolName } from '@/tools/toolNames.js';
 
 export type WorkflowLintSeverity = 'error' | 'warning' | 'info';
 
@@ -509,16 +510,24 @@ function checkStepDefinition(entry: StepEntry, state: LintState): void {
             'agent 步骤缺少 with.prompt', '补上 prompt 或 instruction。');
     }
     if (kind === 'tool') {
-        const toolName = withConfig.tool ?? withConfig.name;
-        if (!nonEmptyString(toolName)) {
+        const rawToolName = withConfig.tool ?? withConfig.name;
+        if (!nonEmptyString(rawToolName)) {
             push('with_missing_tool', 'error', `${entry.path}/with/tool`,
                 'tool 步骤缺少 with.tool', '指定要调用的工具名。');
-        } else if (FORBIDDEN_WORKFLOW_TOOLS.has(toolName) || FORBIDDEN_TODO_WRITE_TOOLS.has(toolName)) {
-            push('tool_forbidden', 'error', `${entry.path}/with/tool`,
-                `workflow 内禁止调用工具 ${toolName}`, '改用 kg_* / file_* 等业务工具。');
-        } else if (state.knownTools && !state.knownTools.has(toolName)) {
-            push('tool_unknown', 'warning', `${entry.path}/with/tool`,
-                `未注册的工具名 ${toolName}`, '检查工具名拼写或该工具是否已注册。');
+        } else {
+            const toolName = resolveToolName(String(rawToolName));
+            if (isLegacyToolName(String(rawToolName))) {
+                push('tool_deprecated', 'warning', `${entry.path}/with/tool`,
+                    `${describeLegacyToolName(String(rawToolName))}（历史宾+动命名）`,
+                    `把 with.tool 改为 ${toolName}；别名仍可执行，但新名字更符合动宾直觉。`);
+            }
+            if (FORBIDDEN_WORKFLOW_TOOLS.has(toolName) || FORBIDDEN_TODO_WRITE_TOOLS.has(toolName)) {
+                push('tool_forbidden', 'error', `${entry.path}/with/tool`,
+                    `workflow 内禁止调用工具 ${toolName}`, '改用 kg_* 或文件读写类业务工具。');
+            } else if (state.knownTools && !state.knownTools.has(toolName)) {
+                push('tool_unknown', 'warning', `${entry.path}/with/tool`,
+                    `未注册的工具名 ${toolName}`, '检查工具名拼写或该工具是否已注册。');
+            }
         }
     }
     if (kind === 'shell') {
@@ -557,7 +566,14 @@ function checkStepDefinition(entry: StepEntry, state: LintState): void {
             push('tools_invalid', 'error', `${entry.path}/with/tools`,
                 'with.tools 必须是非空字符串数组', '例如 tools: [read_file, list_files]。');
         } else {
-            const names = (withConfig.tools as string[]).map((name) => String(name).trim());
+            const rawNames = (withConfig.tools as string[]).map((name) => String(name).trim());
+            const legacy = rawNames.filter((name) => isLegacyToolName(name));
+            if (legacy.length) {
+                push('tool_deprecated', 'warning', `${entry.path}/with/tools`,
+                    `历史工具名：${legacy.map((name) => describeLegacyToolName(name)).join('；')}`,
+                    '改成动宾结构的规范名；别名仍可执行。');
+            }
+            const names = rawNames.map((name) => resolveToolName(name));
             const dropped = names.filter((name) => (
                 FORBIDDEN_WORKFLOW_TOOLS.has(name) || FORBIDDEN_TODO_WRITE_TOOLS.has(name)
             ));

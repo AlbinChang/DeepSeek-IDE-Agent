@@ -5,7 +5,7 @@ import { ToolManager } from '@/services/ToolManager.js';
 const createManager = () => {
     const manager = new ToolManager();
     manager.registerTool({
-        name: 'file_write',
+        name: 'write_file',
         description: 'test file writer',
         parameters: {
             type: 'object',
@@ -19,7 +19,7 @@ const createManager = () => {
         execute: async () => ({ status: 'success' })
     });
     manager.registerTool({
-        name: 'file_replace',
+        name: 'replace_in_file',
         description: 'test file replacer',
         parameters: {
             type: 'object',
@@ -33,7 +33,7 @@ const createManager = () => {
         execute: async () => ({ status: 'success' })
     });
     manager.registerTool({
-        name: 'file_insert',
+        name: 'insert_in_file',
         description: 'test file inserter',
         parameters: {
             type: 'object',
@@ -63,21 +63,21 @@ const createManager = () => {
 };
 
 describe('ToolManager argument validation', () => {
-    it('rejects file_write when content is missing', async () => {
-        await expect(createManager().executeTool('user', 'file_write', {
+    it('rejects write_file when content is missing', async () => {
+        await expect(createManager().executeTool('user', 'write_file', {
             path: 'report.md'
         }, 'trace')).rejects.toThrow('content 缺少必填字段');
     });
 
-    it('rejects file_replace when oldText is missing', async () => {
-        await expect(createManager().executeTool('user', 'file_replace', {
+    it('rejects replace_in_file when oldText is missing', async () => {
+        await expect(createManager().executeTool('user', 'replace_in_file', {
             path: 'report.md',
             newText: 'hello'
         }, 'trace')).rejects.toThrow('oldText 缺少必填字段');
     });
 
-    it('rejects file_insert when startLine is missing', async () => {
-        await expect(createManager().executeTool('user', 'file_insert', {
+    it('rejects insert_in_file when startLine is missing', async () => {
+        await expect(createManager().executeTool('user', 'insert_in_file', {
             path: 'report.md',
             newText: 'hello'
         }, 'trace')).rejects.toThrow('startLine 缺少必填字段');
@@ -93,21 +93,21 @@ describe('ToolManager argument validation', () => {
         const manager = createManager();
         await expect(manager.executeTool(
             'user',
-            'file_write',
+            'write_file',
             { path: 'report.md', content: 'hello' },
             'trace',
-            { allowedToolNames: new Set(['file_replace']) },
-        )).rejects.toThrow('Tool "file_write" is not allowed in this run');
+            { allowedToolNames: new Set(['replace_in_file']) },
+        )).rejects.toThrow('Tool "write_file" is not allowed in this run');
     });
 
     it('allows tools inside the allowed tool name set', async () => {
         const manager = createManager();
         await expect(manager.executeTool(
             'user',
-            'file_write',
+            'write_file',
             { path: 'report.md', content: 'hello' },
             'trace',
-            { allowedToolNames: new Set(['file_write']) },
+            { allowedToolNames: new Set(['write_file']) },
         )).resolves.toEqual({ status: 'success' });
     });
 
@@ -115,5 +115,29 @@ describe('ToolManager argument validation', () => {
         await expect(createManager().executeTool('user', 'browser_mcp_call', {
             toolName: 'browser_snapshot'
         }, 'trace')).rejects.toThrow('args 缺少必填字段');
+    });
+});
+
+describe('ToolManager legacy tool-name aliases', () => {
+    it('resolves 宾+动 legacy names to the canonical 动+宾 tools', async () => {
+        const manager = createManager();
+        expect(manager.getTool('file_write')?.name).toBe('write_file');
+        await expect(manager.executeTool(
+            'user',
+            'file_insert',
+            { path: 'report.md', startLine: 1, newText: 'hello' },
+            'trace',
+        )).resolves.toEqual({ status: 'success' });
+    });
+
+    it('accepts a legacy name in the allowed tool set', async () => {
+        const manager = createManager();
+        await expect(manager.executeTool(
+            'user',
+            'write_file',
+            { path: 'report.md', content: 'hello' },
+            'trace',
+            { allowedToolNames: new Set(['file_write']) },
+        )).resolves.toEqual({ status: 'success' });
     });
 });

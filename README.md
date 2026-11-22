@@ -178,7 +178,7 @@ pnpm run electron:dev
 
 | 工具类别 | 说明 |
 |----------|------|
-| 📄 文件操作 | 读取、写入（`file_write`）、精准替换（`file_replace`）、行号插入（`file_insert`）、删除工作区文件 |
+| 📄 文件操作 | 读取、写入（`write_file`）、精准替换（`replace_in_file`）、行号插入（`insert_in_file`）、删除工作区文件 |
 | 🖥️ 终端命令 | PowerShell / CMD 命令执行（阻塞式，返回完整输出） |
 | 🔍 代码搜索 | 工作区内的文件搜索与内容搜索 |
 | 📋 文件列表 | 受控递归目录结构获取 |
@@ -186,6 +186,8 @@ pnpm run electron:dev
 | 🔌 MCP 工具 | 用户自定义 MCP 服务器工具动态注入 |
 | 🧩 专项技能 | `read_skill` 按需加载内置技能（PPT 设计、SVG 图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱） |
 | 🕸️ 知识图谱 | `kg_*`：DuckDB 独立进程（NDJSON IPC），百万级实体/关系/属性建模、RDF 风格词表（domain/range）、语义唯一性（unique/identity）、`kg_lint` 编译式校验、`kg_merge` 实体归一、多跳属性推理、PageRank/社区分析；数据仅存于工作区 `.duckdb/` |
+
+> 工具命名统一为「动 + 宾」（verb-object）：`write_file`、`replace_in_file`、`insert_in_file`、`replace_all_in_file`、`kg_define_attr`、`kg_list_attrs`、`kg_delete_attr`。历史「宾 + 动」名字（`file_write`、`file_replace`、`file_insert`、`file_replace_all`、`kg_attr_define`、`kg_attr_list`、`kg_attr_delete`）作为别名仍可调用，`validate_workflow` 会对它们报 `tool_deprecated` 提示迁移。
 
 ### 4.2.1 系统提示词与专项技能
 

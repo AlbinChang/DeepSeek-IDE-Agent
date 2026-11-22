@@ -123,17 +123,17 @@ describe('workflow lint (compile check)', () => {
                     call: 'agent',
                     with: {
                         prompt: 'hi',
-                        tools: ['read_file', 'run_workflow', 'file_write', 'not_a_tool'],
+                        tools: ['read_file', 'run_workflow', 'write_file', 'not_a_tool'],
                     },
                 },
             },
             {
                 evaluator: {
                     call: 'evaluator',
-                    with: { target: 'out.md', tools: ['read_file', 'file_write'] },
+                    with: { target: 'out.md', tools: ['read_file', 'write_file'] },
                 },
             },
-        ]), { knownTools: ['read_file', 'list_files', 'file_write'] });
+        ]), { knownTools: ['read_file', 'list_files', 'write_file'] });
         const byCode = result.diagnostics.map((item) => `${item.code}:${item.path}`);
         expect(byCode.some((entry) => entry.startsWith('tool_forbidden'))).toBe(true);
         expect(byCode.some((entry) => entry.startsWith('tool_unknown'))).toBe(true);
@@ -145,6 +145,29 @@ describe('workflow lint (compile check)', () => {
         ]));
         expect(codes(invalid)).toContain('tools_invalid');
         expect(invalid.ok).toBe(false);
+    });
+
+    it('flags legacy 宾+动 tool names without blocking execution', async () => {
+        const result = await lintWorkflowDocument(doc([
+            {
+                agent: {
+                    call: 'agent',
+                    with: { prompt: 'hi', tools: ['read_file', 'file_write'] },
+                },
+            },
+            { step: { call: 'tool', with: { tool: 'kg_attr_list' } } },
+        ]), { knownTools: ['read_file', 'write_file', 'kg_list_attrs'] });
+
+        const byCode = result.diagnostics.map((item) => item.code);
+        expect(byCode).toContain('tool_deprecated');
+        expect(byCode).not.toContain('tool_unknown');
+        expect(result.ok).toBe(true);
+        const message = result.diagnostics
+            .filter((item) => item.code === 'tool_deprecated')
+            .map((item) => item.message)
+            .join(' ');
+        expect(message).toContain('write_file');
+        expect(message).toContain('kg_list_attrs');
     });
 
     it('validates output schema, secrets and duration configs', async () => {

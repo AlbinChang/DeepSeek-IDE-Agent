@@ -1,4 +1,4 @@
-﻿/**
+/**
  * DuckDB Worker 核心：所有数据库读写都发生在这里（独立子进程内）。
  *
  * 设计要点：
@@ -639,7 +639,7 @@ export class DuckDbWorkerCore {
             results.push({
                 check: `${scope}_undeclared_attrs`,
                 value: extra.length ? extra.slice(0, 50).join(', ') : '0',
-                hint: `未声明的属性 ${extra.length} 个；建议先 kg_attr_define 再写入`,
+                hint: `未声明的属性 ${extra.length} 个；建议先 kg_define_attr 再写入`,
             });
         }
 
@@ -3163,7 +3163,7 @@ export class DuckDbWorkerCore {
                 if (def.required) {
                     throw new DuckDbToolError(
                         DUCKDB_ERROR_CODES.invalidRequest,
-                        `${label} 缺少必填属性 "${def.key}"（${def.value_type}）。先用 kg_attr_list 查看规范。`,
+                        `${label} 缺少必填属性 "${def.key}"（${def.value_type}）。先用 kg_list_attrs 查看规范。`,
                     );
                 }
                 continue;
@@ -3187,7 +3187,7 @@ export class DuckDbWorkerCore {
         if (unknownKeys.length && strict) {
             throw new DuckDbToolError(
                 DUCKDB_ERROR_CODES.invalidRequest,
-                `${label} 含未声明属性（strictProps=true）：${unknownKeys.join(', ')}。请先用 kg_attr_define 声明。`,
+                `${label} 含未声明属性（strictProps=true）：${unknownKeys.join(', ')}。请先用 kg_define_attr 声明。`,
             );
         }
         if (unknownKeys.length) {

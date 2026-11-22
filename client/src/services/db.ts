@@ -42,7 +42,8 @@ const sanitizePersistedValue = (value: any, depth = 0): any => {
 
 const sanitizePersistedWriteArgs = (toolName: string, args: any) => {
   if (!args || typeof args !== 'object') return args;
-  if (toolName === 'file_write') {
+  // 兼容历史（宾+动）命名 file_write
+  if (toolName === 'write_file' || toolName === 'file_write') {
     const contentChars = typeof args.content === 'string' ? args.content.length : Number(args.content?.chars) || 0;
     return sanitizePersistedValue({ ...args, content: hiddenTextSummary(contentChars, 'file_content') });
   }

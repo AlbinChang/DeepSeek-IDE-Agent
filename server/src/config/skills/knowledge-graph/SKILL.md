@@ -18,7 +18,7 @@ triggers:
 
 ## 0. 一句话原则
 
-实体/关系数据只经 `kg_*` 工具写入工作区 `.duckdb/kg.duckdb`；**禁止**用 `read_file`/`file_write`/`run_powershell_command` 直接操作 `.duckdb` 或 `.wal` 文件。
+实体/关系数据只经 `kg_*` 工具写入工作区 `.duckdb/kg.duckdb`；**禁止**用 `read_file`/`write_file`/`run_powershell_command` 直接操作 `.duckdb` 或 `.wal` 文件。
 
 ## 1. 选工具
 
@@ -32,7 +32,7 @@ triggers:
 | 新增/更新少量节点或关系（≤5000） | `kg_upsert` |
 | 从 NDJSON/CSV/Parquet 批量入库（≥1 万行） | `kg_import` |
 | 按属性找节点/边（等值/范围/包含/存在/in） | `kg_find` |
-| 声明/查看/删除属性规范 | `kg_attr_define` / `kg_attr_list` / `kg_attr_delete` |
+| 声明/查看/删除属性规范 | `kg_define_attr` / `kg_list_attrs` / `kg_delete_attr` |
 | 看某点周围 N 跳子图 | `kg_traverse` |
 | 两点之间关系链（可逐跳约束） | `kg_path` |
 | 规模、类型分布、度、PageRank、连通分量、社区 | `kg_analyze` |
@@ -60,9 +60,9 @@ kg_identity(key_hash PK, node_id, keys_json)：identity 组合键的 md5 索引
 
 | 步骤 | 工具 | 说明 |
 | --- | --- | --- |
-| 声明属性 | `kg_attr_define` | `type`: string/number/boolean/date/json；可设 `required`、`enum`、`indexed`、`unique`、`identity`、`domain` |
-| 查看规范/分布 | `kg_attr_list` | `includeStats:true` 看覆盖率/去重数；`topValues` 看取值分布 |
-| 删除规范 | `kg_attr_delete` | 只删规范与索引，保留 props 历史值 |
+| 声明属性 | `kg_define_attr` | `type`: string/number/boolean/date/json；可设 `required`、`enum`、`indexed`、`unique`、`identity`、`domain` |
+| 查看规范/分布 | `kg_list_attrs` | `includeStats:true` 看覆盖率/去重数；`topValues` 看取值分布 |
+| 删除规范 | `kg_delete_attr` | 只删规范与索引，保留 props 历史值 |
 | 写入校验 | `kg_upsert` | 已声明属性强校验必填/类型/枚举；未声明属性默认 warning，`strictProps:true` 拒绝 |
 | 存量核验 | `kg_admin validate` | 必填缺失/类型/枚举/索引漂移/未声明属性/孤儿边 |
 | 重建索引 | `kg_admin reindex` | 索引异常或历史变更后执行（整表重建，秒级） |
@@ -78,10 +78,10 @@ kg_identity(key_hash PK, node_id, keys_json)：identity 组合键的 md5 索引
 | --- | --- | --- |
 | 节点类型分层（rdfs:subClassOf） | `kg_vocab {action:"define", kind:"class", name, parent}` | `kg_lint`：`vocab_unknown_parent` / `vocab_cycle` |
 | 关系域/值域（rdfs:domain/range） | `kg_vocab {kind:"property", name, domain, range}` | `kg_upsert` 拒绝违规；`kg_lint` 报 `edge_*_violation` |
-| 属性只允许某些类型 | `kg_attr_define {domain:[...]}` | `kg_upsert` 拒绝；`kg_lint` 报 `attr_domain_violation` |
-| 值全局唯一（owl:InverseFunctionalProperty） | `kg_attr_define {unique:true}` | `kg_upsert` 冲突拒绝；`kg_lint` 报 `attr_unique_duplicate` |
-| 实体自然键（同一性） | `kg_attr_define {identity:true}`（可多个组合） | `kg_identity` 索引 + `kg_lint`：`identity_duplicate` / `identity_incomplete` / `identity_index_drift` |
-| 唯一性只作用于某类（rdfs:domain 收敛） | `kg_attr_define {unique/identity, domain:["company"]}` | 只有 `domain` 内类型（含子类）参与唯一/身份键判定与 lint 统计；不声明 `domain` 表示全局唯一 |
+| 属性只允许某些类型 | `kg_define_attr {domain:[...]}` | `kg_upsert` 拒绝；`kg_lint` 报 `attr_domain_violation` |
+| 值全局唯一（owl:InverseFunctionalProperty） | `kg_define_attr {unique:true}` | `kg_upsert` 冲突拒绝；`kg_lint` 报 `attr_unique_duplicate` |
+| 实体自然键（同一性） | `kg_define_attr {identity:true}`（可多个组合） | `kg_identity` 索引 + `kg_lint`：`identity_duplicate` / `identity_incomplete` / `identity_index_drift` |
+| 唯一性只作用于某类（rdfs:domain 收敛） | `kg_define_attr {unique/identity, domain:["company"]}` | 只有 `domain` 内类型（含子类）参与唯一/身份键判定与 lint 统计；不声明 `domain` 表示全局唯一 |
 | 对称关系 | `kg_vocab {symmetric:true}` | `kg_lint`：`symmetric_missing_inverse` |
 | 传递关系 | `kg_vocab {transitive:true}` | `kg_lint {deep:true}`：`transitive_missing_shortcut` |
 | 重复实体归一（owl:sameAs） | `kg_merge {source, target, confirm:true}` | 合并后 `kg_lint` 复检 |
@@ -95,7 +95,7 @@ kg_identity(key_hash PK, node_id, keys_json)：identity 组合键的 md5 索引
 ## 3. 写入流程
 
 1. 先用 `kg_find`/`kg_query` 确认 ID 命名与是否已存在（避免重复实体）。
-2. 关系类型先用 `kg_vocab` 声明 `domain/range`；写入新属性前先 `kg_attr_define` 声明类型/必填/枚举；需要检索加速时加 `indexed:true`。
+2. 关系类型先用 `kg_vocab` 声明 `domain/range`；写入新属性前先 `kg_define_attr` 声明类型/必填/枚举；需要检索加速时加 `indexed:true`。
 3. 同一实体只能有一个邮箱/工号这类语义时，用 `unique:true` 或 `identity:true` 表达。
 4. 少量数据用 `kg_upsert`；大批量先落 NDJSON/Parquet 再 `kg_import`。
 5. 导入列名不一致时用 `columnMap`，例如 `{"src":"from_id","dst":"to_id","type":"rel"}`。
@@ -107,8 +107,8 @@ kg_vocab { action:"define", kind:"class", name:"person" }
 kg_vocab { action:"define", kind:"class", name:"employee", parent:"person" }
 kg_vocab { action:"define", kind:"property", name:"works_at",
            domain:["person"], range:["company"] }
-kg_attr_define { scope:"node", key:"email", type:"string", unique:true }
-kg_attr_define { scope:"node", key:"employee_no", type:"string", identity:true }
+kg_define_attr { scope:"node", key:"email", type:"string", unique:true }
+kg_define_attr { scope:"node", key:"employee_no", type:"string", identity:true }
 kg_upsert {
   nodes: [{ id: "p1", type: "person", name: "张三",
             props: { dept: "风控", email: "z@corp", employee_no: "E-001" } }],

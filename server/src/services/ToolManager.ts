@@ -1,5 +1,6 @@
 import { ToolLogger } from '@/utils/ToolLogger.js';
 import { AgentService } from "@/services/AgentService.js";
+import { resolveToolName } from '@/tools/toolNames.js';
 
 export interface ToolExecutionContext {
     userId?: string;
@@ -52,7 +53,7 @@ export class ToolManager {
     }
 
     getTool(name: string): ToolDefinition | undefined {
-        return this.tools.get(name);
+        return this.tools.get(resolveToolName(name));
     }
 
     getAllTools(): ToolDefinition[] {
@@ -249,11 +250,12 @@ export class ToolManager {
         traceId: string,
         executionContext: ToolExecutionContext = {},
     ): Promise<any> {
-        let resolvedToolName = toolName;
+        let resolvedToolName = resolveToolName(toolName);
         let resolvedArgs = args;
-        let tool = this.getTool(resolvedToolName);
+        let tool = this.tools.get(resolvedToolName);
 
-        // LLM 容错：若误把原生 Playwright MCP 工具名当作顶层工具，自动改写为 browser_mcp_call。
+        // LLM 容错：若把原生 Playwright MCP 工具名（browser_*）当作顶层工具调用，
+        // 自动改写为桥接名 playwright__browser_*。
         if (!tool) {
             const rewritten = this.rewriteMissingBrowserToolCall(resolvedToolName, resolvedArgs);
             if (rewritten) {
@@ -268,7 +270,10 @@ export class ToolManager {
         }
 
         // 白名单必须在执行前校验：仅过滤 toolsMetadata 无法阻止模型自行输出未列出的工具名。
-        if (executionContext.allowedToolNames && !executionContext.allowedToolNames.has(resolvedToolName)) {
+        // 白名单里可能写着历史（宾+动）名字，比较前统一归一化到规范名。
+        const allowed = executionContext.allowedToolNames;
+        if (allowed && !allowed.has(resolvedToolName)
+            && !Array.from(allowed, (name) => resolveToolName(name)).includes(resolvedToolName)) {
             throw new Error(`Tool "${resolvedToolName}" is not allowed in this run`);
         }
 

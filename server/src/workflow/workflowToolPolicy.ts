@@ -5,6 +5,8 @@
  * 避免「配置里写了但运行时被静默丢弃」的语义漂移。
  */
 
+import { resolveToolName } from '@/tools/toolNames.js';
+
 export const READONLY_AGENT_TOOLS = [
     'read_skill',
     'read_file',
@@ -36,24 +38,31 @@ export const FORBIDDEN_TODO_WRITE_TOOLS = new Set(['append_todo', 'update_todo',
 
 /** evaluator 永久只读：即使显式声明也不授予写能力 */
 export const EVALUATOR_FORBIDDEN_WRITE_TOOLS = [
-    'file_write',
+    'write_file',
     'delete_path',
-    'file_replace',
-    'file_insert',
-    'file_replace_all',
+    'replace_in_file',
+    'insert_in_file',
+    'replace_all_in_file',
     'run_powershell_command',
     'run_cmd_command',
 ];
 
+/** 历史（宾+动）工具名统一转成规范（动+宾）名，保证老工作流仍能执行。 */
+function normalizeRequested(requested?: string[]): string[] | undefined {
+    return requested?.map((name) => resolveToolName(name));
+}
+
 export function resolveAgentTools(requested?: string[]): ReadonlySet<string> {
-    const tools = new Set(requested && requested.length > 0 ? requested : READONLY_AGENT_TOOLS);
+    const normalized = normalizeRequested(requested);
+    const tools = new Set(normalized && normalized.length > 0 ? normalized : READONLY_AGENT_TOOLS);
     for (const name of FORBIDDEN_WORKFLOW_TOOLS) tools.delete(name);
     for (const name of FORBIDDEN_TODO_WRITE_TOOLS) tools.delete(name);
     return tools;
 }
 
 export function resolveEvaluatorTools(requested?: string[]): ReadonlySet<string> {
-    const tools = new Set(requested && requested.length > 0 ? requested : READONLY_EVALUATOR_TOOLS);
+    const normalized = normalizeRequested(requested);
+    const tools = new Set(normalized && normalized.length > 0 ? normalized : READONLY_EVALUATOR_TOOLS);
     for (const name of FORBIDDEN_WORKFLOW_TOOLS) tools.delete(name);
     for (const name of FORBIDDEN_TODO_WRITE_TOOLS) tools.delete(name);
     for (const name of EVALUATOR_FORBIDDEN_WRITE_TOOLS) tools.delete(name);

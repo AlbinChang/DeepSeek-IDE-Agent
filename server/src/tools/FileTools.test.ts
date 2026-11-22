@@ -223,7 +223,7 @@ describe('FileTools.editFileByReplace & EOL Normalization', () => {
     });
 });
 
-describe('file_replace nearest-match hint', () => {
+describe('replace_in_file nearest-match hint', () => {
     it('points at the closest line when oldText is not found', () => {
         const content = [
             'def collect_universe(run_dir):',

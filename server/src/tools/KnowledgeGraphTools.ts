@@ -304,7 +304,7 @@ export class KnowledgeGraphTools {
                 },
             },
             {
-                name: 'kg_attr_define',
+                name: 'kg_define_attr',
                 description: '声明/更新属性规范：类型、必填、枚举、是否索引；indexed 会自动回填属性索引。',
                 parameters: {
                     type: 'object',
@@ -329,7 +329,7 @@ export class KnowledgeGraphTools {
                 },
             },
             {
-                name: 'kg_attr_list',
+                name: 'kg_list_attrs',
                 description: '列出属性规范；includeStats 返回覆盖率/去重数，topValues 返回 Top 值。',
                 parameters: {
                     type: 'object',
@@ -341,7 +341,7 @@ export class KnowledgeGraphTools {
                 },
             },
             {
-                name: 'kg_attr_delete',
+                name: 'kg_delete_attr',
                 description: '删除属性规范及其索引；节点/边 props 中的历史值保留。',
                 parameters: {
                     type: 'object',

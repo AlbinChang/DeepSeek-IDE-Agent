@@ -1,4 +1,4 @@
-﻿import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import Dexie from "dexie";
 import { USER_ID } from "@/config";
 import { useAgentContext, useTodoContext, useProblemContext } from "@/providers/AgentContext";
@@ -203,7 +203,8 @@ const sanitizeValueForClient = (value: any, meta: RedactionMeta, depth = 0): any
 const sanitizeWriteToolArgs = (toolName: string, args: any, meta: RedactionMeta): any | null => {
     if (!args || typeof args !== 'object') return null;
 
-    if (toolName === 'file_write') {
+    // 兼容历史（宾+动）命名 file_write
+    if (toolName === 'write_file' || toolName === 'file_write') {
         const contentChars = typeof args.content === 'string' ? args.content.length : Number(args.content?.chars) || 0;
         meta.redacted = true;
         meta.redactedStringChars += contentChars;
@@ -843,15 +844,18 @@ export function useAgentSSE() {
                 // 文件写入/编辑工具执行成功后，通知编辑器刷新
                 // detail 同时携带相对 path 与绝对 absolutePath，供 FileEditor 归一化匹配
                 const fileWriteTools = new Set([
+                    'write_file',
+                    'replace_in_file',
+                    'insert_in_file',
+                    'replace_all_in_file',
+                    'delete_path',
+                    // 兼容历史（宾+动）命名与其他别名
                     'file_write',
                     'file_replace',
                     'file_insert',
                     'file_replace_all',
-                    'delete_path',
                     'create_file',
-                    'write_file',
                     'apply_patch',
-                    'replace_in_file',
                 ]);
                 // 命令/终端类工具可能间接创建、下载、删除文件
                 // （如 run_powershell_command 的 Invoke-WebRequest 下载图片到 docs/images/），

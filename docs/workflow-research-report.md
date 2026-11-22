@@ -358,7 +358,7 @@ do:
               prompt: |
                 按以下计划实现，完成后列出变更文件。
                 计划：${ .steps.plan.output }
-              tools: [read_file, file_write, file_replace, file_insert, run_powershell_command]
+              tools: [read_file, write_file, replace_in_file, insert_in_file, run_powershell_command]
               maxTurns: 20
             timeout:
               after:
@@ -901,7 +901,7 @@ flowchart TD
 
 **准入与公平性**：
 
-- `concurrencyGroup`（workflow metadata，可选）：同组 run 串行；写型 workflow 默认 `group=workspace-write`。写型判定可扫描步骤中的 `file_write`/`file_replace`/`run.shell` 等，或由 metadata 显式声明；无法判定时保守串行。
+- `concurrencyGroup`（workflow metadata，可选）：同组 run 串行；写型 workflow 默认 `group=workspace-write`。写型判定可扫描步骤中的 `write_file`/`replace_in_file`/`run.shell` 等，或由 metadata 显式声明；无法判定时保守串行。
 - 同一 workspace 的写型 run 默认串行；只读 run 可并行。
 - 队列 FIFO；可选 priority；不抢占运行中的 run。
 - `run_workflow` 默认 `wait=false` 返回 `{ runId, status: "queued", position }`；`wait=true` 在工具调用内等待完成（受 `timeoutSeconds` 限制）。

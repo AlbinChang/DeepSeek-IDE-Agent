@@ -1,4 +1,4 @@
-﻿import * as os from 'os';
+import * as os from 'os';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
@@ -35,7 +35,7 @@ export function buildFailureHints(command: string, stdout: string, stderr: strin
     const inlinePython = /\bpython(?:3|\.exe)?\s+-c\b/i.test(command);
     const syntaxLike = /SyntaxError|IndentationError|invalid syntax|unexpected token|Unexpected token|Missing '\(|Expressions are only allowed/i.test(stderr);
     if (inlinePython && syntaxLike) {
-        hints.push('内联 python -c 在 PowerShell 下易被引号/花括号解析破坏：改用 file_write 落盘 .py 再执行。');
+        hints.push('内联 python -c 在 PowerShell 下易被引号/花括号解析破坏：改用 write_file 落盘 .py 再执行。');
     } else if (syntaxLike) {
         hints.push('PowerShell 把 { } 当作脚本块：把 Python/JS 代码落盘成文件后执行，或改用单引号 here-string。');
     }

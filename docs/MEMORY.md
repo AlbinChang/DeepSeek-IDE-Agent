@@ -31,7 +31,7 @@
 | Workflow 评估步骤 | `persistReport: false`，不覆盖该文件 |
 
 为保证上述语义不被绕过，Agent 工具层对系统状态目录做了**写保护**：
-`file_write` / `file_replace` / `file_insert` / `file_patch` / `delete_path` 命中
+`write_file` / `replace_in_file` / `insert_in_file` / `file_patch` / `delete_path` 命中
 `.evaluate/` 或 `.memory/` 下的任何路径时直接报错拒绝，提示改用对应记忆工具。
 记忆与报告的写入只发生在系统服务（`MemoryService`、`EvaluationAgentService`）内部。
 

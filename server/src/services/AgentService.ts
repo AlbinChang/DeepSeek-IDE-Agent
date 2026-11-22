@@ -1,4 +1,4 @@
-﻿import { LiveContextStore } from '@/services/LiveContextStore.js';
+import { LiveContextStore } from '@/services/LiveContextStore.js';
 import { ToolManager } from '@/services/ToolManager.js';
 import type { ToolMetadata } from '@/services/ToolManager.js';
 import { WorkspaceRegistry } from '@/services/WorkspaceRegistry.js';
@@ -192,8 +192,8 @@ export class AgentService extends EventEmitter {
 
         console.log('[AgentService] Registering KnowledgeGraphTools (atomic)...');
         // 注册 DuckDB 知识图谱原子工具集 (kg_admin / kg_query / kg_upsert / kg_delete /
-        // kg_traverse / kg_path / kg_analyze / kg_import / kg_attr_* / kg_find /
-        // kg_vocab / kg_lint / kg_merge)；全部经独立 Worker 进程访问 .duckdb。
+        // kg_traverse / kg_path / kg_analyze / kg_import / kg_define_attr / kg_list_attrs /
+        // kg_delete_attr / kg_find / kg_vocab / kg_lint / kg_merge)；全部经独立 Worker 进程访问 .duckdb。
         for (const def of KnowledgeGraphTools.getDefinitions()) {
             const toolName = def.name;
             this.toolManager.registerTool({
@@ -211,9 +211,9 @@ export class AgentService extends EventEmitter {
                         case 'kg_path': return await tools.path(params, context);
                         case 'kg_analyze': return await tools.analyze(params, context);
                         case 'kg_import': return await tools.importData(params, context);
-                        case 'kg_attr_define': return await tools.attrDefine(params, context);
-                        case 'kg_attr_list': return await tools.attrList(params, context);
-                        case 'kg_attr_delete': return await tools.attrDelete(params, context);
+                        case 'kg_define_attr': return await tools.attrDefine(params, context);
+                        case 'kg_list_attrs': return await tools.attrList(params, context);
+                        case 'kg_delete_attr': return await tools.attrDelete(params, context);
                         case 'kg_find': return await tools.find(params, context);
                         case 'kg_vocab': return await tools.vocab(params, context);
                         case 'kg_lint': return await tools.lint(params, context);
@@ -337,10 +337,10 @@ export class AgentService extends EventEmitter {
             }
         });
 
-        console.log('[AgentService] Registering file_write...');
+        console.log('[AgentService] Registering write_file...');
         this.toolManager.registerTool({
-            name: 'file_write',
-            description: '创建或完整覆写文件；局部修改用 file_replace/file_insert，多处替换用 file_replace_all。',
+            name: 'write_file',
+            description: '创建或完整覆写文件；局部修改用 replace_in_file/insert_in_file，多处替换用 replace_all_in_file。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -424,7 +424,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering delete_path...');
         this.toolManager.registerTool({
             name: 'delete_path',
-            description: '物理删除文件或目录；不可用于内容修复，改内容请用 file_replace/file_insert。',
+            description: '物理删除文件或目录；不可用于内容修复，改内容请用 replace_in_file/insert_in_file。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -440,10 +440,10 @@ export class AgentService extends EventEmitter {
             }
         });
 
-        // ── file_replace：精准文本替换 ──
-        console.log('[AgentService] Registering file_replace...');
+        // ── replace_in_file：精准文本替换 ──
+        console.log('[AgentService] Registering replace_in_file...');
         this.toolManager.registerTool({
-            name: 'file_replace',
+            name: 'replace_in_file',
             description: '精确替换唯一匹配的 oldText；多处匹配返回歧义错误，newText 为空时删除匹配内容。',
             parameters: {
                 type: 'object',
@@ -470,7 +470,7 @@ export class AgentService extends EventEmitter {
                         status: 'error',
                         error: 'INVALID_PARAMS',
                         errorPhase: 'replace',
-                        message: 'oldText 不能为空。若要插入内容请使用 file_insert。'
+                        message: 'oldText 不能为空。若要插入内容请使用 insert_in_file。'
                     };
                 }
                 if (typeof params.newText !== 'string') {
@@ -497,10 +497,10 @@ export class AgentService extends EventEmitter {
             }
         });
 
-        // ── file_insert：行号精准插入 ──
-        console.log('[AgentService] Registering file_insert...');
+        // ── insert_in_file：行号精准插入 ──
+        console.log('[AgentService] Registering insert_in_file...');
         this.toolManager.registerTool({
-            name: 'file_insert',
+            name: 'insert_in_file',
             description: '在 startLine 行前插入内容；传「总行数+1」即追加到末尾。',
             parameters: {
                 type: 'object',
@@ -554,9 +554,9 @@ export class AgentService extends EventEmitter {
             }
         });
 
-        console.log('[AgentService] Registering file_replace_all...');
+        console.log('[AgentService] Registering replace_all_in_file...');
         this.toolManager.registerTool({
-            name: 'file_replace_all',
+            name: 'replace_all_in_file',
             description: '把所有字面匹配的 oldText 替换为 newText，适合批量重命名与术语调整。',
             parameters: {
                 type: 'object',
@@ -1178,7 +1178,7 @@ export class AgentService extends EventEmitter {
                 '### Git 版本管理策略',
                 `- 已检测到 Git：${envInfo.gitVersion}。仅当用户需要版本管理时才执行，否则不要擅自提交。`,
                 '- 通过 `run_powershell_command`/`run_cmd_command` 分步执行，每条命令先看输出；系统不会后台自动 git 或同步 .gitignore。',
-                '- **提交前门禁**：`git status --short --branch` 找未跟踪项 → 剔除构建产物/依赖/日志/缓存/临时文件/IDE 元数据/本地密钥 → 缺规则时用 `file_insert`/`file_write` 补 `.gitignore` → 复跑 `git status --short` 确认 → 才 `git add`/`git commit`。',
+                '- **提交前门禁**：`git status --short --branch` 找未跟踪项 → 剔除构建产物/依赖/日志/缓存/临时文件/IDE 元数据/本地密钥 → 缺规则时用 `insert_in_file`/`write_file` 补 `.gitignore` → 复跑 `git status --short` 确认 → 才 `git add`/`git commit`。',
                 '- 改版本库状态前说明目的；提交后反馈 commit hash、提交信息与影响范围。'
             ].join('\n')
             : [
@@ -1331,7 +1331,7 @@ export class AgentService extends EventEmitter {
                 `- **可用内存**: ${envInfo.totalMemory}`,
                 `- **Shell版本**: ${envInfo.shell}`,
                 projectJavaVersion ? `- **Java 编译目标版本**: ${projectJavaVersion}\n  ⚠️ 严格遵守，禁用高版本语言特性（var/record/sealed/text block 等）。` : null,
-                projectSourceEncoding ? `- **Maven 源文件编码**: ${projectSourceEncoding}\n  ⚠️ 用 file_write 创建/覆写 Java/XML/Properties 时必须传 \`encoding: "${projectSourceEncoding}"\`。` : null,
+                projectSourceEncoding ? `- **Maven 源文件编码**: ${projectSourceEncoding}\n  ⚠️ 用 write_file 创建/覆写 Java/XML/Properties 时必须传 \`encoding: "${projectSourceEncoding}"\`。` : null,
                 projectPythonVersion ? `- **Python 版本约束**: ${projectPythonVersion}\n  ⚠️ 严格遵守，禁用高版本语言特性。` : null,
                 projectGoVersion ? `- **Go 版本**: ${projectGoVersion}` : null,
             ].filter(Boolean).join('\n'),

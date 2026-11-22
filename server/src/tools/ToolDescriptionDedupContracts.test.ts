@@ -33,9 +33,9 @@ function extractBetween(source: string, startMarker: string, endMarker: string) 
 describe('tool description deduplication contracts', () => {
     it('keeps write tool descriptions focused instead of repeating field contracts', async () => {
         const source = await readSource('services/AgentService.ts');
-        const fileWrite = extractToolDescription(source, 'file_write');
-        const fileReplace = extractToolDescription(source, 'file_replace');
-        const fileInsert = extractToolDescription(source, 'file_insert');
+        const fileWrite = extractToolDescription(source, 'write_file');
+        const fileReplace = extractToolDescription(source, 'replace_in_file');
+        const fileInsert = extractToolDescription(source, 'insert_in_file');
 
         expect(fileWrite.length).toBeLessThanOrEqual(200);
         expect(fileReplace.length).toBeLessThanOrEqual(200);
@@ -56,12 +56,12 @@ describe('tool description deduplication contracts', () => {
         const tools = [
             ['services/AgentService.ts', 'read_file', 350],
             ['services/AgentService.ts', 'read_file_by_byte', 180],
-            ['services/AgentService.ts', 'file_write', 200],
+            ['services/AgentService.ts', 'write_file', 200],
             ['services/AgentService.ts', 'list_files', 140],
             ['services/AgentService.ts', 'delete_path', 160],
-            ['services/AgentService.ts', 'file_replace', 200],
-            ['services/AgentService.ts', 'file_insert', 180],
-            ['services/AgentService.ts', 'file_replace_all', 180],
+            ['services/AgentService.ts', 'replace_in_file', 200],
+            ['services/AgentService.ts', 'insert_in_file', 180],
+            ['services/AgentService.ts', 'replace_all_in_file', 180],
             ['services/AgentService.ts', 'run_powershell_command', 180],
             ['services/AgentService.ts', 'run_cmd_command', 150],
             ['tools/TodoTools.ts', 'list_todos', 100],

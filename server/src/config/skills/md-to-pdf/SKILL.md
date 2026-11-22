@@ -49,7 +49,7 @@ triggers:
 
 ## 4. 防乱码（P1 级事故红线）
 
-1. `file_write` 创建 `.md` / `.html` / `.css` 必须传 `encoding: "utf-8"`。
+1. `write_file` 创建 `.md` / `.html` / `.css` 必须传 `encoding: "utf-8"`。
 2. HTML 模板首行必须有 `<meta charset="UTF-8">`。
 3. `md-to-pdf` 默认 UTF-8，无需额外编码参数。
 4. 转换完成后读回 PDF/文本确认中文无乱码（问号替代、方块、`锟斤拷`、未解码转义序列均为事故），发现即立即修复。

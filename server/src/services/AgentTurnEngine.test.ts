@@ -195,7 +195,7 @@ describe("AgentTurnEngine request recovery", () => {
         const executeTool = vi.fn().mockResolvedValue("tool result");
         const toolsMetadata = [
             { type: "function", function: { name: "read_file", parameters: {} } },
-            { type: "function", function: { name: "file_write", parameters: {} } },
+            { type: "function", function: { name: "write_file", parameters: {} } },
         ];
         const create = vi.fn()
             .mockImplementationOnce(async (payload: Record<string, any>) => {
@@ -209,7 +209,7 @@ describe("AgentTurnEngine request recovery", () => {
                                     id: "call-blocked",
                                     type: "function",
                                     function: {
-                                        name: "file_write",
+                                        name: "write_file",
                                         arguments: JSON.stringify({ path: "a.txt", content: "x" }),
                                     },
                                 }],

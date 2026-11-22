@@ -436,7 +436,7 @@ export class FileTools {
     }
 
     /**
-    * Agent 全量文件写入 - 用于 file_write
+    * Agent 全量文件写入 - 用于 write_file
      */
     static async writeFile(workspaceRoot: string, unsafePath: string, content: string, encodingOverride?: string) {
         let fullPath: string;
@@ -447,7 +447,7 @@ export class FileTools {
                 message: `路径 "${unsafePath}" 超出工作区边界，禁止写入。` };
         }
 
-        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'file_write');
+        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'write_file');
         // 写入体积守卫：防止超大内容经 GBK roundtrip 校验产生 20 倍内存放大
         const MAX_WRITE_CHARS = 5 * 1024 * 1024; // 5M 字符，与读取侧 5MB 字节上限对齐
         if (content.length > MAX_WRITE_CHARS) {
@@ -526,7 +526,7 @@ export class FileTools {
     }
 
     /**
-    * Agent 行级精修写入 - 底层引擎（供 file_insert 操作复用）
+    * Agent 行级精修写入 - 底层引擎（供 insert_in_file 操作复用）
      * 支持在特定行插入、替换或删除代码的极高稳健性操作
      */
     static async patchFileByLines(workspaceRoot: string, unsafePath: string, content: string, startLine: number, lineCount: number = 0, encodingOverride?: string) {
@@ -695,7 +695,7 @@ export class FileTools {
     }
 
     /**
-     * Agent 文本级精准替换 - 用于 file_replace 操作
+     * Agent 文本级精准替换 - 用于 replace_in_file 操作
      *
      * 行业最佳实践：基于 oldText 全文精准匹配后替换，消除行号/行范围幻觉风险。
      * - oldText 必须与文件中的原文完全一致（含空白、缩进、换行）
@@ -709,7 +709,7 @@ export class FileTools {
         newText: string
     ) {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
-        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'file_replace');
+        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'replace_in_file');
 
         try {
             // 文件必须存在
@@ -720,7 +720,7 @@ export class FileTools {
                     status: 'error',
                     path: unsafePath,
                     error: 'FILE_NOT_FOUND',
-                    message: `文件不存在，无法执行替换操作。新建文件请使用 file_write。`
+                    message: `文件不存在，无法执行替换操作。新建文件请使用 write_file。`
                 };
             }
 
@@ -884,7 +884,7 @@ export class FileTools {
     }
 
     /**
-     * Agent 行级精准插入 - 用于 file_insert 操作
+     * Agent 行级精准插入 - 用于 insert_in_file 操作
      * 在指定行号 startLine 前插入 newText。
      * 复用 patchFileByLines 的编码检测、EOL 风格保持、越界守卫等底层逻辑，lineCount 固定为 0。
      */
@@ -910,7 +910,7 @@ export class FileTools {
         newText: string
     ) {
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
-        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'file_replace');
+        FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'replace_in_file');
 
         try {
             // 文件必须存在
@@ -921,7 +921,7 @@ export class FileTools {
                     status: 'error',
                     path: fullPath,
                     error: 'FILE_NOT_FOUND',
-                    message: `文件不存在，无法执行全局替换。新建文件请使用 file_write。`
+                    message: `文件不存在，无法执行全局替换。新建文件请使用 write_file。`
                 };
             }
 
@@ -965,7 +965,7 @@ export class FileTools {
                     status: 'error',
                     path: fullPath,
                     error: 'OLD_TEXT_EMPTY',
-                    message: 'oldText 不能为空。若要插入内容请使用 file_insert 工具。'
+                    message: 'oldText 不能为空。若要插入内容请使用 insert_in_file 工具。'
                 };
             }
 
@@ -1092,7 +1092,7 @@ export class FileTools {
 }
 
 /**
- * `file_replace` 未命中时给出最相近的行，减少「重新读全文再猜一遍」的往返。
+ * `replace_in_file` 未命中时给出最相近的行，减少「重新读全文再猜一遍」的往返。
  *
  * 用 oldText 首行的高频词做行级打分，只扫描前 20000 行、最多返回 3 行提示。
  * 纯启发式：只用于提示，不改变替换语义。

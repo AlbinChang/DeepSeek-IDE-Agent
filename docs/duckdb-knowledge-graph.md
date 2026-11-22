@@ -13,15 +13,15 @@
 | 数据文件固定在工作区 `.duckdb/` | Worker `open` 时强制校验目录与扩展名 |
 | Agent 只能通过 tool 交互 | 只注册 `kg_*` 工具；工具内不暴露连接 |
 | 禁止直接操作数据文件 | 工具层拒绝 `.duckdb` / `.wal` 路径；SQL 层拦截 `ATTACH/COPY/read_*` |
-| 属性先声明后使用 | `kg_attr_define` 声明类型/必填/枚举/索引；写入强校验；`kg_lint` 核验 |
-| 语义唯一性可强约束 | `kg_vocab` + `kg_attr_define(unique/identity)` 写入即拒绝冲突；`kg_lint` 编译式复检 |
+| 属性先声明后使用 | `kg_define_attr` 声明类型/必填/枚举/索引；写入强校验；`kg_lint` 核验 |
+| 语义唯一性可强约束 | `kg_vocab` + `kg_define_attr(unique/identity)` 写入即拒绝冲突；`kg_lint` 编译式复检 |
 | 只允许 Node 生态库 | 唯一新增依赖 `@duckdb/node-api` |
 | DuckDB 单独进程 + IPC | `child_process.spawn` + NDJSON over stdio |
 | 百万级复杂分析 | 列式聚合 + 递归 CTE + BFS + 迭代算法（实测见 §7） |
 
 **禁止事项（P0）**
 
-1. 禁止用 `read_file` / `file_write` / `file_replace` / `run_powershell_command` 等工具读写 `.duckdb/*.duckdb`、`*.wal`、`*.tmp`。
+1. 禁止用 `read_file` / `write_file` / `replace_in_file` / `run_powershell_command` 等工具读写 `.duckdb/*.duckdb`、`*.wal`、`*.tmp`。
 2. 禁止在 `kg_query` 里执行写语句、`PRAGMA`、`ATTACH`、`COPY`、`read_csv/read_json/read_parquet`、`glob` 等文件访问。
 3. 禁止把数据库文件复制到工作区外、提交到 Git 或上传。
 4. 禁止绕过 `kg_import` 直接把百万行数据塞进一次 `kg_upsert`（单次上限 5000）。
@@ -122,23 +122,23 @@ kg_identity(key_hash VARCHAR PRIMARY KEY, node_id, keys_json, updated_at)  -- �
 
 **治理流程**
 
-1. **先声明**：写入前用 `kg_attr_define` 声明属性（类型、是否必填、枚举、是否索引）。
+1. **先声明**：写入前用 `kg_define_attr` 声明属性（类型、是否必填、枚举、是否索引）。
 2. **写入即校验**：`kg_upsert` 会按规范校验已声明属性（必填/类型/枚举）；未声明属性默认返回 warning，`strictProps:true` 时直接拒绝。
 3. **索引维护**：`indexed:true` 会写入 `kg_node_props` / `kg_edge_props` 实体化索引；upsert/delete/import 自动增量维护。
 4. **批量导入后核验**：`kg_import` 结束会重建该 scope 的索引；随后执行 `kg_admin validate` 检查必填/类型/枚举/索引漂移。
 5. **重建索引**：索引异常或历史数据变更后执行 `kg_admin reindex`。
-6. **删除规范**：`kg_attr_delete` 只删规范与索引，**不删除** props 历史值。
+6. **删除规范**：`kg_delete_attr` 只删规范与索引，**不删除** props 历史值。
 
 **规范 → 工具映射（每条规范都有可执行工具）**
 
 | 规范 | 落地工具 |
 | --- | --- |
-| 属性先声明后使用 | `kg_attr_define` |
+| 属性先声明后使用 | `kg_define_attr` |
 | 必填 / 类型 / 枚举校验 | `kg_upsert`（写入时强校验）、`kg_admin validate`（存量核验） |
 | 未声明属性治理 | `kg_upsert`（`strictProps`）、`kg_admin validate`（`*_undeclared_attrs`） |
-| 属性可检索 / 索引一致性 | `kg_attr_define(indexed:true)`、`kg_admin reindex`、`kg_admin validate(*_index_drift)` |
-| 属性统计与取值分布 | `kg_attr_list(includeStats,topValues)` |
-| 删除属性规范/索引 | `kg_attr_delete` |
+| 属性可检索 / 索引一致性 | `kg_define_attr(indexed:true)`、`kg_admin reindex`、`kg_admin validate(*_index_drift)` |
+| 属性统计与取值分布 | `kg_list_attrs(includeStats,topValues)` |
+| 删除属性规范/索引 | `kg_delete_attr` |
 | 结构化属性检索 | `kg_find` |
 | 检索即发现未声明属性 | `kg_find`（返回 `undeclaredKeys` 并提示不走索引） |
 | 合规结论（合规/违规清单） | `kg_admin validate`（`✅ 合规` / `❌ N 项违规`，含 `severity`） |
@@ -146,8 +146,8 @@ kg_identity(key_hash VARCHAR PRIMARY KEY, node_id, keys_json, updated_at)  -- �
 | 节点/边唯一性 | `kg_upsert`（主键 UPSERT） |
 | 类型词表 / 子类层级 | `kg_vocab(define kind:"class"/"property", parent)` |
 | 关系 domain/range | `kg_vocab(domain, range)` + `kg_upsert` 写入校验 + `kg_lint` 存量校验 |
-| 属性取值唯一（IFP） | `kg_attr_define(unique:true)` + `kg_upsert` 冲突拒绝 + `kg_lint(attr_unique_duplicate)` |
-| 实体同一性（自然键） | `kg_attr_define(identity:true)` + `kg_identity` 索引 + `kg_lint(identity_*)` |
+| 属性取值唯一（IFP） | `kg_define_attr(unique:true)` + `kg_upsert` 冲突拒绝 + `kg_lint(attr_unique_duplicate)` |
+| 实体同一性（自然键） | `kg_define_attr(identity:true)` + `kg_identity` 索引 + `kg_lint(identity_*)` |
 | 重复实体归一（sameAs） | `kg_merge(confirm:true)` |
 | 对称 / 传递一致性 | `kg_vocab(symmetric/transitive)` + `kg_lint`（`symmetric_missing_inverse` / `transitive_missing_shortcut`） |
 | 编译门禁 | `kg_lint(strict:true)`（error 与 warning 均不通过） |
@@ -166,7 +166,7 @@ kg_identity(key_hash VARCHAR PRIMARY KEY, node_id, keys_json, updated_at)  -- �
 | `exists` | 任意 | `{"key":"risk","op":"exists"}`（也可带 `"value":null`） |
 | `in` | 任意（数组） | `{"key":"risk","op":"in","value":["high","medium"]}` |
 
-- 谓词里出现**未声明**的 key 时不会报错，但会在 `kg_find` 结果里返回 `undeclaredKeys` 并提示「不走索引」；先 `kg_attr_define` 才能建索引。
+- 谓词里出现**未声明**的 key 时不会报错，但会在 `kg_find` 结果里返回 `undeclaredKeys` 并提示「不走索引」；先 `kg_define_attr` 才能建索引。
 - 请求返回的 `props` 已解析为 JSON 对象（`{"risk":"high"}`），无需再二次 `JSON.parse`。
 
 **推理模式**
@@ -210,12 +210,12 @@ kg_query { sql: "SELECT p.val_text AS risk, count(*) c
 
 | RDF/OWL/SHACL 概念 | 本实现 | 落地工具 |
 | --- | --- | --- |
-| IRI 全局唯一命名 | 类型名/属性 key 统一命名空间校验 `[A-Za-z_][A-Za-z0-9_.:-]{0,127}` | `kg_vocab define`、`kg_attr_define` |
+| IRI 全局唯一命名 | 类型名/属性 key 统一命名空间校验 `[A-Za-z_][A-Za-z0-9_.:-]{0,127}` | `kg_vocab define`、`kg_define_attr` |
 | `rdfs:Class` + `rdfs:subClassOf` | `kind:"class"` + `parent`，domain/range 自动展开子类 | `kg_vocab define kind:"class"` |
 | `rdf:Property` + `rdfs:subPropertyOf` | `kind:"property"` + `parent`，子属性继承父属性约束 | `kg_vocab define kind:"property"` |
-| `rdfs:domain` / `rdfs:range` | 关系起点/终点类型约束；属性只允许出现在指定类型上 | `kg_vocab define`、`kg_attr_define(domain)` |
-| `owl:InverseFunctionalProperty` | 属性值跨实体唯一 | `kg_attr_define(unique:true)` |
-| 自然键 / 实体同一性 | 多个 `identity` 属性组成节点身份键（md5 索引） | `kg_attr_define(identity:true)` |
+| `rdfs:domain` / `rdfs:range` | 关系起点/终点类型约束；属性只允许出现在指定类型上 | `kg_vocab define`、`kg_define_attr(domain)` |
+| `owl:InverseFunctionalProperty` | 属性值跨实体唯一 | `kg_define_attr(unique:true)` |
+| 自然键 / 实体同一性 | 多个 `identity` 属性组成节点身份键（md5 索引） | `kg_define_attr(identity:true)` |
 | 三元组唯一性 `(s,p,o)` | 边主键 `(src,dst,type)` | `kg_upsert`（UPSERT） |
 | `owl:sameAs` 归一 | 合并重复实体、改接关系、去自环 | `kg_merge` |
 | `owl:SymmetricProperty` | 对称关系必须成对出现 | `kg_vocab define symmetric:true` + `kg_lint` |
@@ -243,7 +243,7 @@ kg_query { sql: "SELECT p.val_text AS risk, count(*) c
    多个 `identity` 属性都声明 `domain` 时取交集，取交集为空表示没有节点需要身份键。
 5. **词表演进会立刻暴露历史违规**：收紧 `domain/range` 后，旧数据不会自动改写，而是由 `kg_lint` 报 `edge_domain_violation` / `edge_range_violation`，必须先修复再发布。
 6. **删除词表不删数据**：`kg_vocab delete` 只移除约束声明，数据保留；重新声明即可恢复校验。
-7. **存量数据后补身份键**：对已有数据 `kg_attr_define(identity:true)` 会自动重建 `kg_identity`；若历史上已存在重复身份值，索引保留第一条，由 `kg_lint(identity_duplicate)` 报出并用 `kg_merge` 归一。
+7. **存量数据后补身份键**：对已有数据 `kg_define_attr(identity:true)` 会自动重建 `kg_identity`；若历史上已存在重复身份值，索引保留第一条，由 `kg_lint(identity_duplicate)` 报出并用 `kg_merge` 归一。
 
 
 ## 4. 工具契约
@@ -258,13 +258,15 @@ kg_query { sql: "SELECT p.val_text AS risk, count(*) c
 | `kg_path` | 最短路径（BFS） | `from`, `to`, `maxDepth`(≤10), `hopFilters`, `edgeFilter`, `nodePropKeys`, `edgePropKeys` |
 | `kg_analyze` | 图算法 | `algorithm`, `topN`, `iterations`, `persist` |
 | `kg_import` | 文件批量导入 | `target`, `path`, `format`, `columnMap`, `mode` |
-| `kg_attr_define` | 声明/更新属性规范 | `scope`, `key`, `type`, `required`, `enum`, `indexed`, `unique`, `identity`, `domain` |
-| `kg_attr_list` | 属性规范与统计 | `scope`, `includeStats`, `topValues` |
-| `kg_attr_delete` | 删除属性规范/索引 | `scope`, `key` |
+| `kg_define_attr` | 声明/更新属性规范 | `scope`, `key`, `type`, `required`, `enum`, `indexed`, `unique`, `identity`, `domain` |
+| `kg_list_attrs` | 属性规范与统计 | `scope`, `includeStats`, `topValues` |
+| `kg_delete_attr` | 删除属性规范/索引 | `scope`, `key` |
 | `kg_find` | 按属性检索实体/关系 | `scope`, `filter`, `types`, `propKeys`, `limit` |
 | `kg_vocab` | 类型词表（RDFS/OWL 子集） | `action`(`define`/`list`/`delete`), `kind`(`class`/`property`), `name`, `parent`, `domain`, `range`, `symmetric`, `transitive` |
 | `kg_lint` | 语义编译校验 | `strict`, `deep`, `maxIssues`(≤200), `sampleLimit`, `codes` |
 | `kg_merge` | 合并重复实体 | `source`, `target`, `keepProps`(`merge`/`target`/`source`), `confirm` |
+
+> 命名规范：工具名统一「动 + 宾」。`kg_attr_define` / `kg_attr_list` / `kg_attr_delete` 是历史「宾 + 动」写法，已更名为 `kg_define_attr` / `kg_list_attrs` / `kg_delete_attr`；旧名仍被解析为别名（`validate_workflow` 会报 `tool_deprecated`）。
 
 ### 4.1 写入
 
@@ -327,18 +329,18 @@ WHERE m.metric = 'pagerank' ORDER BY m.value DESC LIMIT 20
 ### 4.5 属性管理与检索
 
 ```text
-kg_attr_define { scope:"node", key:"risk", type:"string",
+kg_define_attr { scope:"node", key:"risk", type:"string",
                  required:true, enum:["high","medium","low"], indexed:true }
-kg_attr_list   { scope:"all", includeStats:true, topValues:5 }
-kg_attr_delete { scope:"node", key:"risk" }
+kg_list_attrs   { scope:"all", includeStats:true, topValues:5 }
+kg_delete_attr { scope:"node", key:"risk" }
 kg_find        { scope:"nodes", types:["company"],
                  filter:[{key:"risk",op:"eq",value:"high"}],
                  propKeys:["risk","region"], limit:50 }
 ```
 
-- `kg_attr_define`：`indexed:true` 会立即回填索引；变更已有类型需 `confirm:true`；省略 `indexed/required/enum` 时保留原值。
-- `kg_attr_list`：`includeStats` 返回 `presentRows/distinctValues`，`topValues` 返回取值分布；索引属性附带 `indexRows`。
-- `kg_attr_delete`：删除规范与索引，保留 props 历史值。
+- `kg_define_attr`：`indexed:true` 会立即回填索引；变更已有类型需 `confirm:true`；省略 `indexed/required/enum` 时保留原值。
+- `kg_list_attrs`：`includeStats` 返回 `presentRows/distinctValues`，`topValues` 返回取值分布；索引属性附带 `indexRows`。
+- `kg_delete_attr`：删除规范与索引，保留 props 历史值。
 - `kg_find`：`filter` 支持 `eq/ne/gt/gte/lt/lte/contains/starts_with/exists/in`；命中已索引属性时使用属性索引（返回 `usedIndex` 标识）。
 - `kg_find` 遇到未声明属性会照常按 props 过滤，但返回 `undeclaredKeys` 并在结果头部告警——这是「该属性没有索引」的提示，不是错误。
 - `kg_admin validate` 返回明确结论：`✅ 合规` 或 `❌ N 项违规`，并附 `severity`（`error` 必零 / `info` 仅供参考，如自环、孤立节点、未声明属性）。`error` 类含孤儿边、空 ID、必填缺失、类型/枚举越界、索引漂移、孤儿索引行。
@@ -356,9 +358,9 @@ kg_vocab { action:"define", kind:"property", name:"knows", symmetric:true }
 kg_vocab { action:"list", kind:"property" }        # 含使用量与生效 domain/range
 
 # 2) 语义唯一性：值唯一（IFP）与实体身份键
-kg_attr_define { scope:"node", key:"email", type:"string", unique:true }
-kg_attr_define { scope:"node", key:"employee_no", type:"string", identity:true }
-kg_attr_define { scope:"node", key:"dept", type:"string", domain:["employee"] }
+kg_define_attr { scope:"node", key:"email", type:"string", unique:true }
+kg_define_attr { scope:"node", key:"employee_no", type:"string", identity:true }
+kg_define_attr { scope:"node", key:"dept", type:"string", domain:["employee"] }
 
 # 3) 编译式全量校验（发布前门禁）
 kg_lint { strict:true, deep:true, maxIssues:50, sampleLimit:3 }
@@ -395,7 +397,7 @@ kg_import { target: "nodes", path: "data/nodes.parquet", mode: "replace", confir
 3. **控制上下文**：任何可能超过 200 行的查询都显式 `LIMIT`；需要全量结果时用 `outputPath`。
 4. **先聚合后明细**：百万级图先用 `kg_analyze summary` / `degree` 定位热点，再 `kg_traverse` 取子图。
 5. **不猜 ID**：用 `kg_find`（属性检索）或 `kg_query` 先查 ID，再做遍历。
-6. **属性先声明**：写入新属性前用 `kg_attr_define` 声明类型/必填/枚举；需要 `kg_find` 加速时加 `indexed:true`。
+6. **属性先声明**：写入新属性前用 `kg_define_attr` 声明类型/必填/枚举；需要 `kg_find` 加速时加 `indexed:true`。
 7. **语义唯一性靠声明**：同一实体只能有一个邮箱/工号时，用 `unique:true`（值唯一）或 `identity:true`（组合键）表达；写冲突先 `kg_merge` 再重写。
 8. **类型约束用词表**：关系先用 `kg_vocab` 声明 `domain/range`，子类通过 `parent` 表达，domain/range 会自动展开子类。
 9. **发布前跑编译校验**：改动词表/属性或批量导入后执行 `kg_lint {strict:true}`，`ok:true` 才算通过；`kg_admin validate` 只看数据完整性。
@@ -492,10 +494,10 @@ pnpm run electron:build
 
 ```text
 0. kg_vocab define (class/parent, property/domain/range)   # 先建词表
-1. kg_attr_define (risk/amount/..., unique/identity/domain) # 再声明属性语义
+1. kg_define_attr (risk/amount/..., unique/identity/domain) # 再声明属性语义
 2. kg_admin status                         # 确认库状态
 3. kg_import  (nodes/edges, parquet)       # 百万级批量入库（自动重建属性索引）
-4. kg_attr_list includeStats=true          # 覆盖率/去重数/Top 值抽查
+4. kg_list_attrs includeStats=true          # 覆盖率/去重数/Top 值抽查
 5. kg_lint {strict:true}                   # 语义编译门禁：词表/唯一性/身份/完整性
 6. kg_admin validate                       # 数据完整性单项核验（lint 的子集）
 7. kg_find filter=[{risk,eq,high}]         # 用属性找起点（indexed 时走索引）
@@ -511,7 +513,7 @@ pnpm run electron:build
 **发布前检查清单（语义一致性）**
 
 1. `kg_vocab list` 确认所有节点/关系类型已声明，`domain/range` 符合业务语义。
-2. `kg_attr_list` 确认 `unique_value`/`identity` 覆盖了所有「业务上不允许重复」的属性。
+2. `kg_list_attrs` 确认 `unique_value`/`identity` 覆盖了所有「业务上不允许重复」的属性。
 3. `kg_lint {strict:true}` 返回 `ok:true`；`❌` 时按 `code` 修复（`kg_merge` 归一、补边、补身份键）。
 4. 若调整过词表/属性，重跑 `kg_lint`；索引类问题用 `kg_admin reindex`。
 5. 只有 `kg_lint` 通过后才对外发布图谱或据此做业务决策。

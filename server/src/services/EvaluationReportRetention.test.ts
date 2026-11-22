@@ -54,15 +54,15 @@ describe('评估报告保留机制', () => {
         expect(fs.existsSync(reportPath())).toBe(true);
     });
 
-    it('file_write / file_replace 拒绝改写 .evaluate 与 .memory', async () => {
+    it('write_file / replace_in_file 拒绝改写 .evaluate 与 .memory', async () => {
         seedReport('# 原始评估报告');
 
         await expect(FileTools.writeFile(workspaceRoot, REPORT_RELATIVE, '覆盖内容'))
-            .rejects.toThrow(/禁止通过 file_write/);
+            .rejects.toThrow(/禁止通过 write_file/);
         await expect(FileTools.writeFile(workspaceRoot, '.memory/user_instructs.json', '[]'))
-            .rejects.toThrow(/禁止通过 file_write/);
+            .rejects.toThrow(/禁止通过 write_file/);
         await expect(FileTools.editFileByReplace(workspaceRoot, REPORT_RELATIVE, '原始', '被改'))
-            .rejects.toThrow(/禁止通过 file_replace/);
+            .rejects.toThrow(/禁止通过 replace_in_file/);
 
         expect(fs.readFileSync(reportPath(), 'utf8')).toContain('原始评估报告');
     });

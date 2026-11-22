@@ -146,7 +146,7 @@ do:
       prompt: |
         按计划实现：
         ${ .steps.plan.output }
-      tools: [read_file, list_files, file_write, file_replace]
+      tools: [read_file, list_files, write_file, replace_in_file]
       maxTurns: 20
     output:
       schema:
@@ -158,7 +158,7 @@ do:
 
 - 默认只读工具：`read_skill`、`read_file`、`read_file_by_byte`、`list_files`、`calculate`。
 - 写文件/命令/浏览器工具必须显式写进 `tools`。
-- `verify` / `render` 这类会生成 `verify.csv`、报告 Markdown 的 LLM 阶段，必须把 `file_write` / `file_replace` / `file_insert` 等写工具列入 `tools`；否则模型只有只读工具，阶段会产出缺失或直接失败。建议在后续 shell 步骤或 `output.schema` 中校验目标文件存在且非空，避免“阶段没有真正落盘”却继续执行。
+- `verify` / `render` 这类会生成 `verify.csv`、报告 Markdown 的 LLM 阶段，必须把 `write_file` / `replace_in_file` / `insert_in_file` 等写工具列入 `tools`；否则模型只有只读工具，阶段会产出缺失或直接失败。建议在后续 shell 步骤或 `output.schema` 中校验目标文件存在且非空，避免“阶段没有真正落盘”却继续执行。
 - 如果要覆盖既有高价值文件（例如已存在的百 KB 报告），先在写文件 agent 前放一个 `call: approval`；批准后再执行，拒绝则流程取消。
 - 禁止在工作流内调用 `run_workflow` / `resume_workflow` / `cancel_workflow`，以及 TODO 写工具。
 - `output.schema` 使用内置轻量校验（type/required/properties/items/enum/数值与长度约束）。
@@ -423,7 +423,7 @@ validate_workflow { name: "feature-delivery", strict: true, deep: true }
 | 控制流 | `then_unknown`（`then` 只支持 `exit`）、`step_after_exit` | warning |
 | 控制流 | `sequence_after_exit`（exit 之后的步骤数提示） | info |
 | 工具权限 | `tools_invalid`、tool 步骤调用禁用工具（`tool_forbidden`） | error |
-| 工具权限 | `with.tools` 含被静默移除的禁用工具（`tool_forbidden`）、evaluator 请求写工具（`tool_readonly`）、未注册工具（`tool_unknown`） | warning |
+| 工具权限 | `with.tools` 含被静默移除的禁用工具（`tool_forbidden`）、evaluator 请求写工具（`tool_readonly`）、未注册工具（`tool_unknown`）、历史宾+动命名（`tool_deprecated`） | warning |
 | 配置 | `wait_invalid`、`retry_invalid`、`for_in_missing` | error |
 | 配置 | `timeout_invalid`、`retry_delay_invalid` | warning |
 | 输出 | `output_schema_invalid`（type/required/properties/items/enum/组合器不合法） | error |
