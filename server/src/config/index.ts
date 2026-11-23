@@ -138,6 +138,9 @@ export const config = {
         apiRateLimitRetryLimit: parsePositiveInt(process.env.AGENT_API_RATE_LIMIT_RETRY_LIMIT, 10, 0),
         // 累计限流超过该次数后，提前把对话历史压缩到低水位（降低请求体积，避免上下文过长导致持续限流）
         rateLimitCompactThreshold: parsePositiveInt(process.env.AGENT_RATE_LIMIT_COMPACT_THRESHOLD, 3, 1),
+        // 连续重试的墙钟预算（毫秒）：限流/过载连续重试超过该时长仍未恢复就如实报错，
+        // 避免「指数退避 + 上百次重试」把一次对话拖成几十分钟的假死（0 = 不限制）
+        apiRetryMaxElapsedMs: parsePositiveInt(process.env.AGENT_API_RETRY_MAX_ELAPSED_MS, 10 * 60 * 1000, 0),
         maxHistoryBytes: parsePositiveInt(process.env.AGENT_MAX_HISTORY_BYTES, 1024 * 1024, 1),
         lowWatermarkBytes: parsePositiveInt(process.env.AGENT_LOW_WATERMARK_BYTES, 128 * 1024, 1),
         // 单次模型输出 token 上限；0 = 不发送 max_tokens，采用供应商默认值。

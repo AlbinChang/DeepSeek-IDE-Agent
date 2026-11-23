@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentService } from "@/services/AgentService.js";
 import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
 import { LLMRequestJournal } from "@/services/LLMRequestJournal.js";
+import { LLMResponseLog } from "@/services/LLMResponseLog.js";
 import { TelemetryService } from "@/services/TelemetryService.js";
 import { TodoService } from "@/services/TodoService.js";
 import { config as globalConfig } from "@/config/index.js";
@@ -18,6 +19,8 @@ describe("AgentTurnEngine request recovery", () => {
 
     afterEach(async () => {
         vi.restoreAllMocks();
+        // 等待异步响应日志写完，避免删除临时目录时与其竞态
+        await LLMResponseLog.getInstance().flush();
         await fs.rm(root, { recursive: true, force: true });
     });
 
@@ -492,8 +495,188 @@ describe("AgentTurnEngine request recovery", () => {
         }
     });
 
-    it("does not retry a successful model response when usage validation fails", async () => {
-        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+    it("连续 503 服务过载超过阈值后同样提前压缩上下文，避免无限重试", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const emitted: any[] = [];
+            const compactedHistory = [
+                { role: "system", content: "compacted-system" },
+                { role: "user", content: "finish the task" },
+            ];
+            const prepareMessages = vi.fn(async (messages: any[], options?: { forceCompact?: boolean }) => {
+                return options?.forceCompact ? compactedHistory : messages;
+            });
+            const busyError = () => Object.assign(new Error("503 Service is too busy"), { status: 503 });
+            const create = vi.fn()
+                .mockImplementationOnce(async () => { throw busyError(); })
+                .mockImplementationOnce(async () => { throw busyError(); })
+                .mockImplementationOnce(async () => { throw busyError(); })
+                .mockImplementationOnce(async () => { throw busyError(); })
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { choices: [{ delta: { content: "recovered" } }] };
+                })());
+
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [
+                    { role: "system", content: "original-system" },
+                    { role: "user", content: "finish the task" },
+                    { role: "assistant", content: "x".repeat(200_000) },
+                ],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "service-busy-user",
+                currentTraceId: "trace-service-busy",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "finish the task" },
+                prepareMessages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(create).toHaveBeenCalledTimes(5);
+            expect(prepareMessages.mock.calls.filter((call) => call[1]?.forceCompact)).toHaveLength(1);
+            expect(emitted.some((chunk) => chunk.type === "notice" && chunk.code === "RATE_LIMIT_CONTEXT_COMPACTED")).toBe(true);
+            // 压缩后的请求必须使用重建后的历史
+            expect((create.mock.calls[4][0] as any).messages).toEqual(compactedHistory);
+            expect(result.finalAssistantContent).toBe("recovered");
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("连续重试超过墙钟预算后停止自动重试并如实报错", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        const nowSpy = vi.spyOn(Date, "now");
+        let clock = Date.now();
+        nowSpy.mockImplementation(() => (clock += 30_000));
+        try {
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const busyError = Object.assign(new Error("503 Service is too busy"), { status: 503 });
+            const create = vi.fn().mockRejectedValue(busyError);
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            await expect(AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [
+                    { role: "system", content: "system" },
+                    { role: "user", content: "finish the task" },
+                ],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "service-busy-budget-user",
+                currentTraceId: "trace-service-busy-budget",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "finish the task" },
+                prepareMessages: async (messages) => messages,
+                emit: vi.fn(),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            })).rejects.toThrow("已停止自动重试");
+
+            // 次数预算（默认 100）远未耗尽就被墙钟预算拦住
+            expect(create.mock.calls.length).toBeGreaterThan(1);
+            expect(create.mock.calls.length).toBeLessThan(globalConfig.agent.apiServiceBusyRetryLimit + 1);
+        } finally {
+            nowSpy.mockRestore();
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("把每次模型请求（含重试）的返回结果写入 .llm_response", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const create = vi.fn()
+                .mockImplementationOnce(async () => {
+                    throw Object.assign(new Error("429 rate limited"), { status: 429 });
+                })
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { model: "test-model", choices: [{ delta: { content: "recovered" }, finish_reason: "stop" }] };
+                    yield { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } };
+                })());
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "response-log-user",
+                currentTraceId: "trace-response-log",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "finish the task" },
+                prepareMessages: async (messages) => messages,
+                emit: vi.fn(),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            await LLMResponseLog.getInstance().flush();
+            const directory = path.join(root, ".llm_response");
+            const files = (await fs.readdir(directory))
+                .sort((a, b) => Number(/\d+/.exec(a)?.[0] ?? 0) - Number(/\d+/.exec(b)?.[0] ?? 0));
+            expect(files.length).toBe(2);
+
+            const firstLines = (await fs.readFile(path.join(directory, files[0]), "utf8"))
+                .split("\n").filter((line) => line.length > 0);
+            expect(firstLines).toHaveLength(2);
+            const firstMetadata = JSON.parse(firstLines[0]);
+            expect(firstMetadata.success).toBe(false);
+            expect(firstMetadata.error.status).toBe(429);
+            expect(firstMetadata.retry).toMatchObject({ willRetry: true, category: "rate_limited" });
+            expect(JSON.parse(firstLines[1]).content).toBe("");
+
+            const secondLines = (await fs.readFile(path.join(directory, files[1]), "utf8"))
+                .split("\n").filter((line) => line.length > 0);
+            const secondMetadata = JSON.parse(secondLines[0]);
+            expect(secondMetadata.success).toBe(true);
+            expect(secondMetadata.request.attempt).toBe(2);
+            expect(secondMetadata.servedModels).toEqual(["test-model"]);
+            expect(JSON.parse(secondLines[1])).toMatchObject({ content: "recovered", finishReason: "stop" });
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("does not retry a successful model response when usage validation fails", async () => {        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
         const create = vi.fn().mockImplementation(async () => (async function* () {
             yield { choices: [{ delta: { content: "output" } }] };
         })());

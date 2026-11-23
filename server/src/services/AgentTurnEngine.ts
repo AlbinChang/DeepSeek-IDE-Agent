@@ -39,6 +39,7 @@ import {
     type LLMRequestRecord,
     type LLMRequestRecoveryContext,
 } from "@/services/LLMRequestJournal.js";
+import { LLMResponseLog } from "@/services/LLMResponseLog.js";
 import { extractReasoningText } from "../utils/ReasoningUtils.js";
 import {
     buildCorruptionMessage,
@@ -91,6 +92,31 @@ function formatByteSize(bytes: number): string {
     return `${bytes} B`;
 }
 
+/** 毫秒转「x分y秒」，用于重试进度与墙钟预算提示。 */
+function formatDurationMs(ms: number): string {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
+}
+
+/** 把异常整理成可写入 .llm_response 的纯数据（避免 Error 实例序列化后丢字段）。 */
+function describeErrorForLog(error: any) {
+    if (!error) return undefined;
+    const verdict = classifyRetryableError(error);
+    return {
+        name: typeof error?.name === "string" ? error.name : undefined,
+        message: String(error?.message ?? error),
+        code: error?.code ?? error?.cause?.code,
+        status: verdict.status,
+        category: verdict.category,
+        retryable: verdict.retryable,
+        stack: typeof error?.stack === "string"
+            ? error.stack.split("\n").slice(0, 5).join("\n")
+            : undefined,
+    };
+}
+
 /**
  * 最大流式重试次数（网络超时 / 连接错误 / DNS 失败等）。
  * 从 globalConfig.agent.apiRetryLimit 读取（可通过环境变量 AGENT_API_RETRY_LIMIT 覆盖，默认 3 次）。
@@ -109,6 +135,12 @@ const SERVICE_BUSY_RETRY_LIMIT = globalConfig.agent.apiServiceBusyRetryLimit;
 const RATE_LIMIT_RETRY_LIMIT = globalConfig.agent.apiRateLimitRetryLimit;
 /** 累计限流超过该次数后，提前把上下文压缩到低水位（AGENT_RATE_LIMIT_COMPACT_THRESHOLD，默认 3）。 */
 const RATE_LIMIT_COMPACT_THRESHOLD = globalConfig.agent.rateLimitCompactThreshold;
+/**
+ * 连续重试的墙钟预算（AGENT_API_RETRY_MAX_ELAPSED_MS，默认 10 分钟；0 = 不限制）。
+ * 限流/过载重试预算高达上百次且退避上限 30s，只靠次数限制会让一次对话卡死几十分钟，
+ * 这里额外按实际耗时兜底，超时后如实报错交还给用户重试。
+ */
+const RETRY_MAX_ELAPSED_MS = globalConfig.agent.apiRetryMaxElapsedMs;
 /** 单轮内允许的总重试次数上限（三类预算中最大者），具体次数在 catch 分支内按分类决定 */
 const MAX_ALLOWED_RETRIES = Math.max(RETRY_LIMIT, SERVICE_BUSY_RETRY_LIMIT, RATE_LIMIT_RETRY_LIMIT);
 /** turn 事件 ID 的步长：必须大于单轮最大重试次数，否则相邻轮次的 ID 会重叠导致前端串流。 */
@@ -443,23 +475,32 @@ export class AgentTurnEngine {
         let lastFinishReason: string | null = null;
         let truncationNotified = false;
         /**
-         * 整个 runTurns 内累计的限流（HTTP 429）次数；压缩成功后清零。
-         * 跨轮次累计，避免“每轮重新计数”导致上下文已经过长却始终不到阈值。
+         * 整个 runTurns 内累计的「限流 / 过载」重试次数（HTTP 429 与 408/409/425/5xx 合并计数），
+         * 压缩成功或请求成功后清零。跨轮次累计，避免“每轮重新计数”导致上下文已经过长却始终不到阈值。
+         *
+         * 5xx「Service is too busy」与 429 一样常见于请求体积过大，只对 429 做压缩会留下
+         * 「503 → 重试上百次 → 仍然 503」的假死循环。
          */
-        let rateLimitCount = 0;
+        let overloadRetryCount = 0;
         let rateLimitCompactionInFlight = false;
+        /** 压缩已无法再减小体积（已在低水位 / 无收益）时置位，本轮不再重复尝试。 */
+        let compactionExhausted = false;
+        /** 连续重试窗口的起点（首次失败时刻）；成功一次即清零重新计时。 */
+        let retryBudgetStartedAt: number | null = null;
         /** 恢复请求的原始 payload 只在首轮重放；限流压缩后必须停用重放，否则压缩后的历史不会生效。 */
         let resumeReplayPayload = options.resumeRequest?.payload;
 
         /**
-         * 限流后的自救：把 activeHistory 强制裁剪到低水位，降低请求体积。
+         * 限流/过载后的自救：把 activeHistory 强制裁剪到低水位，降低请求体积。
          * @returns 是否真正压缩掉了内容（用于决定要不要重置限流计数）。
          */
-        const compactHistoryForRateLimit = async (reason: string): Promise<boolean> => {
-            if (rateLimitCompactionInFlight) return false;
+        const compactHistoryAfterOverload = async (reason: string): Promise<boolean> => {
+            if (rateLimitCompactionInFlight || compactionExhausted) return false;
             const lowWatermarkBytes = globalConfig.agent.lowWatermarkBytes;
             const beforeBytes = estimateMessagesJsonBytes(activeHistory);
             if (beforeBytes <= lowWatermarkBytes) {
+                // 上下文已经在低水位以下，继续压缩没有收益：本轮的后续重试不再重复处理
+                compactionExhausted = true;
                 return false;
             }
 
@@ -468,6 +509,7 @@ export class AgentTurnEngine {
                 const compacted = await prepareMessages(activeHistory, { forceCompact: true });
                 const afterBytes = estimateMessagesJsonBytes(compacted);
                 if (afterBytes >= beforeBytes) {
+                    compactionExhausted = true;
                     console.warn(
                         `${getTS()} [AgentTurnEngine] 限流后压缩上下文未减少体积（${formatByteSize(beforeBytes)}），保留原历史继续重试`,
                     );
@@ -477,14 +519,14 @@ export class AgentTurnEngine {
                 activeHistory = compacted;
                 resumeReplayPayload = undefined;
                 console.warn(
-                    `${getTS()} [AgentTurnEngine] 累计限流 ${rateLimitCount} 次（${reason}），已提前压缩上下文：`
+                    `${getTS()} [AgentTurnEngine] 累计限流/过载 ${overloadRetryCount} 次（${reason}），已提前压缩上下文：`
                     + `${formatByteSize(beforeBytes)} -> ${formatByteSize(afterBytes)}（低水位 ${formatByteSize(lowWatermarkBytes)}）`,
                 );
                 emit({
                     type: "notice",
                     code: "RATE_LIMIT_CONTEXT_COMPACTED",
                     level: "warning",
-                    content: `本次运行已累计 ${rateLimitCount} 次被限流（${reason}），为降低请求体积，已自动把上下文从 `
+                    content: `本次运行已累计 ${overloadRetryCount} 次被限流或服务过载（${reason}），为降低请求体积，已自动把上下文从 `
                         + `${formatByteSize(beforeBytes)} 压缩到 ${formatByteSize(afterBytes)}，随后继续重试。`,
                     params: {
                         reason,
@@ -652,6 +694,11 @@ export class AgentTurnEngine {
                 toolCalls = [];
                 localUsage = null;
                 finishReason = null;
+                /** 本次实际请求的起始时刻：用于响应日志耗时与重试墙钟预算 */
+                const attemptStartedAt = Date.now();
+                /** 本次请求实际返回的模型 / 指纹（servedModels 是跨轮次累计的，日志需要单次快照） */
+                const attemptServedModels = new Set<string>();
+                const attemptSystemFingerprints = new Set<string>();
                 let contentPrefixConfirmed = false;
                 let pendingContentPrefix = "";
                 // 推理内容与正文同理：控制标记被拆包时先缓冲前缀，判定安全后再送出
@@ -768,6 +815,78 @@ export class AgentTurnEngine {
                     });
                 }
 
+                /**
+                 * 每次实际请求（成功 / 失败 / 被丢弃）都异步落盘到工作区 `.llm_response`。
+                 * 第一行元数据、第二行返回结果，便于回溯「限流到底是上下文过大、并发还是网关问题」。
+                 * 写入失败只告警，绝不影响对话主流程。
+                 */
+                let attemptLogged = false;
+                const recordAttempt = (info: {
+                    success: boolean;
+                    error?: any;
+                    retry?: Record<string, unknown>;
+                }) => {
+                    if (attemptLogged) return;
+                    attemptLogged = true;
+                    try {
+                        const payloadMessages = Array.isArray((requestPayload as any).messages)
+                            ? (requestPayload as any).messages as any[]
+                            : [];
+                        LLMResponseLog.getInstance().record({
+                            root,
+                            metadata: {
+                                timestamp: new Date(attemptStartedAt).toISOString(),
+                                timestampMs: attemptStartedAt,
+                                userId,
+                                agentStage: options.agentStage ?? "主Agent",
+                                traceId: currentTraceId,
+                                runId,
+                                stepPath,
+                                workerId,
+                                provider: {
+                                    id: options.provider?.id,
+                                    host: resolveHost(options.provider?.baseURL),
+                                },
+                                request: {
+                                    model: finalModelId,
+                                    turn: turns,
+                                    attempt: retryCount + 1,
+                                    messages: payloadMessages.length,
+                                    messageBytes: estimateMessagesJsonBytes(payloadMessages),
+                                    tools: Array.isArray((requestPayload as any).tools)
+                                        ? (requestPayload as any).tools.length
+                                        : 0,
+                                    maxOutputTokens: globalConfig.agent.maxOutputTokens,
+                                    thinking: thinkingOptions,
+                                    resumedPayload: replayPayload !== undefined,
+                                },
+                                durationMs: Date.now() - attemptStartedAt,
+                                elapsedSinceRunStartMs: Date.now() - startTimeStamp,
+                                success: info.success,
+                                servedModels: Array.from(attemptServedModels),
+                                systemFingerprints: Array.from(attemptSystemFingerprints),
+                                finishReason,
+                                usage: localUsage,
+                                overloadRetryCount,
+                                retryBudgetElapsedMs: retryBudgetStartedAt === null
+                                    ? 0
+                                    : Date.now() - retryBudgetStartedAt,
+                                retry: info.retry,
+                                error: describeErrorForLog(info.error),
+                            },
+                            result: {
+                                content: fullContent,
+                                reasoning_content: fullReasoning,
+                                tool_calls: toolCalls.filter(Boolean),
+                                finishReason,
+                                usage: localUsage,
+                            },
+                        });
+                    } catch (logError) {
+                        console.warn(`${getTS()} [AgentTurnEngine] 写入 .llm_response 失败：`, logError);
+                    }
+                };
+
                 await options.beforeApiRequest?.();
                 try {
                     const response = await client.chat.completions.create(
@@ -783,10 +902,12 @@ export class AgentTurnEngine {
                             const servedModel = (chunk as any)?.model;
                             if (typeof servedModel === "string" && servedModel.trim()) {
                                 servedModels.add(servedModel.trim());
+                                attemptServedModels.add(servedModel.trim());
                             }
                             const fingerprint = (chunk as any)?.system_fingerprint;
                             if (typeof fingerprint === "string" && fingerprint.trim()) {
                                 systemFingerprints.add(fingerprint.trim());
+                                attemptSystemFingerprints.add(fingerprint.trim());
                             }
 
                             // 模型替换检测：必须在任何增量送出之前判定，
@@ -947,6 +1068,10 @@ export class AgentTurnEngine {
                     }
 
                     apiSuccess = true;
+                    // 请求成功说明上下文与网关状态已恢复：清零限流/过载计数与重试墙钟预算
+                    overloadRetryCount = 0;
+                    retryBudgetStartedAt = null;
+                    recordAttempt({ success: true });
                     if (finishReason === "length") {
                         console.warn(
                             `${getTS()} [AgentTurnEngine] 模型输出达到长度上限（finish_reason=length），内容可能被截断：`
@@ -969,7 +1094,14 @@ export class AgentTurnEngine {
                         lastAssistantReasoning = fullReasoning.trim();
                     }
                 } catch (error: any) {
-                    if (abortSignal?.aborted) throw error;
+                    if (abortSignal?.aborted) {
+                        recordAttempt({
+                            success: false,
+                            error,
+                            retry: { willRetry: false, reason: 'aborted' },
+                        });
+                        throw error;
+                    }
 
                     if (error instanceof ModelSubstitutionError) {
                         // 被替换的回复一字未出，可以安全丢弃并立即重新请求；
@@ -990,6 +1122,17 @@ export class AgentTurnEngine {
                                 + `已丢弃本次回复并重试（第 ${error.detail.attempt}/${error.detail.limit} 次）...`,
                         });
                         retryStageVisible = true;
+                        recordAttempt({
+                            success: false,
+                            error,
+                            retry: {
+                                willRetry: true,
+                                category: 'model_substitution',
+                                attempt: error.detail.attempt,
+                                limit: error.detail.limit,
+                                delayMs: SUBSTITUTION_RETRY_DELAY_MS,
+                            },
+                        });
                         await new Promise((resolve) => setTimeout(resolve, SUBSTITUTION_RETRY_DELAY_MS));
                         continue;
                     }
@@ -1027,6 +1170,18 @@ export class AgentTurnEngine {
                                 });
                             }
                             retryStageVisible = true;
+                            recordAttempt({
+                                success: false,
+                                error,
+                                retry: {
+                                    willRetry: true,
+                                    category: 'model_output_corruption',
+                                    phase: error.detail.phase,
+                                    attempt: corruptionRetries,
+                                    limit: corruptionRetryLimit,
+                                    delayMs: CORRUPTION_RETRY_BASE_DELAY_MS * corruptionRetries,
+                                },
+                            });
                             await new Promise((resolve) => setTimeout(resolve, CORRUPTION_RETRY_BASE_DELAY_MS * corruptionRetries));
                             continue;
                         }
@@ -1058,11 +1213,35 @@ export class AgentTurnEngine {
                                 ].join('\n')),
                             );
                             retryStageVisible = true;
+                            recordAttempt({
+                                success: false,
+                                error,
+                                retry: {
+                                    willRetry: true,
+                                    category: 'model_output_corruption_recovery',
+                                    phase: error.detail.phase,
+                                    recoveryRound: corruptionRecoveryRounds,
+                                    limit: CORRUPTION_RECOVERY_ROUNDS,
+                                },
+                            });
                             await new Promise((resolve) => setTimeout(resolve, CORRUPTION_RETRY_BASE_DELAY_MS * 2));
                             continue;
                         }
 
                         // 重试手段用尽仍然异常：先给出“模型被替换”的明确提示，再上抛
+                        recordAttempt({
+                            success: false,
+                            error,
+                            retry: {
+                                willRetry: false,
+                                category: 'model_output_corruption',
+                                phase: error.detail.phase,
+                                reason: 'corruption_retries_exhausted',
+                                attempt: corruptionRetries,
+                                limit: corruptionRetryLimit,
+                                recoveryRounds: corruptionRecoveryRounds,
+                            },
+                        });
                         notifyModelSubstitution({ retries: substitutionRetries, resolved: false });
                         throw error;
                     } else {
@@ -1087,32 +1266,91 @@ export class AgentTurnEngine {
                                 : retryCategory === 'network' ? RETRY_LIMIT
                                     : 0;
                         const attemptInCategory = retryCategory ? retryAttempts[retryCategory] : 0;
+                        const label = retryCategory === 'rate_limited'
+                            ? '请求限流'
+                            : retryCategory === 'service_busy' ? '服务过载' : '网络异常';
 
                         if (verdict.retryable && retryCategory && attemptInCategory < maxRetries
                             && retryCount < MAX_ALLOWED_RETRIES) {
+                            // 连续重试墙钟预算：服务过载预算默认 100 次、退避上限 30s，
+                            // 只按次数限制会让一次对话卡死几十分钟（用户看到的就是“无限重试”）。
+                            if (retryBudgetStartedAt === null) {
+                                retryBudgetStartedAt = attemptStartedAt;
+                            }
+                            const retryElapsedMs = Date.now() - retryBudgetStartedAt;
+                            if (RETRY_MAX_ELAPSED_MS > 0 && retryElapsedMs >= RETRY_MAX_ELAPSED_MS) {
+                                const budgetError = Object.assign(
+                                    new Error(
+                                        `连续重试已持续 ${formatDurationMs(retryElapsedMs)}（上限 ${formatDurationMs(RETRY_MAX_ELAPSED_MS)}），`
+                                        + `最近一次错误：${label}（${verdict.reason}）。已停止自动重试，请稍后手动重试。`,
+                                    ),
+                                    { status: verdict.status > 0 ? verdict.status : undefined, cause: error, code: error?.code },
+                                );
+                                console.warn(
+                                    `${getTS()} [AgentTurnEngine] ${budgetError.message} `
+                                    + `(分类 ${retryCategory}，第 ${attemptInCategory}/${maxRetries} 次，本轮累计 ${retryCount} 次)`,
+                                );
+                                recordAttempt({
+                                    success: false,
+                                    error: budgetError,
+                                    retry: {
+                                        willRetry: false,
+                                        category: retryCategory,
+                                        reason: 'retry_budget_exceeded',
+                                        status: verdict.status,
+                                        attemptInCategory,
+                                        maxRetries,
+                                        elapsedMs: retryElapsedMs,
+                                        limitMs: RETRY_MAX_ELAPSED_MS,
+                                        lastError: describeErrorForLog(error),
+                                    },
+                                });
+                                emit({ type: "stage", content: "" });
+                                retryStageVisible = false;
+                                throw budgetError;
+                            }
+
                             retryAttempts[retryCategory] = attemptInCategory + 1;
                             retryCount++;
 
-                            // 429 累计出现超过阈值：先把上下文压缩到低水位再重试，
-                            // 避免“上下文过长 → 持续限流 → 无限重试”的死循环。
-                            if (retryCategory === 'rate_limited') {
-                                rateLimitCount++;
-                                if (rateLimitCount > RATE_LIMIT_COMPACT_THRESHOLD) {
-                                    const compacted = await compactHistoryForRateLimit(verdict.reason);
-                                    if (compacted) rateLimitCount = 0;
+                            // 429 与服务过载（408/409/425/5xx）都可能由请求体积过大引发：
+                            // 累计超过阈值后先把上下文压缩到低水位再重试，
+                            // 避免“上下文过长 → 持续 429/503 → 无限重试”的死循环。
+                            if (retryCategory === 'rate_limited' || retryCategory === 'service_busy') {
+                                overloadRetryCount++;
+                                if (overloadRetryCount > RATE_LIMIT_COMPACT_THRESHOLD) {
+                                    const compacted = await compactHistoryAfterOverload(verdict.reason);
+                                    if (compacted) overloadRetryCount = 0;
                                 }
                             }
 
                             const delayMs = computeRetryDelayMs(retryAttempts[retryCategory] - 1, retryCategory);
                             const errCode = error.cause?.code || error.code || (verdict.status > 0 ? `HTTP ${verdict.status}` : 'NETWORK');
-                            const label = retryCategory === 'rate_limited'
-                                ? '请求限流'
-                                : retryCategory === 'service_busy' ? '服务过载' : '网络异常';
                             console.warn(
                                 `${getTS()} [AgentTurnEngine] 遇到${label}错误 (${verdict.reason}, code=${errCode})，`
-                                + `正在进行第 ${retryAttempts[retryCategory]}/${maxRetries} 次重试（本轮累计 ${retryCount} 次）...`
+                                + `正在进行第 ${retryAttempts[retryCategory]}/${maxRetries} 次重试`
+                                + `（本轮累计 ${retryCount} 次，连续重试已 ${formatDurationMs(retryElapsedMs)}）...`
                             );
-                            emit({ type: "stage", content: `${label}（${verdict.reason}），正在自动进行第 ${retryCount} 次自动重试...` });
+                            recordAttempt({
+                                success: false,
+                                error,
+                                retry: {
+                                    willRetry: true,
+                                    category: retryCategory,
+                                    reason: verdict.reason,
+                                    status: verdict.status,
+                                    attemptInCategory: retryAttempts[retryCategory],
+                                    maxRetries,
+                                    delayMs,
+                                    elapsedMs: retryElapsedMs,
+                                    overloadRetryCount,
+                                },
+                            });
+                            emit({
+                                type: "stage",
+                                content: `${label}（${verdict.reason}），正在自动进行第 ${retryCount} 次自动重试`
+                                    + `（已重试 ${formatDurationMs(retryElapsedMs)}，上限 ${formatDurationMs(RETRY_MAX_ELAPSED_MS)}）...`,
+                            });
                             retryStageVisible = true;
                             // 制造视觉断层补偿
                             emit({
@@ -1123,6 +1361,20 @@ export class AgentTurnEngine {
                             // 指数退避 + 抖动（服务过载/限流类退避更激进，避免惊群）
                             await new Promise((resolve) => setTimeout(resolve, delayMs));
                         } else {
+                            recordAttempt({
+                                success: false,
+                                error,
+                                retry: {
+                                    willRetry: false,
+                                    category: retryCategory ?? 'non_retryable',
+                                    reason: verdict.reason,
+                                    status: verdict.status,
+                                    attemptInCategory,
+                                    maxRetries,
+                                    exhausted: retryCategory !== null && attemptInCategory >= maxRetries,
+                                    retriesDisabled: !verdict.retryable,
+                                },
+                            });
                             throw error; // 不可重试错误，或超过对应分类的重试上限，向上抛出
                         }
                     }

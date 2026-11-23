@@ -15,6 +15,7 @@ import {
     LLMRequestJournal,
     type LLMRequestRecord,
 } from "@/services/LLMRequestJournal.js";
+import { LLMResponseLog } from "@/services/LLMResponseLog.js";
 
 const getTS = () => getBeijingLogTimePrefix();
 
@@ -95,6 +96,10 @@ export class AgentChatComponent {
         const effectiveRequestId = requestId || randomUUID();
 
         const root = agentService.checkWorkspace(userId, workspaceRoot);
+        // 新会话/工作区切换时重新扫描 `.llm_response`，承接历史计数（异步，不阻塞对话）
+        if (root) {
+            void LLMResponseLog.getInstance().refreshCounter(root);
+        }
         const resolvedProvider = AIProviderFactory.normalizeProvider({
             ...(providerConfig || {}),
             id: providerId || providerConfig?.id,
