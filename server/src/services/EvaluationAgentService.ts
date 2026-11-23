@@ -450,20 +450,27 @@ export class EvaluationAgentService {
      */
     private inspectReport(report: string): ReportIntegrity {
         const text = String(report || "").trim();
-        const hasHeading = /(?:^|\n)\s*#{1,3}\s*评估Agent的评估报告/.test(text);
-        const hasIssueCount = /(?:^|\n)\s*(?:问题个数|问题数量|问题数)\s*[：:]\s*\d+/.test(text);
-        const hasP0P1Count = /(?:^|\n)\s*(?:P0\+P1问题个数|P0P1问题个数|P0\+P1问题数|P0P1问题数)\s*[：:]\s*\d+/.test(text);
-        const hasDecision = /(?:^|\n)\s*执行结论\s*[：:]/.test(text);
-        const hasRepairList = /(?:可直接修复清单|修复清单)/.test(text);
-
-        const decisionLine = text
+        // 字段检测使用去掉 markdown 修饰后的文本：模型输出的字段常带加粗
+        // （如「**问题个数：13**」），直接对原文做 ^ 锚定匹配会把完整报告误判为缺失字段，
+        // 进而触发无意义的续写并在续写预算耗尽后错误终止修复循环。
+        const detectionText = text
             .split(/\r?\n/)
             .map((line) => this.normalizeDecisionLine(line))
+            .join("\n");
+
+        const hasHeading = /(?:^|\n)\s*#{1,3}\s*评估Agent的评估报告/.test(text);
+        const hasIssueCount = /(?:^|\n)\s*(?:问题个数|问题数量|问题数)\s*[：:]\s*\d+/.test(detectionText);
+        const hasP0P1Count = /(?:^|\n)\s*(?:P0\+P1问题个数|P0P1问题个数|P0\+P1问题数|P0P1问题数)\s*[：:]\s*\d+/.test(detectionText);
+        const hasDecision = /(?:^|\n)\s*执行结论\s*[：:]/.test(detectionText);
+        const hasRepairList = /(?:可直接修复清单|修复清单)/.test(detectionText);
+
+        const decisionLine = detectionText
+            .split(/\r?\n/)
             .find((line) => /^执行结论\s*[：:]/.test(line));
         const requiresRepairList = (!!decisionLine
             && decisionLine.replace(/\s+/g, "").includes("需要主Agent继续迭代"))
             // 兼容“执行结论：”与结论文字之间被换行/空格拆开的情况
-            || /执行结论\s*[：:][\s\S]{0,40}需要主Agent继续迭代/.test(text);
+            || /执行结论\s*[：:][\s\S]{0,40}需要主Agent继续迭代/.test(detectionText);
 
         const complete = text.length >= 40
             && hasHeading
@@ -656,8 +663,10 @@ export class EvaluationAgentService {
         let normalized = String(line || "").trim();
         // Remove common markdown prefixes: quote/list/ordered-list
         normalized = normalized.replace(/^\s*(?:>+\s*)?(?:(?:[-*+]\s+)|(?:\d+\.\s+))?/, "");
-        // Remove surrounding markdown emphasis wrappers
-        normalized = normalized.replace(/^[`*_~]+/, "").replace(/[`*_~]+$/, "");
+        // 去掉行内加粗/斜体/删除线/行内代码标记：
+        // 模型经常输出「**问题个数：13**」「**执行结论：需要主Agent继续迭代**」，
+        // 若只去掉首尾修饰符，「**问题个数**：13」这类写法仍会被判成缺失字段。
+        normalized = normalized.replace(/[*_~`]/g, "");
         return normalized.trim();
     }
 

@@ -52,6 +52,34 @@ describe("EvaluationAgentService.parseIssueCount", () => {
         expect(service.parseIssueCount(sample)).toBe(1);
     });
 
+    it("extracts counts from markdown-bold field labels", () => {
+        const boldReport = [
+            "# 评估Agent的评估报告",
+            "",
+            "**问题个数：13**",
+            "**P0+P1问题个数：5**",
+            "**执行结论：需要主Agent继续迭代**",
+        ].join("\n");
+
+        expect(service.parseIssueCount(boldReport)).toBe(13);
+        expect(service.parseP0P1IssueCount(boldReport, 13)).toBe(5);
+        expect(service.parseDecision(boldReport)).toBe("continue_main_agent");
+    });
+
+    it("extracts counts when only the field label is bold", () => {
+        const halfBold = [
+            "# 评估Agent的评估报告",
+            "",
+            "**问题个数**：13",
+            "**P0+P1问题个数**：5",
+            "**执行结论**：需要主Agent继续迭代",
+        ].join("\n");
+
+        expect(service.parseIssueCount(halfBold)).toBe(13);
+        expect(service.parseP0P1IssueCount(halfBold, 13)).toBe(5);
+        expect(service.parseDecision(halfBold)).toBe("continue_main_agent");
+    });
+
     it("stays conservative when the final reply is empty", () => {
         expect(service.parseIssueCount("")).toBe(1);
     });
@@ -237,6 +265,27 @@ describe("EvaluationAgentService report integrity", () => {
 
         const withList = `${withoutList}\n\n## 可直接修复清单\n- (P1) docs/a.md：替换第 3 节`;
         expect(service.inspectReport(withList).complete).toBe(true);
+    });
+
+    it("accepts a complete report whose field labels are wrapped in markdown bold", () => {
+        const boldReport = [
+            "# 评估Agent的评估报告",
+            "",
+            "## 七、最终判定",
+            "**问题个数：13**",
+            "**P0+P1问题个数：5**",
+            "**执行结论：需要主Agent继续迭代**",
+            "",
+            "## 可直接修复清单",
+            "- (P1) docs/a.md：替换第 3 节",
+        ].join("\n");
+
+        const integrity = service.inspectReport(boldReport);
+        expect(integrity.hasIssueCount).toBe(true);
+        expect(integrity.hasP0P1Count).toBe(true);
+        expect(integrity.hasDecision).toBe(true);
+        expect(integrity.requiresRepairList).toBe(true);
+        expect(integrity.complete).toBe(true);
     });
 
     it("recovers a complete report written into reasoning_content", () => {
