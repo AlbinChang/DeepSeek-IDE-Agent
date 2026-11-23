@@ -132,8 +132,12 @@ export const config = {
     agent: {
         // 网络层错误重试次数（DNS/连接/流中断等）
         apiRetryLimit: parsePositiveInt(process.env.AGENT_API_RETRY_LIMIT, 3, 0),
-        // 服务过载类错误重试次数（HTTP 408/429/500/502/503/504，如 DeepSeek 503 Service is too busy）
+        // 服务过载类错误重试次数（HTTP 408/409/425/5xx，如 DeepSeek 503 Service is too busy）
         apiServiceBusyRetryLimit: parsePositiveInt(process.env.AGENT_API_SERVICE_BUSY_RETRY_LIMIT, 100, 0),
+        // 服务限流（HTTP 429）重试次数；超过该上限仍未恢复则如实上抛，避免无休止等待
+        apiRateLimitRetryLimit: parsePositiveInt(process.env.AGENT_API_RATE_LIMIT_RETRY_LIMIT, 10, 0),
+        // 累计限流超过该次数后，提前把对话历史压缩到低水位（降低请求体积，避免上下文过长导致持续限流）
+        rateLimitCompactThreshold: parsePositiveInt(process.env.AGENT_RATE_LIMIT_COMPACT_THRESHOLD, 3, 1),
         maxHistoryBytes: parsePositiveInt(process.env.AGENT_MAX_HISTORY_BYTES, 1024 * 1024, 1),
         lowWatermarkBytes: parsePositiveInt(process.env.AGENT_LOW_WATERMARK_BYTES, 128 * 1024, 1),
         // 单次模型输出 token 上限；0 = 不发送 max_tokens，采用供应商默认值。

@@ -5,7 +5,7 @@ import type { ModelProviderConfig } from "@/services/SettingsService.js";
 import { HistoryOptimizerService } from "@/services/HistoryOptimizerService.js";
 import { TodoService } from "@/services/TodoService.js";
 import { TelemetryService } from "@/services/TelemetryService.js";
-import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
+import { AgentTurnEngine, type PrepareMessagesOptions } from "@/services/AgentTurnEngine.js";
 import { EvaluationAgentService } from "@/services/EvaluationAgentService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
 import { FileIO } from "@/utils/FileIO.js";
@@ -287,13 +287,14 @@ export class AgentChatComponent {
             // 重建时把修复指令丢失并重新注入原始意图（导致评估反馈闭环断裂）。
             let currentPinnedUserMessage = recoveryContext?.pinnedUserMessage || firstUserIntent;
             
-            const prepareMessages = async (msgs: any[]) => {
+            const prepareMessages = async (msgs: any[], options?: PrepareMessagesOptions) => {
                 const systemPrompt = await agentService.buildSystemPrompt(userId, finalLocale, 'main-agent.json', root, effectiveRequestId, currentPinnedUserMessage);
                 return MessagePreparationService.buildMessages({
                     systemPrompt,
                     pinnedUserMessage: currentPinnedUserMessage,
                     incomingMessages: msgs,
                     provider: resolvedProvider,
+                    ...(options?.forceCompact ? { forceCompact: true } : {}),
                 });
             };
 

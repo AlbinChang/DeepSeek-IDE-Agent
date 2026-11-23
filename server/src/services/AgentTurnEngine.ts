@@ -7,7 +7,9 @@
  * 职责范围：
  *  - 流式调用 AI API，收集 text / reasoning / tool_calls
  *  - 可重试错误自动重试（指数退避 + 抖动）：网络层按 AGENT_API_RETRY_LIMIT（默认 3 次），
- *    服务过载 HTTP 408/429/500/502/503/504 按 AGENT_API_SERVICE_BUSY_RETRY_LIMIT（默认 100 次）
+ *    服务限流 HTTP 429 按 AGENT_API_RATE_LIMIT_RETRY_LIMIT（默认 10 次），
+ *    服务过载 HTTP 408/409/425/5xx 按 AGENT_API_SERVICE_BUSY_RETRY_LIMIT（默认 100 次）；
+ *    累计限流超过阈值时自动把上下文压缩到低水位，避免上下文过长导致持续限流
  *  - 按顺序执行工具调用，将结果推入 activeHistory
  *  - 每轮调用后执行 prepareMessages 整理上下文
  *  - 向前端 emit 事件（text / reasoning / annotation / stage / error）
@@ -29,6 +31,7 @@ import { TelemetryService } from "@/services/TelemetryService.js";
 import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 import { classifyRetryableError, computeRetryDelayMs } from "@/utils/ApiRetryUtils.js";
+import { estimateMessagesJsonBytes } from "@/services/MessagePreparationService.js";
 import { accumulateTokenUsage, normalizeTokenUsage, type TokenUsage } from "@/utils/TokenUsage.js";
 import {
     LLMRequestJournal,
@@ -82,18 +85,34 @@ function resolveHost(baseURL?: string): string | undefined {
     }
 }
 
+function formatByteSize(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} B`;
+}
+
 /**
  * 最大流式重试次数（网络超时 / 连接错误 / DNS 失败等）。
  * 从 globalConfig.agent.apiRetryLimit 读取（可通过环境变量 AGENT_API_RETRY_LIMIT 覆盖，默认 3 次）。
  */
 const RETRY_LIMIT = globalConfig.agent.apiRetryLimit;
 /**
- * 服务过载类错误（HTTP 408/429/500/502/503/504，如 DeepSeek 的「503 Service is too busy」）
+ * 服务过载类错误（HTTP 408/409/425/500/502/503/504，如 DeepSeek 的「503 Service is too busy」）
  * 的最大重试次数。可通过环境变量 AGENT_API_SERVICE_BUSY_RETRY_LIMIT 覆盖，默认 100 次。
  */
 const SERVICE_BUSY_RETRY_LIMIT = globalConfig.agent.apiServiceBusyRetryLimit;
-/** 外层 while 循环需要容纳两类错误中更大的重试上限，具体次数在 catch 分支内按分类决定 */
-const MAX_ALLOWED_RETRIES = Math.max(RETRY_LIMIT, SERVICE_BUSY_RETRY_LIMIT);
+/**
+ * 服务限流（HTTP 429）的最大重试次数。可通过 AGENT_API_RATE_LIMIT_RETRY_LIMIT 覆盖，默认 10 次。
+ * 429 往往由并发或请求体积触发，盲目重试上百次只会让任务长时间卡死；
+ * 累计限流超过阈值时会先压缩上下文再继续。
+ */
+const RATE_LIMIT_RETRY_LIMIT = globalConfig.agent.apiRateLimitRetryLimit;
+/** 累计限流超过该次数后，提前把上下文压缩到低水位（AGENT_RATE_LIMIT_COMPACT_THRESHOLD，默认 3）。 */
+const RATE_LIMIT_COMPACT_THRESHOLD = globalConfig.agent.rateLimitCompactThreshold;
+/** 单轮内允许的总重试次数上限（三类预算中最大者），具体次数在 catch 分支内按分类决定 */
+const MAX_ALLOWED_RETRIES = Math.max(RETRY_LIMIT, SERVICE_BUSY_RETRY_LIMIT, RATE_LIMIT_RETRY_LIMIT);
+/** turn 事件 ID 的步长：必须大于单轮最大重试次数，否则相邻轮次的 ID 会重叠导致前端串流。 */
+const TURN_ID_STRIDE = MAX_ALLOWED_RETRIES + 1;
 const CLIENT_INLINE_STRING_LIMIT = 1200;
 const CLIENT_MAX_ARRAY_ITEMS = 80;
 const CLIENT_MAX_OBJECT_KEYS = 80;
@@ -249,6 +268,13 @@ export interface AgentTurnHost {
     updateSessionHistory?(userId: string, history: any[], workspaceRoot?: string): void;
 }
 
+export interface PrepareMessagesOptions {
+    /** 强制裁剪到低水位（累计限流后的提前压缩）。 */
+    forceCompact?: boolean;
+}
+
+export type PrepareMessages = (msgs: any[], options?: PrepareMessagesOptions) => Promise<any[]>;
+
 export interface AgentTurnEngineOptions {
     /** OpenAI 兼容的 client 实例（由 AIProviderFactory.getClient 创建） */
     client: any;
@@ -275,8 +301,9 @@ export interface AgentTurnEngineOptions {
     /**
      * 重建 activeHistory 的函数（注入系统提示词 + 按字节裁剪）。
      * 在每轮工具调用结束后调用，保持上下文整洁。
+     * 累计限流触发提前压缩时会以 `{ forceCompact: true }` 调用。
      */
-    prepareMessages: (msgs: any[]) => Promise<any[]>;
+    prepareMessages: PrepareMessages;
     /** 用户发起取消时的 AbortSignal */
     abortSignal?: AbortSignal;
     /** 可选请求门控：每次实际模型请求（包括重试）之前执行。 */
@@ -415,6 +442,69 @@ export class AgentTurnEngine {
         let forceFinalAnswer = options.forceFinalAnswer === true;
         let lastFinishReason: string | null = null;
         let truncationNotified = false;
+        /**
+         * 整个 runTurns 内累计的限流（HTTP 429）次数；压缩成功后清零。
+         * 跨轮次累计，避免“每轮重新计数”导致上下文已经过长却始终不到阈值。
+         */
+        let rateLimitCount = 0;
+        let rateLimitCompactionInFlight = false;
+        /** 恢复请求的原始 payload 只在首轮重放；限流压缩后必须停用重放，否则压缩后的历史不会生效。 */
+        let resumeReplayPayload = options.resumeRequest?.payload;
+
+        /**
+         * 限流后的自救：把 activeHistory 强制裁剪到低水位，降低请求体积。
+         * @returns 是否真正压缩掉了内容（用于决定要不要重置限流计数）。
+         */
+        const compactHistoryForRateLimit = async (reason: string): Promise<boolean> => {
+            if (rateLimitCompactionInFlight) return false;
+            const lowWatermarkBytes = globalConfig.agent.lowWatermarkBytes;
+            const beforeBytes = estimateMessagesJsonBytes(activeHistory);
+            if (beforeBytes <= lowWatermarkBytes) {
+                return false;
+            }
+
+            rateLimitCompactionInFlight = true;
+            try {
+                const compacted = await prepareMessages(activeHistory, { forceCompact: true });
+                const afterBytes = estimateMessagesJsonBytes(compacted);
+                if (afterBytes >= beforeBytes) {
+                    console.warn(
+                        `${getTS()} [AgentTurnEngine] 限流后压缩上下文未减少体积（${formatByteSize(beforeBytes)}），保留原历史继续重试`,
+                    );
+                    return false;
+                }
+
+                activeHistory = compacted;
+                resumeReplayPayload = undefined;
+                console.warn(
+                    `${getTS()} [AgentTurnEngine] 累计限流 ${rateLimitCount} 次（${reason}），已提前压缩上下文：`
+                    + `${formatByteSize(beforeBytes)} -> ${formatByteSize(afterBytes)}（低水位 ${formatByteSize(lowWatermarkBytes)}）`,
+                );
+                emit({
+                    type: "notice",
+                    code: "RATE_LIMIT_CONTEXT_COMPACTED",
+                    level: "warning",
+                    content: `本次运行已累计 ${rateLimitCount} 次被限流（${reason}），为降低请求体积，已自动把上下文从 `
+                        + `${formatByteSize(beforeBytes)} 压缩到 ${formatByteSize(afterBytes)}，随后继续重试。`,
+                    params: {
+                        reason,
+                        beforeBytes,
+                        afterBytes,
+                        lowWatermarkBytes,
+                        threshold: RATE_LIMIT_COMPACT_THRESHOLD,
+                        model: finalModelId,
+                    },
+                });
+                return true;
+            } catch (error: any) {
+                console.warn(
+                    `${getTS()} [AgentTurnEngine] 限流后压缩上下文失败：${String(error?.message || error)}`,
+                );
+                return false;
+            } finally {
+                rateLimitCompactionInFlight = false;
+            }
+        };
 
         const maxTurnLimit = typeof maxTurns === "number" && Number.isFinite(maxTurns) && maxTurns > 0
             ? Math.floor(maxTurns)
@@ -549,7 +639,12 @@ export class AgentTurnEngine {
             let substitutionRetries = 0;
             // 重试预算耗尽或已有内容送到前端时，接受该次回复，仅在结束时提示
             let substitutionAccepted = false;
-            const replayPayload = turns === 1 ? options.resumeRequest?.payload : undefined;
+            // 各分类的重试预算相互独立：网络错误不应挤占服务过载/限流的重试次数
+            const retryAttempts: Record<'rate_limited' | 'service_busy' | 'network', number> = {
+                rate_limited: 0,
+                service_busy: 0,
+                network: 0,
+            };
 
             while (retryCount <= MAX_ALLOWED_RETRIES && !apiSuccess) {
                 fullContent = "";
@@ -563,7 +658,7 @@ export class AgentTurnEngine {
                 let reasoningPrefixConfirmed = false;
                 let pendingReasoningPrefix = "";
 
-                const currentTurnId = turns * 100 + retryCount;
+                const currentTurnId = turns * TURN_ID_STRIDE + retryCount;
                 let toolArgumentChars = 0;
                 let emittedClientReasoningChars = 0;
                 let emittedClientContentChars = 0;
@@ -644,6 +739,9 @@ export class AgentTurnEngine {
                 const toolsForRequest = forceFinalAnswer
                     ? (effectiveToolsMetadata.length > 0 ? effectiveToolsMetadata : undefined)
                     : (allowedToolNames ? effectiveToolsMetadata : toolsMetadata);
+                // 恢复请求只在压缩前的首轮重放原始 payload；一旦因限流压缩过上下文，
+                // resumeReplayPayload 会被清空，后续请求改用重建后的 activeHistory。
+                const replayPayload = turns === 1 ? resumeReplayPayload : undefined;
                 const requestPayload = replayPayload ?? {
                     model: finalModelId,
                     messages: AIProviderFactory.buildProviderSafeMessages(activeHistory, options.provider),
@@ -970,7 +1068,10 @@ export class AgentTurnEngine {
                     } else {
                         // ================================================================
                         // 可重试错误分类（共享工具 ApiRetryUtils）：
-                        // - service_busy：HTTP 408/409/425/429/500/502/503/504（服务过载/临时故障）
+                        // - rate_limited：HTTP 429（并发/配额/上下文体积触发的限流）
+                        //   → 按 RATE_LIMIT_RETRY_LIMIT（默认 10 次）重试；
+                        //     累计超过 RATE_LIMIT_COMPACT_THRESHOLD 次后先把上下文压缩到低水位
+                        // - service_busy：HTTP 408/409/425/500/502/503/504（服务过载/临时故障）
                         //   → 按 SERVICE_BUSY_RETRY_LIMIT（默认 100 次）重试，覆盖 DeepSeek
                         //     「503 Service is too busy」等场景
                         // - network：无 HTTP 响应（DNS 解析失败 / 连接被拒 / 流中断 / TLS 握手失败等）
@@ -979,15 +1080,37 @@ export class AgentTurnEngine {
                         // 才重试」逻辑会漏掉服务过载类错误，这正是本处优化的关键。
                         // ================================================================
                         const verdict = classifyRetryableError(error);
-                        const maxRetries = verdict.category === 'service_busy' ? SERVICE_BUSY_RETRY_LIMIT : RETRY_LIMIT;
+                        const retryCategory = verdict.category === 'non_retryable' ? null : verdict.category;
+                        const maxRetries = retryCategory === 'rate_limited'
+                            ? RATE_LIMIT_RETRY_LIMIT
+                            : retryCategory === 'service_busy' ? SERVICE_BUSY_RETRY_LIMIT
+                                : retryCategory === 'network' ? RETRY_LIMIT
+                                    : 0;
+                        const attemptInCategory = retryCategory ? retryAttempts[retryCategory] : 0;
 
-                        if (verdict.retryable && retryCount < maxRetries) {
+                        if (verdict.retryable && retryCategory && attemptInCategory < maxRetries
+                            && retryCount < MAX_ALLOWED_RETRIES) {
+                            retryAttempts[retryCategory] = attemptInCategory + 1;
                             retryCount++;
-                            const delayMs = computeRetryDelayMs(retryCount - 1, verdict.category);
+
+                            // 429 累计出现超过阈值：先把上下文压缩到低水位再重试，
+                            // 避免“上下文过长 → 持续限流 → 无限重试”的死循环。
+                            if (retryCategory === 'rate_limited') {
+                                rateLimitCount++;
+                                if (rateLimitCount > RATE_LIMIT_COMPACT_THRESHOLD) {
+                                    const compacted = await compactHistoryForRateLimit(verdict.reason);
+                                    if (compacted) rateLimitCount = 0;
+                                }
+                            }
+
+                            const delayMs = computeRetryDelayMs(retryAttempts[retryCategory] - 1, retryCategory);
                             const errCode = error.cause?.code || error.code || (verdict.status > 0 ? `HTTP ${verdict.status}` : 'NETWORK');
-                            const label = verdict.category === 'service_busy' ? '服务过载' : '网络异常';
+                            const label = retryCategory === 'rate_limited'
+                                ? '请求限流'
+                                : retryCategory === 'service_busy' ? '服务过载' : '网络异常';
                             console.warn(
-                                `${getTS()} [AgentTurnEngine] 遇到${label}错误 (${verdict.reason}, code=${errCode})，正在进行第 ${retryCount}/${maxRetries} 次重试...`
+                                `${getTS()} [AgentTurnEngine] 遇到${label}错误 (${verdict.reason}, code=${errCode})，`
+                                + `正在进行第 ${retryAttempts[retryCategory]}/${maxRetries} 次重试（本轮累计 ${retryCount} 次）...`
                             );
                             emit({ type: "stage", content: `${label}（${verdict.reason}），正在自动进行第 ${retryCount} 次自动重试...` });
                             retryStageVisible = true;
@@ -995,9 +1118,9 @@ export class AgentTurnEngine {
                             emit({
                                 type: "text",
                                 content: `\n\n_[${label}，自动重新请求生成中（第 ${retryCount} 次）...]_ \n\n`,
-                                turn: turns * 100 + retryCount - 1,
+                                turn: turns * TURN_ID_STRIDE + retryCount - 1,
                             });
-                            // 指数退避 + 抖动（服务过载类退避更激进，避免惊群）
+                            // 指数退避 + 抖动（服务过载/限流类退避更激进，避免惊群）
                             await new Promise((resolve) => setTimeout(resolve, delayMs));
                         } else {
                             throw error; // 不可重试错误，或超过对应分类的重试上限，向上抛出

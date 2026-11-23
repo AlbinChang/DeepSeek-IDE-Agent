@@ -15,12 +15,33 @@ describe("classifyRetryableError", () => {
         expect(verdict.status).toBe(503);
     });
 
-    it("treats 429/500/502/504 as retryable service_busy", () => {
-        for (const status of [429, 500, 502, 504]) {
+    it("treats HTTP 429 as retryable rate_limited (distinct retry budget)", () => {
+        const verdict = classifyRetryableError({ status: 429, message: "429 rate limited" });
+        expect(verdict.retryable).toBe(true);
+        expect(verdict.category).toBe("rate_limited");
+        expect(verdict.status).toBe(429);
+    });
+
+    it("treats 500/502/504 as retryable service_busy", () => {
+        for (const status of [500, 502, 504]) {
             const verdict = classifyRetryableError({ status });
             expect(verdict.retryable).toBe(true);
             expect(verdict.category).toBe("service_busy");
         }
+    });
+
+    it("infers the HTTP status from the error message when no status field exists", () => {
+        const verdict = classifyRetryableError({ message: "429 请求格式不正确" });
+        expect(verdict.retryable).toBe(true);
+        expect(verdict.category).toBe("rate_limited");
+        expect(verdict.status).toBe(429);
+    });
+
+    it("infers the HTTP status from a numeric error.code when no status field exists", () => {
+        const verdict = classifyRetryableError({ code: 503, message: "Service is too busy" });
+        expect(verdict.retryable).toBe(true);
+        expect(verdict.category).toBe("service_busy");
+        expect(verdict.status).toBe(503);
     });
 
     it("does NOT retry 4xx client errors like 400/401/403/404", () => {
@@ -63,6 +84,7 @@ describe("computeRetryDelayMs", () => {
             expect(computeRetryDelayMs(1, "network")).toBe(2000);   // 1000 * 2^1
             expect(computeRetryDelayMs(2, "network")).toBe(4000);   // 1000 * 2^2
             expect(computeRetryDelayMs(0, "service_busy")).toBe(2000); // 2000 * 2^0
+            expect(computeRetryDelayMs(0, "rate_limited")).toBe(2000); // 2000 * 2^0
             // 超过上限被钳制
             expect(computeRetryDelayMs(20, "network", 30_000)).toBe(30_000);
         } finally {
@@ -136,6 +158,22 @@ describe("withApiRetry", () => {
             const fn = vi.fn().mockRejectedValue(err);
             await expect(withApiRetry(fn, { retries: 2, serviceBusyRetries: 10 })).rejects.toBe(err);
             expect(fn).toHaveBeenCalledTimes(3); // 1 次原始 + 2 次重试
+        } finally {
+            restoreTimers();
+        }
+    });
+
+    it("uses rateLimitedRetries for 429 without consuming the service-busy budget", async () => {
+        mockInstantTimers();
+        try {
+            const err = { status: 429, message: "rate limited" };
+            const fn = vi.fn().mockRejectedValue(err);
+            await expect(withApiRetry(fn, {
+                retries: 2,
+                serviceBusyRetries: 10,
+                rateLimitedRetries: 4,
+            })).rejects.toBe(err);
+            expect(fn).toHaveBeenCalledTimes(5); // 1 次原始 + 4 次限流重试
         } finally {
             restoreTimers();
         }

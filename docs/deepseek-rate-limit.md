@@ -101,6 +101,28 @@ message = client.messages.create(
 
 ---
 
+## 项目实践：429 重试与上下文提前压缩
+
+本项目的对话引擎（`AgentTurnEngine`）对限流错误做了独立处理：
+
+| 错误类型 | HTTP 状态 | 重试预算 | 说明 |
+| --- | --- | --- | --- |
+| 服务限流 | 429 | `AGENT_API_RATE_LIMIT_RETRY_LIMIT`（默认 10） | 并发/配额/上下文体积触发的限流 |
+| 服务过载 | 408/409/425/5xx | `AGENT_API_SERVICE_BUSY_RETRY_LIMIT`（默认 100） | 如「503 Service is too busy」 |
+| 网络层 | 无 HTTP 响应 | `AGENT_API_RETRY_LIMIT`（默认 3） | DNS/连接/流中断等 |
+
+限流自救策略：
+
+- 429 与其他错误**独立计数**，不会互相挤占重试预算。
+- 一次运行内累计 429 超过 `AGENT_RATE_LIMIT_COMPACT_THRESHOLD`（默认 3）次后，
+  自动把对话历史裁剪到 `AGENT_LOW_WATERMARK_BYTES`（低水位），再继续重试；
+  压缩后请求体积显著变小，可避免“上下文过长 → 持续 429 → 任务卡死”的循环。
+- 压缩通过 `MessagePreparationService` 的 `forceCompact` 生效：忽略常规
+  `AGENT_MAX_HISTORY_BYTES` 触发阈值，直接裁剪到低水位，并允许保留少于 10 条历史消息。
+- 429 重试预算耗尽后如实上抛错误，不会再出现数百次甚至上千次的无意义重试。
+
+---
+
 ## 请求保活机制
 
 您的请求发出后，有时需要等待一段时间才能获取服务器的响应。在这段时间里，您的 HTTP 请求会保持连接，并持续收到如下格式的返回内容：

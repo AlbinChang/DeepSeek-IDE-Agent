@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { AgentService } from "@/services/AgentService.js";
-import { AgentTurnEngine, type AgentTurnEngineResult } from "@/services/AgentTurnEngine.js";
+import { AgentTurnEngine, type AgentTurnEngineResult, type PrepareMessagesOptions } from "@/services/AgentTurnEngine.js";
 import { AIProviderFactory } from "@/services/AIProviderFactory.js";
 import { HistoryOptimizerService } from "@/services/HistoryOptimizerService.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
@@ -184,7 +184,7 @@ export class EvaluationAgentService {
 
         const finalLocale = locale || "zh-CN";
         const pinnedUserMessage = resumeRequest?.metadata.recoveryContext?.pinnedUserMessage || evaluationTask;
-        const prepareMessages = async (msgs: any[]) => {
+        const prepareMessages = async (msgs: any[], options?: PrepareMessagesOptions) => {
             const systemPrompt = await agentService.buildSystemPrompt(
                 userId,
                 finalLocale,
@@ -199,6 +199,7 @@ export class EvaluationAgentService {
                 pinnedUserPrefix: "",
                 incomingMessages: msgs,
                 provider: providerConfig,
+                ...(options?.forceCompact ? { forceCompact: true } : {}),
             });
         };
 

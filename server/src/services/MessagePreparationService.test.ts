@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { MessagePreparationService } from "./MessagePreparationService.js";
+import { MessagePreparationService, estimateMessagesJsonBytes } from "./MessagePreparationService.js";
 
 const SYSTEM_PROMPT = "MAIN_SYSTEM_PROMPT";
 const PINNED_USER = "本轮用户原始指令";
@@ -13,6 +13,7 @@ function build(
         minMessagesBeforeTrim?: number;
         pinnedUserMessage?: string;
         provider?: any;
+        forceCompact?: boolean;
     } = {}
 ) {
     return MessagePreparationService.buildMessages({
@@ -234,6 +235,50 @@ describe("MessagePreparationService.buildMessages — 工具调用链完整性",
         const result = build(messages);
 
         expect(result.filter((m) => m.role === "assistant")).toHaveLength(0);
+    });
+});
+
+describe("MessagePreparationService.buildMessages — 限流自救的强制压缩", () => {
+    it("forceCompact 在未超过 maxBytes 时也裁剪到低水位，并允许保留少于 10 条消息", () => {
+        const huge = "x".repeat(20_000);
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            ...Array.from({ length: 12 }, (_, index) => ({
+                role: index % 2 === 0 ? "assistant" : "user",
+                // 每 6 条插入一个新对象，避免引用被复用
+                content: `${huge}-${index}`,
+            })),
+        ];
+        const maxBytes = 10 * 1024 * 1024;
+        const lowWatermarkBytes = 100_000;
+
+        // 常规路径：未超过 maxBytes，不裁剪
+        const normal = build(messages, { maxBytes, lowWatermarkBytes, minMessagesBeforeTrim: 10 });
+        expect(normal).toHaveLength(messages.length);
+
+        // 限流自救：即使远低于 maxBytes，也要压缩到低水位（可低于常规最小保留条数）
+        const compacted = build(messages, {
+            maxBytes,
+            lowWatermarkBytes,
+            minMessagesBeforeTrim: 10,
+            forceCompact: true,
+        });
+
+        expect(compacted.length).toBeLessThan(messages.length);
+        expect(compacted.length).toBeLessThan(10);
+        expect(estimateMessagesJsonBytes(compacted)).toBeLessThanOrEqual(lowWatermarkBytes);
+    });
+
+    it("forceCompact 对已经处于低水位内的历史不产生额外裁剪", () => {
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: PINNED_USER },
+            { role: "assistant", content: "短回复" },
+        ];
+
+        const compacted = build(messages, { lowWatermarkBytes: 100_000, forceCompact: true });
+        expect(compacted).toHaveLength(messages.length);
     });
 });
 

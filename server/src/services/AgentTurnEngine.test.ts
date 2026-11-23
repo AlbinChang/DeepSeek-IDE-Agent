@@ -375,6 +375,123 @@ describe("AgentTurnEngine request recovery", () => {
         }
     });
 
+    it("连续 429 超过阈值后提前压缩上下文，并用压缩后的历史继续请求", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const emitted: any[] = [];
+            const compactedHistory = [
+                { role: "system", content: "compacted-system" },
+                { role: "user", content: "finish the task" },
+            ];
+            const prepareMessages = vi.fn(async (messages: any[], options?: { forceCompact?: boolean }) => {
+                return options?.forceCompact ? compactedHistory : messages;
+            });
+            const create = vi.fn()
+                .mockImplementationOnce(async () => {
+                    throw Object.assign(new Error("429 rate limited"), { status: 429 });
+                })
+                .mockImplementationOnce(async () => {
+                    throw Object.assign(new Error("429 rate limited"), { status: 429 });
+                })
+                .mockImplementationOnce(async () => {
+                    throw Object.assign(new Error("429 rate limited"), { status: 429 });
+                })
+                .mockImplementationOnce(async () => {
+                    throw Object.assign(new Error("429 rate limited"), { status: 429 });
+                })
+                .mockImplementationOnce(async () => (async function* () {
+                    yield { choices: [{ delta: { content: "recovered" } }] };
+                })());
+
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            const result = await AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [
+                    { role: "system", content: "original-system" },
+                    { role: "user", content: "finish the task" },
+                    { role: "assistant", content: "x".repeat(200_000) },
+                ],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "rate-limit-user",
+                currentTraceId: "trace-rate-limit",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "finish the task" },
+                prepareMessages,
+                emit: (chunk) => emitted.push(chunk),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            });
+
+            expect(create).toHaveBeenCalledTimes(5);
+            expect(prepareMessages).toHaveBeenCalledWith(expect.any(Array), { forceCompact: true });
+            expect(prepareMessages.mock.calls.filter((call) => call[1]?.forceCompact)).toHaveLength(1);
+            expect(emitted.some((chunk) => chunk.type === "notice" && chunk.code === "RATE_LIMIT_CONTEXT_COMPACTED")).toBe(true);
+            // 压缩后的请求必须使用重建后的历史（而不是继续发送原始超长上下文）
+            const lastPayload = create.mock.calls[4][0] as any;
+            expect(lastPayload.messages).toEqual(compactedHistory);
+            expect(result.finalAssistantContent).toBe("recovered");
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
+    it("429 重试超过限流预算后如实失败，不会无限重试", async () => {
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void) => {
+            handler();
+            return 0 as any;
+        }) as any);
+        try {
+            vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+            const rateLimitError = Object.assign(new Error("429 rate limited"), { status: 429 });
+            const create = vi.fn().mockRejectedValue(rateLimitError);
+            const agentService = {
+                toolManager: { executeTool: vi.fn() },
+                updateSessionHistory: vi.fn(),
+            } as unknown as AgentService;
+
+            await expect(AgentTurnEngine.runTurns({
+                client: { chat: { completions: { create } } },
+                finalModelId: "test-model",
+                activeHistory: [
+                    { role: "system", content: "system" },
+                    { role: "user", content: "finish the task" },
+                ],
+                toolsMetadata: [],
+                thinkingOptions: {},
+                agentService,
+                root,
+                userId: "rate-limit-budget-user",
+                currentTraceId: "trace-rate-limit-budget",
+                optimizedMessages: [],
+                lastUserMsgRecord: { role: "user", content: "finish the task" },
+                prepareMessages: async (messages) => messages,
+                emit: vi.fn(),
+                startTimeStamp: Date.now(),
+                skipJournal: true,
+                skipPersist: true,
+                skipTelemetry: true,
+            })).rejects.toBe(rateLimitError);
+
+            expect(create).toHaveBeenCalledTimes(globalConfig.agent.apiRateLimitRetryLimit + 1);
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
     it("does not retry a successful model response when usage validation fails", async () => {
         vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
         const create = vi.fn().mockImplementation(async () => (async function* () {

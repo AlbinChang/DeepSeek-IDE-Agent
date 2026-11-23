@@ -68,6 +68,7 @@ export class CompletionService {
             {
                 retries: globalConfig.agent.apiRetryLimit,
                 serviceBusyRetries: globalConfig.agent.apiServiceBusyRetryLimit,
+                rateLimitedRetries: globalConfig.agent.apiRateLimitRetryLimit,
                 onRetry: ({ attempt, maxAttempts, verdict, delayMs }) => {
                     console.warn(`[CompletionService] 补全请求遇 ${verdict.reason}，第 ${attempt}/${maxAttempts} 次重试（${delayMs}ms 后）...`);
                 },
@@ -153,6 +154,7 @@ export class CompletionService {
             {
                 retries: globalConfig.agent.apiRetryLimit,
                 serviceBusyRetries: globalConfig.agent.apiServiceBusyRetryLimit,
+                rateLimitedRetries: globalConfig.agent.apiRateLimitRetryLimit,
                 onRetry: ({ attempt, maxAttempts, verdict, delayMs }) => {
                     console.warn(`[CompletionService] 补全请求遇 ${verdict.reason}，第 ${attempt}/${maxAttempts} 次重试（${delayMs}ms 后）...`);
                 },

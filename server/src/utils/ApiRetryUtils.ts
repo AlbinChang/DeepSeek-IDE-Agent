@@ -1,8 +1,10 @@
 /**
  * LLM API 调用重试工具
  *
- * 统一管理「服务过载 / 网络层故障」两类可重试错误的识别、退避与重试：
- * - 服务过载：HTTP 408/409/425/429/500/502/503/504（含 DeepSeek 的
+ * 统一管理「服务限流 / 服务过载 / 网络层故障」三类可重试错误的识别、退避与重试：
+ * - 服务限流：HTTP 429（并发/配额限制），按 AGENT_API_RATE_LIMIT_RETRY_LIMIT（默认 10）重试；
+ *   对话侧在累计限流超过阈值后还会主动压缩上下文到低水位
+ * - 服务过载：HTTP 408/409/425/500/502/503/504（含 DeepSeek 的
  *   「503 Service is too busy」），按 AGENT_API_SERVICE_BUSY_RETRY_LIMIT（默认 100）重试
  * - 网络层：未收到 HTTP 响应（DNS / 连接 / TLS / 流中断等），按 AGENT_API_RETRY_LIMIT（默认 3）重试
  *
@@ -27,7 +29,7 @@ const NETWORK_ERROR_CODES = new Set([
     'EPIPE',
 ]);
 
-export type RetryCategory = 'service_busy' | 'network' | 'non_retryable';
+export type RetryCategory = 'rate_limited' | 'service_busy' | 'network' | 'non_retryable';
 
 export interface RetryVerdict {
     /** 是否可重试 */
@@ -43,9 +45,13 @@ export interface RetryVerdict {
 /**
  * 对错误对象做可重试性分类。
  * 兼容 OpenAI SDK（error.status / error.code）、undici（error.cause.code）、
- * 原生 fetch（error.response?.status）等常见错误形态。
+ * 原生 fetch（error.response?.status）等常见错误形态；
+ * 部分网关只把状态码写进错误文本（如「429 请求格式不正确」），也会从消息前缀补判。
  */
 export function classifyRetryableError(error: any): RetryVerdict {
+    const code: string = String(error?.code || error?.cause?.code || '');
+    const message: string = String(error?.message || error?.cause?.message || '');
+
     const statusRaw = error?.status ?? error?.response?.status;
     let status: number;
     if (typeof statusRaw === 'number') {
@@ -56,11 +62,28 @@ export function classifyRetryableError(error: any): RetryVerdict {
         status = Number.parseInt(String(statusRaw), 10);
     }
 
-    const code: string = String(error?.code || error?.cause?.code || '');
-    const message: string = String(error?.message || error?.cause?.message || '');
+    // 部分网关/代理只把状态码写进错误文本（如「429 请求格式不正确」）或 error.code，
+    // 并不提供 error.status。补判后避免把真实的限流/过载误归类为可重试的网络错误。
+    if (!(status > 0)) {
+        const codeStatus = Number.parseInt(String(error?.code ?? ''), 10);
+        if (codeStatus >= 400 && codeStatus <= 599) {
+            status = codeStatus;
+        }
+    }
+    if (!(status > 0)) {
+        const messageStatus = message.trim().match(/^(?:HTTP\s*)?([45]\d{2})\b/i);
+        if (messageStatus) {
+            status = Number(messageStatus[1]);
+        }
+    }
 
     // 1) 明确收到 HTTP 响应（状态码可解析且 > 0）
     if (Number.isFinite(status) && status > 0) {
+        // 429 单独归类：限流通常由并发/上下文体积触发，重试策略与 5xx 不同，
+        // 对话侧会据此在累计限流后主动压缩上下文。
+        if (status === 429) {
+            return { retryable: true, category: 'rate_limited', reason: `HTTP ${status}`, status };
+        }
         if (SERVICE_BUSY_HTTP_STATUS.has(status)) {
             return { retryable: true, category: 'service_busy', reason: `HTTP ${status}`, status };
         }
@@ -84,14 +107,14 @@ export function classifyRetryableError(error: any): RetryVerdict {
 /**
  * 计算第 attempt 次（从 0 开始）重试前的等待毫秒数。
  * 指数退避 + ±20% 抖动，避免多请求同时重试形成惊群。
- * 服务过载类错误退避更激进（base 2s），网络层 base 1s。
+ * 服务过载/限流类错误退避更激进（base 2s），网络层 base 1s。
  */
 export function computeRetryDelayMs(
     attempt: number,
     category: RetryCategory,
     maxDelayMs: number = 30_000,
 ): number {
-    const base = category === 'service_busy' ? 2_000 : 1_000;
+    const base = category === 'network' ? 1_000 : 2_000;
     const exponential = Math.min(base * Math.pow(2, Math.max(0, attempt)), maxDelayMs);
     const jitter = 1 + (Math.random() * 0.4 - 0.2); // 0.8 ~ 1.2
     return Math.round(exponential * jitter);
@@ -100,8 +123,10 @@ export function computeRetryDelayMs(
 export interface WithApiRetryOptions {
     /** 网络层错误重试次数（默认取 3） */
     retries?: number;
-    /** 服务过载（429/5xx）错误重试次数（默认取 100） */
+    /** 服务过载（408/409/425/5xx）错误重试次数（默认取 100） */
     serviceBusyRetries?: number;
+    /** 服务限流（HTTP 429）错误重试次数（默认取 10） */
+    rateLimitedRetries?: number;
     /** 每次重试前的回调（用于日志 / 推送前端状态） */
     onRetry?: (info: {
         attempt: number;
@@ -122,23 +147,35 @@ export async function withApiRetry<T>(
 ): Promise<T> {
     const retries = options.retries ?? 3;
     const serviceBusyRetries = options.serviceBusyRetries ?? 10;
-    let attempt = 0;
+    const rateLimitedRetries = options.rateLimitedRetries ?? 10;
+    // 各分类独立计数，避免同类错误的重试次数被其他分类挤占/误用
+    const attempts: Record<'rate_limited' | 'service_busy' | 'network', number> = {
+        rate_limited: 0,
+        service_busy: 0,
+        network: 0,
+    };
 
     for (;;) {
         try {
             return await fn();
         } catch (error: any) {
             const verdict = classifyRetryableError(error);
-            const maxAttempts = verdict.category === 'service_busy' ? serviceBusyRetries : retries;
+            const category = verdict.category === 'non_retryable' ? null : verdict.category;
+            const maxAttempts = category === 'rate_limited'
+                ? rateLimitedRetries
+                : category === 'service_busy' ? serviceBusyRetries
+                    : category === 'network' ? retries
+                        : 0;
+            const attempt = category ? attempts[category] : 0;
 
-            if (!verdict.retryable || attempt >= maxAttempts) {
+            if (!verdict.retryable || !category || attempt >= maxAttempts) {
                 throw error;
             }
 
-            attempt++;
-            const delayMs = computeRetryDelayMs(attempt - 1, verdict.category);
+            attempts[category] = attempt + 1;
+            const delayMs = computeRetryDelayMs(attempt, category);
             if (options.onRetry) {
-                options.onRetry({ attempt, maxAttempts, verdict, delayMs });
+                options.onRetry({ attempt: attempt + 1, maxAttempts, verdict, delayMs });
             }
             await new Promise((resolve) => setTimeout(resolve, delayMs));
         }

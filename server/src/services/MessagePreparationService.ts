@@ -21,6 +21,19 @@ function getMessageJsonByteLength(message: any): number {
     return length;
 }
 
+/**
+ * 估算一段消息数组序列化为请求 JSON 后的字节数。
+ * 复用按消息对象缓存的字节长度，供限流场景判断“压缩前后是否真的变小”。
+ */
+export function estimateMessagesJsonBytes(messages: any[]): number {
+    if (!Array.isArray(messages) || messages.length === 0) return 0;
+    let total = messages.length + 1; // [ ] + (n-1) 个逗号
+    for (const message of messages) {
+        total += getMessageJsonByteLength(message);
+    }
+    return total;
+}
+
 export interface MessagePreparationOptions {
     systemPrompt: string;
     pinnedUserMessage: string;
@@ -29,6 +42,11 @@ export interface MessagePreparationOptions {
     minMessagesBeforeTrim?: number;
     maxBytes?: number;
     lowWatermarkBytes?: number;
+    /**
+     * 强制压缩：忽略 maxBytes 上限，直接把历史裁剪到 lowWatermarkBytes。
+     * 用于累计限流（HTTP 429）后的提前压缩，降低请求体积以避免上下文过长导致的持续限流。
+     */
+    forceCompact?: boolean;
     /**
      * 当前使用的模型供应商配置。
      * Qwen 系模型不允许中途插入 system 消息，历史中的中途 system 指令会降级为
@@ -41,6 +59,7 @@ export interface MessagePreparationOptions {
  * 统一的消息预处理器：
  * - 维持固定前缀（system + 历史  + pinned user intent）
  * - 按字节阈值裁剪历史，避免上下文无限膨胀
+ * - 支持 forceCompact：连续限流时忽略常规上限，直接裁剪到低水位
  * - 校验工具调用链完整性，防止 API 400
  */
 export class MessagePreparationService {
@@ -53,6 +72,7 @@ export class MessagePreparationService {
             minMessagesBeforeTrim = 10,
             maxBytes = globalConfig.agent.maxHistoryBytes,
             lowWatermarkBytes = globalConfig.agent.lowWatermarkBytes,
+            forceCompact = false,
         } = options;
 
         const result: any[] = [{ role: "system", content: systemPrompt }];
@@ -99,8 +119,14 @@ export class MessagePreparationService {
             suffixSum[startIdx] + arrayOverhead(n - startIdx);
 
         let startIdx = 0;
-        if (n > minMessagesBeforeTrim && calcTotalBytes(0) > maxBytes) {
-            while (n - startIdx > minMessagesBeforeTrim && calcTotalBytes(startIdx) > lowWatermarkBytes) {
+        // 强制压缩用于限流自救：只要超过低水位就裁剪，并且允许比常规路径保留更少的历史消息，
+        // 否则“最近 10 条巨大的工具结果”仍然会超过低水位，压缩不生效。
+        const trimFloor = forceCompact ? Math.min(minMessagesBeforeTrim, 2) : minMessagesBeforeTrim;
+        const shouldTrim = n > trimFloor && (forceCompact
+            ? calcTotalBytes(0) > lowWatermarkBytes
+            : calcTotalBytes(0) > maxBytes);
+        if (shouldTrim) {
+            while (n - startIdx > trimFloor && calcTotalBytes(startIdx) > lowWatermarkBytes) {
                 // 移除队首 2 条消息：减去它们的 JSON 字节数 + 2（逗号开销）
                 startIdx += 2;
             }
