@@ -1,9 +1,17 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import Dexie from "dexie";
 import { USER_ID } from "@/config";
 import { useAgentContext, useTodoContext, useProblemContext } from "@/providers/AgentContext";
-import { clearWorkspaceChatHistory, db, recordTokenUsage, type TokenUsage } from "@/services/db";
+import {
+    clearWorkspaceChatHistory,
+    loadChatUiState,
+    loadWorkspaceChatHistory,
+    recordTokenUsage,
+    type ChatMessage,
+    type TokenUsage,
+} from "@/services/db";
+import { ChatPersistence } from "@/services/ChatPersistence";
 import { createClientId } from "@/utils/id";
+import { normalizeWorkspaceKey } from "@/utils/path";
 import { electronBridge, type AgentRecoveryInfo } from "@/services/electron-bridge";
 
 export interface MessagePart {
@@ -268,7 +276,7 @@ const sanitizeMessageForClient = (message: any): any => ({
 
 export function useAgentSSE() {
     const { locale, workspaceRoot, provider, model, settings } = useAgentContext();
-    const { setTodos } = useTodoContext();
+    const { todos, setTodos } = useTodoContext();
     const { addProblems } = useProblemContext();
     const [messages, setMessages] = useState<Message[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -278,6 +286,21 @@ export function useAgentSSE() {
     const abortControllerRef = useRef<AbortController | null>(null);
     // 本轮流式对话是否已通过 error 事件渲染过错误（防止 bridge 异常路径重复追加错误消息）
     const receivedErrorRef = useRef(false);
+    /**
+     * IndexedDB 后台持久化队列：用户消息、流式 assistant 快照、工具结果、错误提示
+     * 都会在运行过程中异步落库，不再依赖 done 事件，关闭应用后重启可完整恢复。
+     */
+    const persistenceRef = useRef<ChatPersistence | null>(null);
+    if (!persistenceRef.current) {
+        persistenceRef.current = new ChatPersistence();
+    }
+    /** 清空会话后短暂抑制写入，避免刚删除的数据又被旧状态写回。 */
+    const suppressPersistUntilRef = useRef(0);
+    /** 恢复完成前不写 UI 状态，避免用初始空值覆盖 IndexedDB 里的任务流水线/草稿。 */
+    const restoreReadyRef = useRef(false);
+    /** 最新输入草稿：恢复时用于判断用户是否已开始输入，避免覆盖。 */
+    const inputRef = useRef(input);
+    inputRef.current = input;
 
     // 编辑器上下文：监听当前激活文件与选中范围，用于附加到用户指令
     const editorContextRef = useRef<{
@@ -339,25 +362,152 @@ export function useAgentSSE() {
     }, []);
 
     useEffect(() => {
-        if (workspaceRoot) {
-            db.chatHistory.where('[workspaceRoot+timestamp]')
-                .between([workspaceRoot, Dexie.minKey], [workspaceRoot, Dexie.maxKey])
-                .reverse()
-                .limit(MAX_HISTORY_MESSAGES)
-                .toArray()
-                .then(history => {
-                    const typedHistory = history
-                        .sort((a, b) => a.timestamp - b.timestamp)
-                        .map(h => sanitizeMessageForClient({
-                            ...h,
-                            parts: (h as any).parts || [{ id: createClientId(), type: 'text', content: (h as any).content, timestamp: (h as any).timestamp }]
-                        } as any)) as Message[];
-                    setMessages(trimMessagesForMemory(typedHistory));
+        const loadStartedAt = Date.now();
+        const inputAtRestoreStart = inputRef.current;
+        let cancelled = false;
+        restoreReadyRef.current = false;
+        const restore = async () => {
+            try {
+                // 放到微任务后执行：避免在 effect 内同步 setState 触发级联渲染告警
+                await Promise.resolve();
+                if (cancelled) return;
+
+                if (!workspaceRoot) {
+                    setMessages([]);
+                    setData([]);
+                    setStreamProgress(null);
+                    setInput("");
+                    restoreReadyRef.current = true;
+                    return;
+                }
+
+                const [history, uiState] = await Promise.all([
+                    loadWorkspaceChatHistory(workspaceRoot, MAX_HISTORY_MESSAGES).catch((error) => {
+                        console.error('[AgentChat] Failed to load chat messages:', error);
+                        return [] as ChatMessage[];
+                    }),
+                    loadChatUiState(workspaceRoot).catch((error) => {
+                        console.error('[AgentChat] Failed to load chat UI state:', error);
+                        return undefined;
+                    }),
+                ]);
+                if (cancelled) return;
+
+                const restoredMessages = history
+                    .filter(h => h.role === 'user' || h.role === 'assistant')
+                    .map(h => sanitizeMessageForClient({
+                        ...h,
+                        isFinal: true,
+                        parts: Array.isArray(h.parts) && h.parts.length > 0
+                            ? h.parts
+                            : [{ id: createClientId(), type: 'text', content: h.content, timestamp: h.timestamp }],
+                    } as any)) as Message[];
+
+                // 恢复期间用户可能已经发送了新消息：保留加载开始后产生、且未在历史中的消息，
+                // 避免异步恢复把刚输入的内容覆盖掉。
+                setMessages(prev => {
+                    const restoredIds = new Set(restoredMessages.map(m => m.id));
+                    const inFlight = prev.filter(m => m.timestamp >= loadStartedAt && !restoredIds.has(m.id));
+                    if (inFlight.length === 0) return trimMessagesForMemory(restoredMessages);
+                    const merged = [...restoredMessages, ...inFlight]
+                        .sort((left, right) => left.timestamp - right.timestamp);
+                    return trimMessagesForMemory(merged);
                 });
-        } else {
-            setMessages([]);
+
+                // 恢复 UI 状态；没有快照时清空旧工作区残留（data / 草稿）。
+                setTodos(Array.isArray(uiState?.todos) ? uiState.todos : []);
+                setData(Array.isArray(uiState?.stages) ? uiState.stages.slice(-MAX_STAGE_ITEMS) : []);
+                setStreamProgress(null);
+                setInput(current => (
+                    current !== inputAtRestoreStart
+                        ? current
+                        : (typeof uiState?.input === 'string' ? uiState.input : '')
+                ));
+            } catch (error) {
+                if (cancelled) return;
+                console.error('[AgentChat] Failed to restore chat history from IndexedDB:', error);
+                // 恢复失败时至少不要让旧工作区的内容继续显示
+                setMessages(prev => prev.filter(m => m.timestamp >= loadStartedAt));
+            } finally {
+                if (!cancelled) restoreReadyRef.current = true;
+            }
+        };
+
+        void restore();
+        return () => {
+            cancelled = true;
+        };
+    }, [workspaceRoot, setTodos]);
+
+    // ── 流式过程中的异步持久化 ──
+    // 每次 UI 提交（约 50ms 一次）只把「最后一条 assistant 消息」的最新快照放进队列，
+    // 队列按 800ms 合并落库；done / error / 最终答复时立即 flush。
+    // 这样即使关闭应用发生在任务中途，已渲染的内容（含工具调用/结果）也能恢复。
+    useEffect(() => {
+        if (!workspaceRoot || messages.length === 0) return;
+        if (Date.now() < suppressPersistUntilRef.current) return;
+
+        const last = messages[messages.length - 1];
+        if (last.role !== 'assistant') return;
+
+        const persistence = persistenceRef.current;
+        if (!persistence) return;
+
+        const row: ChatMessage = {
+            id: last.id,
+            workspaceRoot,
+            workspaceKey: normalizeWorkspaceKey(workspaceRoot),
+            role: last.role,
+            content: last.content,
+            reasoning_content: last.reasoning_content,
+            parts: last.parts,
+            timestamp: last.timestamp,
+            traceId: last.traceId,
+            isFinal: last.isFinal,
+        };
+        persistence.scheduleMessage(row);
+        if (last.isFinal) {
+            void persistence.flush();
         }
-    }, [workspaceRoot]);
+    }, [messages, workspaceRoot]);
+
+    // 任务流水线 / 阶段提示 / 输入草稿与消息分开保存，重启后一并恢复。
+    useEffect(() => {
+        if (!workspaceRoot || !restoreReadyRef.current) return;
+        if (Date.now() < suppressPersistUntilRef.current) return;
+        const persistence = persistenceRef.current;
+        if (!persistence) return;
+
+        persistence.scheduleUiState({
+            workspaceKey: normalizeWorkspaceKey(workspaceRoot),
+            workspaceRoot,
+            todos,
+            stages: data,
+            input,
+            updatedAt: Date.now(),
+        });
+    }, [workspaceRoot, todos, data, input]);
+
+    // 页面隐藏/关闭前尽力 flush，缩小“最后不到 1 秒内容”丢失的窗口。
+    useEffect(() => {
+        const persistence = persistenceRef.current;
+        if (!persistence) return;
+
+        const flush = () => { void persistence.flush(); };
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') flush();
+        };
+        window.addEventListener('pagehide', flush);
+        window.addEventListener('beforeunload', flush);
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
+        return () => {
+            window.removeEventListener('pagehide', flush);
+            window.removeEventListener('beforeunload', flush);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            void persistence.flush();
+        };
+    }, []);
 
     const stop = useCallback(async () => {
         if (abortControllerRef.current) {
@@ -365,6 +515,8 @@ export function useAgentSSE() {
             abortControllerRef.current = null;
         }
         setIsLoading(false);
+        // 中止时把已生成的部分内容落库，避免恢复后只剩半截气泡却缺少工具结果。
+        void persistenceRef.current?.flush();
     }, []);
 
     const append = useCallback(async (
@@ -418,6 +570,20 @@ export function useAgentSSE() {
             traceId: currentTraceId // 关联本次链路
         };
         setMessages(prev => trimMessagesForMemory([...prev, userMsg]));
+
+        // 用户消息立即落库：即使随后崩溃/关闭应用，也不会丢失本次指令。
+        persistenceRef.current?.scheduleMessage({
+            id: userMsg.id,
+            workspaceRoot,
+            workspaceKey: normalizeWorkspaceKey(workspaceRoot),
+            role: 'user',
+            content: userMsg.content,
+            reasoning_content: userMsg.reasoning_content,
+            parts: userMsg.parts,
+            timestamp: userMsg.timestamp,
+            traceId: userMsg.traceId,
+            isFinal: true,
+        }, { immediate: true });
 
         // ═══════════════════════════════════════════════════════════════
         // 【性能优化 v2】统一 rAF 批量提交：将所有类型的 chunk 合并到
@@ -708,15 +874,10 @@ export function useAgentSSE() {
                         (last as any).contentMeta = limited.meta;
                     }
 
-                    // done
+                    // done：持久化由 messages 副作用统一完成（最后一条 assistant 且 isFinal=true 时立即 flush），
+                    // 不再在此直接写 IndexedDB，避免与流式快照写入互相覆盖。
                     if (isDone) {
                         last.isFinal = true;
-                        // part 在写入时已逐条 sanitize（sanitizeAnnotationParams / capRenderedText），
-                        // 这里只做浅拷贝落库。历史上这里对整条消息再跑一次
-                        // sanitizeMessageForClient（深拷贝每个 part 的 params），
-                        // 超长任务下会在主线程产生数百毫秒的额外开销。
-                        db.chatHistory.put({ ...userMsg, workspaceRoot }).catch(console.error);
-                        db.chatHistory.put({ ...last, workspaceRoot }).catch(console.error);
                     }
 
                     return trimMessagesForMemory(next);
@@ -988,6 +1149,8 @@ export function useAgentSSE() {
             cancelScheduledFlush();
             setIsLoading(false); 
             abortControllerRef.current = null;
+            // 流结束（正常/异常/中止）时兜底落库，确保最后一批快照不留在队列里。
+            void persistenceRef.current?.flush();
             if (treeRefreshTimer !== null) {
                 clearTimeout(treeRefreshTimer);
                 treeRefreshTimer = null;
@@ -1008,18 +1171,36 @@ export function useAgentSSE() {
         // 注意：确认交互由 UI 层的自定义弹窗完成。
         // 禁止在此使用 window.confirm —— Electron 中原生对话框关闭后会破坏渲染窗口的
         // 键盘焦点状态，导致输入框长时间无法聚焦（Chromium 已知 bug）。
+
+        // 先把队列里尚未完成的写入 flush 完，再丢弃快照并短暂抑制写入，
+        // 避免「清空事务」与「在途写事务」交错导致旧数据被写回。
+        const persistence = persistenceRef.current;
+        if (persistence) {
+            await persistence.flush();
+            persistence.clearPending();
+        }
+        suppressPersistUntilRef.current = Date.now() + 3000;
+
         try {
             // Electron 模式：通过 IPC 调用主进程清空会话（含 TODO 持久化清理）
             await electronBridge.clearSession({ userId: USER_ID, workspaceRoot });
-            // 清空本地 IndexedDB
+        } catch (e) {
+            // 服务端清空失败不应阻塞本地 UI 内容的删除
+            console.error("Failed to clear server session:", e);
+        }
+
+        try {
+            // 清空本地 IndexedDB（消息 + UI 状态）
             await clearWorkspaceChatHistory(workspaceRoot);
+        } catch (e) {
+            console.error("Failed to clear local chat history:", e);
+        } finally {
+            // 无论 IndexedDB 删除是否成功，都先清空当前 UI（失败时数据会在下次启动时重现）
             setMessages([]);
             setInput("");
             setData([]);
             setStreamProgress(null);
             setTodos([]);
-        } catch (e) {
-            console.error("Failed to clear history:", e);
         }
     }, [workspaceRoot, setTodos]);
 

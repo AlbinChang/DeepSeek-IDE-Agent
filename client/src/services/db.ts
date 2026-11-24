@@ -1,4 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie';
+import { normalizeWorkspaceKey } from '@/utils/path';
 
 const DB_INLINE_STRING_LIMIT = 1200;
 const DB_RENDERED_TEXT_LIMIT = 200_000;
@@ -83,11 +84,29 @@ const sanitizePersistedChatRow = (row: any) => {
 export interface ChatMessage {
   id: string;
   workspaceRoot: string;
+  /** 归一化后的工作区分区键（跨重启稳定；见 normalizeWorkspaceKey） */
+  workspaceKey?: string;
   role: 'user' | 'assistant' | 'system' | 'data';
   content: string;
   reasoning_content?: string;
   parts: any[];
   timestamp: number;
+  traceId?: string;
+  isFinal?: boolean;
+}
+
+/**
+ * 前端 UI 状态快照（与聊天消息分开存储）：
+ * 任务流水线、阶段提示、未发送的输入草稿。
+ * 仅用于重启恢复展示，不参与模型请求。
+ */
+export interface ChatUiState {
+  workspaceKey: string;
+  workspaceRoot: string;
+  todos: any[];
+  stages: any[];
+  input: string;
+  updatedAt: number;
 }
 
 export interface TokenUsage {
@@ -133,6 +152,7 @@ export const getBeijingDateKey = (timestamp: number): string => {
 export const db = new Dexie('DeepSeekIDEAgentDB') as Dexie & {
   chatHistory: EntityTable<ChatMessage, 'id'>;
   tokenUsage: EntityTable<TokenUsageRecord, 'id'>;
+  chatUiState: EntityTable<ChatUiState, 'workspaceKey'>;
 };
 
 db.version(4).stores({
@@ -150,6 +170,20 @@ db.version(5).stores({
 db.version(6).stores({
   chatHistory: 'id, workspaceRoot, timestamp, [workspaceRoot+timestamp]',
   tokenUsage: 'id, workspaceRoot, date, [workspaceRoot+date]',
+});
+
+// v7：引入稳定的分区键 workspaceKey 与 UI 状态表。
+// - 同一工作区在重启后可能以 D:\mall / D:/mall / 末尾斜杠等不同字符串出现，
+//   旧实现按 workspaceRoot 精确查询会“查不到历史 → UI 看起来被清空”。
+// - 升级时把已有行补齐 workspaceKey，保证旧数据不丢。
+db.version(7).stores({
+  chatHistory: 'id, workspaceRoot, workspaceKey, timestamp, [workspaceRoot+timestamp], [workspaceKey+timestamp]',
+  tokenUsage: 'id, workspaceRoot, date, [workspaceRoot+date]',
+  chatUiState: 'workspaceKey',
+}).upgrade(tx => {
+  return tx.table('chatHistory').toCollection().modify((row: any) => {
+    row.workspaceKey = normalizeWorkspaceKey(row.workspaceRoot);
+  });
 });
 
 const toTokenCount = (value: number): number =>
@@ -203,6 +237,78 @@ export const getWorkspaceTokenUsageSummary = async (
   };
 };
 
+/**
+ * 归一化并补齐一条聊天记录的持久化字段。
+ * 返回新对象，避免修改 React 正在使用的消息快照。
+ */
+const toPersistedChatRow = (message: ChatMessage): ChatMessage => {
+  const row: ChatMessage = {
+    ...message,
+    workspaceKey: message.workspaceKey || normalizeWorkspaceKey(message.workspaceRoot),
+  };
+  sanitizePersistedChatRow(row);
+  return row;
+};
+
+/**
+ * 批量写入/覆盖聊天消息。
+ * 写入前按持久化预算裁剪（超大工具参数、超长正文），避免 IndexedDB 无限膨胀。
+ */
+export const putChatMessages = async (messages: ChatMessage[]): Promise<void> => {
+  if (!Array.isArray(messages) || messages.length === 0) return;
+  await db.chatHistory.bulkPut(messages.map(toPersistedChatRow));
+};
+
+/**
+ * 读取某个工作区的最近聊天消息（按时间正序返回，供 UI 直接渲染）。
+ * 使用归一化 workspaceKey 查询，兼容 D:\ws / D:/ws / 末尾斜杠等写法差异。
+ */
+export const loadWorkspaceChatHistory = async (
+  workspaceRoot: string,
+  limit: number,
+): Promise<ChatMessage[]> => {
+  const workspaceKey = normalizeWorkspaceKey(workspaceRoot);
+  if (!workspaceKey) return [];
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 80;
+  const rows = await db.chatHistory
+    .where('[workspaceKey+timestamp]')
+    .between([workspaceKey, Dexie.minKey], [workspaceKey, Dexie.maxKey])
+    .reverse()
+    .limit(safeLimit)
+    .toArray();
+  return rows.sort((left, right) => left.timestamp - right.timestamp);
+};
+
+/** 保存前端 UI 状态快照（任务流水线 / 阶段 / 输入草稿）。 */
+export const saveChatUiState = async (state: ChatUiState): Promise<void> => {
+  const workspaceKey = state.workspaceKey || normalizeWorkspaceKey(state.workspaceRoot);
+  if (!workspaceKey) return;
+  await db.chatUiState.put({
+    ...state,
+    workspaceKey,
+    todos: Array.isArray(state.todos) ? state.todos.slice(0, 100) : [],
+    stages: Array.isArray(state.stages) ? state.stages.slice(-120) : [],
+    input: typeof state.input === 'string' ? state.input.slice(0, 100_000) : '',
+    updatedAt: Number.isFinite(state.updatedAt) ? state.updatedAt : Date.now(),
+  });
+};
+
+/** 读取前端 UI 状态快照。 */
+export const loadChatUiState = async (workspaceRoot: string): Promise<ChatUiState | undefined> => {
+  const workspaceKey = normalizeWorkspaceKey(workspaceRoot);
+  if (!workspaceKey) return undefined;
+  return db.chatUiState.get(workspaceKey);
+};
+
+/**
+ * 清空某个工作区的全部前端内容（消息 + UI 状态）。
+ * 只应在用户显式点击「清空历史会话」时调用。
+ */
 export const clearWorkspaceChatHistory = async (workspaceRoot: string): Promise<void> => {
-  await db.chatHistory.where('workspaceRoot').equals(workspaceRoot).delete();
+  const workspaceKey = normalizeWorkspaceKey(workspaceRoot);
+  if (!workspaceKey) return;
+  await db.transaction('rw', db.chatHistory, db.chatUiState, async () => {
+    await db.chatHistory.where('workspaceKey').equals(workspaceKey).delete();
+    await db.chatUiState.delete(workspaceKey);
+  });
 };

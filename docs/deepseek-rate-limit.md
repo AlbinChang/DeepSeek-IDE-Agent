@@ -129,6 +129,42 @@ message = client.messages.create(
 
 ---
 
+## 请求体非法（HTTP 400）与孤立 UTF-16 代理码元
+
+`400 请求格式不合法` / `Failed to parse the request body as JSON ... unexpected end of hex escape`
+表示**请求体本身不是合法 JSON**，与限流、上下文长度无关，重试不会恢复。
+
+本项目里唯一能把合法对象序列化成非法 JSON 的字符是**孤立的 UTF-16 代理码元**
+（未配对的高/低代理，如 `\uD83D`）。`JSON.stringify` 会把它写成 `\ud83d`，
+服务端 JSON 解析器（Rust serde_json）直接拒绝整个请求。
+
+常见来源：
+
+- 按 UTF-16 解码的文件内容（字节数为奇数或文件本身损坏）；
+- 模型输出被截断，末尾停在代理对中间；
+- 工具结果回显文件内容（`insert_in_file` / `replace_in_file` / `file_patch` 的
+  `contextSnapshot` 最容易命中，因为它在一次工具调用后把整段插入内容带回模型）；
+- 记忆/规则等被按 code unit 截断后注入提示词。
+
+防御分三层（`server/src/utils/UnicodeUtils.ts`）：
+
+1. **请求前统一修复**：`AgentTurnEngine` 在调用模型前对完整请求体执行
+   `sanitizeJsonStrings`，把孤立代理码元替换为 `U+FFFD`；合法字符串保持原引用，
+   不破坏消息字节数缓存。命中时会打印警告（含修复字段数）。
+2. **写入历史前修复**：assistant 的 `content` / `reasoning_content` / `tool_calls.arguments`
+   以及工具结果在进入 `activeHistory` 前清洗，避免污染后续所有轮次。
+3. **落盘前修复**：`write_file` / `insert_in_file` / `replace_in_file` /
+   `replace_all_in_file` 先清洗模型传入的文本，保证文件内容与 `contextSnapshot` 一致。
+
+> 合法代理对（emoji 等）不受影响；只替换无法组成代理对的单个 code unit。
+
+另一个同类 400 来源是 **`tool_calls[].function.arguments` 被截断/污染**：
+该字段协议上必须是 JSON 字符串，严格网关会校验并拒绝整个请求。引擎在
+`JSON.parse` 失败时会把回放历史中的 `arguments` 收敛为 `{}`（工具不执行，
+错误信息通过 tool 消息回传给模型重新发起合法调用）；空参数统一写成 `{}`。
+
+---
+
 ## 请求/返回诊断：`.llm_response`
 
 工作区下的 `.llm_response/` 目录会保存**每一次**模型请求的返回结果（含重试与被丢弃的响应）：

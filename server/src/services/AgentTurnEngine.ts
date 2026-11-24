@@ -31,6 +31,7 @@ import { TelemetryService } from "@/services/TelemetryService.js";
 import { config as globalConfig } from "@/config/index.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
 import { classifyRetryableError, computeRetryDelayMs } from "@/utils/ApiRetryUtils.js";
+import { sanitizeJsonStrings, sanitizeLoneSurrogates } from "@/utils/UnicodeUtils.js";
 import { estimateMessagesJsonBytes } from "@/services/MessagePreparationService.js";
 import { accumulateTokenUsage, normalizeTokenUsage, type TokenUsage } from "@/utils/TokenUsage.js";
 import {
@@ -789,7 +790,7 @@ export class AgentTurnEngine {
                 // 恢复请求只在压缩前的首轮重放原始 payload；一旦因限流压缩过上下文，
                 // resumeReplayPayload 会被清空，后续请求改用重建后的 activeHistory。
                 const replayPayload = turns === 1 ? resumeReplayPayload : undefined;
-                const requestPayload = replayPayload ?? {
+                const rawRequestPayload = replayPayload ?? {
                     model: finalModelId,
                     messages: AIProviderFactory.buildProviderSafeMessages(activeHistory, options.provider),
                     ...(toolsForRequest !== undefined ? { tools: toolsForRequest as any } : {}),
@@ -801,6 +802,20 @@ export class AgentTurnEngine {
                         : {}),
                     ...thinkingOptions,
                 };
+                // 请求体 Unicode 安全网：JSON.stringify 会把未配对的 UTF-16 代理码元序列化成
+                // `\ud83d` 这类孤立代理转义，DeepSeek / 网关的 JSON 解析器会直接拒绝整个请求，
+                // 返回 400（如「请求格式不合法」/ `unexpected end of hex escape`）。
+                // 工具结果（例如 insert_in_file 的 contextSnapshot）、UTF-16 文件内容、
+                // 被截断的模型输出都可能携带这类码元；这里统一替换为 U+FFFD，
+                // 保证请求体永远是合法 JSON。合法字符串保持原引用，不产生额外拷贝。
+                const sanitizedRequest = sanitizeJsonStrings(rawRequestPayload);
+                const requestPayload = sanitizedRequest.value;
+                if (sanitizedRequest.repairedStrings > 0) {
+                    console.warn(
+                        `${getTS()} [AgentTurnEngine] 请求体包含 ${sanitizedRequest.repairedStrings} 处孤立 UTF-16 代理码元，`
+                        + `已替换为 U+FFFD（否则服务端会以 400 拒绝整个请求；turn=${turns}）`,
+                    );
+                }
 
                 if (!skipJournal) {
                     await LLMRequestJournal.getInstance().recordRequest({
@@ -859,6 +874,8 @@ export class AgentTurnEngine {
                                     maxOutputTokens: globalConfig.agent.maxOutputTokens,
                                     thinking: thinkingOptions,
                                     resumedPayload: replayPayload !== undefined,
+                                    // 请求体修复的孤立代理码元数：>0 说明历史/工具结果曾携带非法 Unicode
+                                    unicodeRepairs: sanitizedRequest.repairedStrings,
                                 },
                                 durationMs: Date.now() - attemptStartedAt,
                                 elapsedSinceRunStartMs: Date.now() - startTimeStamp,
@@ -1385,24 +1402,39 @@ export class AgentTurnEngine {
             // ---------------------------------------------------------------
             // 构建 assistant 消息
             // ---------------------------------------------------------------
-            const assistantMsg: any = { role: "assistant", content: fullContent };
+            // 孤立代理码元会污染后续所有请求（见请求体 Unicode 安全网），
+            // 写历史前先清洗，避免模型输出被截断时把非法 Unicode 扩散到工具轮。
+            const assistantMsg: any = { role: "assistant", content: sanitizeLoneSurrogates(fullContent) };
             // 【原封不动】DeepSeek thinking mode（2026-09-10 口径）：请求携带 tools 参数时，
             // 后续每一轮 assistant 消息都必须完整回传 reasoning_content，否则 API 返回 400
             //（判定依据是「是否携带 tools」，而非「该轮是否实际发生工具调用」）。
             // 此处把本轮流式采集到的推理内容逐字写入，不做任何加工：
             //  - 模型有输出 → 原样携带；
             //  - 模型未输出（续接轮）→ 保留空字符串，与 API 返回的消息形态一致，不伪造、不删减。
-            assistantMsg.reasoning_content = fullReasoning;
+            assistantMsg.reasoning_content = sanitizeLoneSurrogates(fullReasoning);
 
             // ---------------------------------------------------------------
             // 有工具调用：执行工具，继续循环
             // ---------------------------------------------------------------
             if (toolCalls.length > 0) {
-                const tool_calls_map = toolCalls.map((tc) => ({
-                    id: tc.id,
-                    type: "function",
-                    function: { name: tc.function.name, arguments: tc.function.arguments },
-                }));
+                // filter(Boolean)：流式 tool_calls 可能因 index 不连续产生空洞，
+                // 空洞会以 null 形式进入请求体并触发 400；
+                // arguments 统一清洗孤立代理码元（模型输出被截断时可能携带）。
+                const tool_calls_map = toolCalls.filter(Boolean).map((tc) => {
+                    const rawArguments = typeof tc.function.arguments === "string"
+                        ? sanitizeLoneSurrogates(tc.function.arguments)
+                        : "";
+                    return {
+                        id: tc.id,
+                        type: "function",
+                        function: {
+                            name: tc.function.name,
+                            // 工具调用协议要求 arguments 是 JSON 字符串：
+                            // 空参数统一落成 "{}"，避免部分网关把空字符串判为格式错误。
+                            arguments: rawArguments.trim() ? rawArguments : "{}",
+                        },
+                    };
+                });
 
                 assistantMsg.tool_calls = tool_calls_map;
                 activeHistory.push(assistantMsg);
@@ -1422,7 +1454,7 @@ export class AgentTurnEngine {
                         activeHistory.push({
                             role: "tool",
                             tool_call_id: tc.id,
-                            content: `Error: ${errMessage}`,
+                            content: sanitizeLoneSurrogates(`Error: ${errMessage}`),
                         });
                         continue;
                     }
@@ -1436,8 +1468,16 @@ export class AgentTurnEngine {
                             // 参数被截断/污染时不要退化成空参数执行工具（可能造成误操作），
                             // 把错误回传给模型，让它在下一轮重新发起合法调用。
                             const errMessage = `工具参数不是合法 JSON（已跳过执行）：${String(e?.message || e)}`;
+                            const originalArgumentsLength = typeof tc.function.arguments === "string"
+                                ? tc.function.arguments.length
+                                : 0;
+                            // 被截断/污染的 arguments 不能原样回放：严格网关会校验
+                            // tool_calls[].function.arguments 必须是合法 JSON，否则整个请求
+                            // 返回 400（如「请求格式不合法」）。收敛为 "{}"：工具不会执行，
+                            // 下一轮由模型根据 tool 错误信息重新发起合法调用。
+                            tc.function.arguments = "{}";
                             console.error(
-                                `${getTS()} [AgentTurnEngine] JSON parse error for tool ${tc.function.name}. argumentsLength=${tc.function.arguments?.length || 0}`
+                                `${getTS()} [AgentTurnEngine] JSON parse error for tool ${tc.function.name}. argumentsLength=${originalArgumentsLength}`
                             );
                             emit({
                                 type: "annotation",
@@ -1447,7 +1487,7 @@ export class AgentTurnEngine {
                             activeHistory.push({
                                 role: "tool",
                                 tool_call_id: tc.id,
-                                content: `Error: ${errMessage}`,
+                                content: sanitizeLoneSurrogates(`Error: ${errMessage}`),
                             });
                             continue;
                         }
@@ -1512,10 +1552,18 @@ export class AgentTurnEngine {
                             },
                         });
 
+                        // tool 消息的 content 必须是字符串：工具返回 undefined/函数时
+                        // JSON.stringify 会得到 undefined，字段被丢弃后请求体会变成非法结构。
+                        const serializedResult = typeof result === "string" ? result : JSON.stringify(result);
                         activeHistory.push({
                             role: "tool",
                             tool_call_id: tc.id,
-                            content: typeof result === "string" ? result : JSON.stringify(result),
+                            // 工具结果可能回显文件内容（如 insert_in_file 的 contextSnapshot）：
+                            // UTF-16 解码/截断产生的孤立代理码元必须在回传模型前修复，
+                            // 否则下一次请求会被服务端以 400 拒绝。
+                            content: sanitizeLoneSurrogates(
+                                typeof serializedResult === "string" ? serializedResult : "null",
+                            ),
                         });
 
                         // todo 工具执行后同步 TODO 状态到前端（原子工具集）
@@ -1544,7 +1592,7 @@ export class AgentTurnEngine {
                         activeHistory.push({
                             role: "tool",
                             tool_call_id: tc.id,
-                            content: `Error: ${errMessage}`,
+                            content: sanitizeLoneSurrogates(`Error: ${errMessage}`),
                         });
                     }
                 }
@@ -1577,7 +1625,7 @@ export class AgentTurnEngine {
 
                 // 工具调用结束后 content 可能为空（纯推理模型），将 reasoning_content 复制过来供前端展示
                 if (!fullContent && fullReasoning) {
-                    assistantMsg.content = fullReasoning;
+                    assistantMsg.content = sanitizeLoneSurrogates(fullReasoning);
                     const visibleReasoning = fullReasoning.length > CLIENT_VISIBLE_CONTENT_LIMIT
                         ? `${fullReasoning.slice(0, CLIENT_VISIBLE_CONTENT_LIMIT)}${streamTruncationNotice("推理文本", fullReasoning.length)}`
                         : fullReasoning;
@@ -1588,13 +1636,13 @@ export class AgentTurnEngine {
                 // 优先回退到本轮对话中最近一次非空的 assistant 回复，避免被空回复覆盖导致前端丢失答复
                 if (!assistantMsg.content || !assistantMsg.content.trim()) {
                     if (lastNonEmptyAssistantContent) {
-                        assistantMsg.content = lastNonEmptyAssistantContent;
+                        assistantMsg.content = sanitizeLoneSurrogates(lastNonEmptyAssistantContent);
                         // 若当前轮尚未向客户端输出该正文，进行补发确保前端能收到
                         if (!fullContent) {
                             emit({ type: "text", content: lastNonEmptyAssistantContent, turn: turns });
                         }
                     } else if (lastAssistantReasoning) {
-                        assistantMsg.content = lastAssistantReasoning;
+                        assistantMsg.content = sanitizeLoneSurrogates(lastAssistantReasoning);
                         const visibleReasoning = lastAssistantReasoning.length > CLIENT_VISIBLE_CONTENT_LIMIT
                             ? `${lastAssistantReasoning.slice(0, CLIENT_VISIBLE_CONTENT_LIMIT)}${streamTruncationNotice("推理文本", lastAssistantReasoning.length)}`
                             : lastAssistantReasoning;

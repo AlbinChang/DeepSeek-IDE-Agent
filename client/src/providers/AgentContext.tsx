@@ -1,4 +1,4 @@
-﻿import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+﻿import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { USER_ID } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
@@ -167,8 +167,13 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     const [problems, setProblemsState] = useState<ProblemEntry[]>([]);
 
     // 工作空间切换时，清除旧工作空间的 todos / problems 残留
-    // 防止切换后短暂闪现上一个工作空间的任务列表和诊断信息
+    // 防止切换后短暂闪现上一个工作空间的任务列表和诊断信息。
+    // 仅在「真正切换」时清空：首屏挂载时不重置，否则会把 useAgentSSE 刚从
+    // IndexedDB 恢复的任务流水线立刻清掉（子组件 effect 先于父组件执行）。
+    const previousWorkspaceRootRef = useRef(workspaceRoot);
     useEffect(() => {
+        if (previousWorkspaceRootRef.current === workspaceRoot) return;
+        previousWorkspaceRootRef.current = workspaceRoot;
         setTodos([]);
         setProblemsState([]);
     }, [workspaceRoot]);

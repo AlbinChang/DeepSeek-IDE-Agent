@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { config as globalConfig } from '@/config/index.js';
 import { FileTools, buildNearestMatchHint } from '@/tools/FileTools.js';
+import { hasLoneSurrogate } from '@/utils/UnicodeUtils.js';
 
 describe('FileTools.readFile', () => {
     const tempDirs: string[] = [];
@@ -220,6 +221,52 @@ describe('FileTools.editFileByReplace & EOL Normalization', () => {
 
         const fileAfter = await fs.readFile(filePath, 'utf8');
         expect(fileAfter).toBe('item 1:\r\n  status: disabled\r\n\r\nitem 2:\r\n  status: disabled');
+    });
+});
+
+describe('FileTools 孤立代理码元修复', () => {
+    const tempDirs: string[] = [];
+
+    const createWorkspace = async () => {
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepseek-ide-agent-unicode-'));
+        tempDirs.push(dir);
+        return dir;
+    };
+
+    afterEach(async () => {
+        await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+    });
+
+    it('insert_in_file 落盘内容与 contextSnapshot 均不含孤立代理码元', async () => {
+        const workspaceRoot = await createWorkspace();
+        const filePath = path.join(workspaceRoot, 'Demo.java');
+        await fs.writeFile(filePath, 'class Demo {\n}\n', 'utf8');
+        const loneHigh = '\uD83D';
+
+        const result = await FileTools.editFileByInsert(
+            workspaceRoot,
+            'Demo.java',
+            2,
+            `    // broken ${loneHigh}\n    void t() {}`,
+        ) as any;
+
+        expect(result.status).toBe('success');
+        expect(hasLoneSurrogate(result.contextSnapshot)).toBe(false);
+        expect(result.contextSnapshot).toContain('\uFFFD');
+
+        const fileAfter = await fs.readFile(filePath, 'utf8');
+        expect(hasLoneSurrogate(fileAfter)).toBe(false);
+        expect(fileAfter).toContain('\uFFFD');
+    });
+
+    it('write_file 在落盘前修复孤立代理码元', async () => {
+        const workspaceRoot = await createWorkspace();
+
+        const result = await FileTools.writeFile(workspaceRoot, 'unicode.txt', `a\uDE00b`);
+
+        expect(result.status).toBe('success');
+        const fileAfter = await fs.readFile(path.join(workspaceRoot, 'unicode.txt'), 'utf8');
+        expect(fileAfter).toBe('a\uFFFDb');
     });
 });
 

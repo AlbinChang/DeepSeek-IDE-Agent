@@ -8,6 +8,7 @@ import { compareFileSystemEntries } from '@/utils/FileOrdering.js';
 import { config as globalConfig } from '@/config/index.js';
 import { WORKSPACE_SKILL_CONTAINER_DIRECTORIES, isWorkspaceSkillPath } from '@/utils/WorkspaceSkillPaths.js';
 import { assertAgentStatePathWritable } from '@/utils/AgentSystemPaths.js';
+import { sanitizeLoneSurrogates } from '@/utils/UnicodeUtils.js';
 
 export class FileTools {
     private static readonly LIST_FILES_MAX_DEPTH = 10;
@@ -448,6 +449,9 @@ export class FileTools {
         }
 
         FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'write_file');
+        // 孤立 UTF-16 代理码元无法编码成合法文本：先修复再落盘，
+        // 避免文件与工具回显（contextSnapshot）不一致，或污染模型的后续请求。
+        content = sanitizeLoneSurrogates(content);
         // 写入体积守卫：防止超大内容经 GBK roundtrip 校验产生 20 倍内存放大
         const MAX_WRITE_CHARS = 5 * 1024 * 1024; // 5M 字符，与读取侧 5MB 字节上限对齐
         if (content.length > MAX_WRITE_CHARS) {
@@ -530,6 +534,9 @@ export class FileTools {
      * 支持在特定行插入、替换或删除代码的极高稳健性操作
      */
     static async patchFileByLines(workspaceRoot: string, unsafePath: string, content: string, startLine: number, lineCount: number = 0, encodingOverride?: string) {
+        // 模型输出被截断时可能带孤立代理码元；先修复，保证写入内容与
+        // contextSnapshot（回传给模型的工具结果）都是合法 Unicode。
+        content = sanitizeLoneSurrogates(content);
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
         FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'file_patch');
         
@@ -708,6 +715,8 @@ export class FileTools {
         oldText: string,
         newText: string
     ) {
+        oldText = sanitizeLoneSurrogates(oldText);
+        newText = sanitizeLoneSurrogates(newText);
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
         FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'replace_in_file');
 
@@ -909,6 +918,8 @@ export class FileTools {
         oldText: string,
         newText: string
     ) {
+        oldText = sanitizeLoneSurrogates(oldText);
+        newText = sanitizeLoneSurrogates(newText);
         const fullPath = PathUtils.resolveWritePath(unsafePath, workspaceRoot);
         FileTools.assertSystemStateWritable(fullPath, workspaceRoot, 'replace_in_file');
 

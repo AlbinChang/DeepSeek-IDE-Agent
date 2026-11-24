@@ -13,9 +13,8 @@ export const TodoList: React.FC = () => {
     };
 
     useEffect(() => {
-        // 防御：工作空间切换时立即清空旧 todos，避免闪现上一个工作空间的任务
-        setContextTodos([]);
-
+        // 工作空间切换时的清空由 AgentContext 统一处理，这里不能在挂载时清空，
+        // 否则会把 IndexedDB 恢复出来的 todos 覆盖掉。
         const handleSync = (e: any) => {
             // 仅处理 todo/update 类型的推送，防止其他 GATEWAY_EVENT 污染 todos 状态
             const detail = e?.detail;

@@ -23,6 +23,24 @@ function isAbsolutePath(p: string): boolean {
 }
 
 /**
+ * 归一化工作区根路径，作为 IndexedDB 的稳定分区键。
+ *
+ * 同一个工作区在重启后可能以不同字符串出现（`D:\mall` / `D:/mall` /
+ * 末尾带斜杠 / 盘符大小写不同）。若直接用原始字符串做索引，历史记录会
+ * “查不到 → 前端看起来被清空”。此函数只做与平台无关的等价归一化：
+ * - 反斜杠统一为 '/'
+ * - 去掉首尾空白与末尾斜杠
+ * - Windows 盘符统一小写（路径其余部分保留大小写）
+ */
+export function normalizeWorkspaceKey(p: string | null | undefined): string {
+  if (!p) return '';
+  let norm = String(p).trim().replace(/\\/g, '/');
+  norm = norm.replace(/\/+$/, '');
+  norm = norm.replace(/^([a-zA-Z]):/, (_match, drive: string) => `${drive.toLowerCase()}:`);
+  return norm;
+}
+
+/**
  * 归一化文件路径为「相对于 workspaceRoot 的相对路径」。
  * - 统一分隔符为 '/'
  * - 去除 './' 前缀

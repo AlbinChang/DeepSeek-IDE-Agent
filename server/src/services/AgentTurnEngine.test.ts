@@ -1771,4 +1771,152 @@ describe("AgentTurnEngine request recovery", () => {
         expect(result.finishReason).toBe("stop");
         expect(result.finalAssistantContent).toContain("完整报告正文");
     });
+
+    it("工具参数不是合法 JSON 时，回放的 arguments 收敛为 {}，避免严格网关 400", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const payloads: any[] = [];
+        const executeTool = vi.fn();
+        const create = vi.fn()
+            .mockImplementationOnce(async (payload: Record<string, any>) => {
+                payloads.push(payload);
+                return (async function* () {
+                    yield {
+                        choices: [{
+                            delta: {
+                                tool_calls: [{
+                                    index: 0,
+                                    id: "call-truncated",
+                                    type: "function",
+                                    function: {
+                                        name: "insert_in_file",
+                                        // 输出被截断：JSON 未闭合
+                                        arguments: '{"path":"Demo.java","startLine":2,"newText":"class A {',
+                                    },
+                                }],
+                            },
+                        }],
+                    };
+                })();
+            })
+            .mockImplementationOnce(async (payload: Record<string, any>) => {
+                payloads.push(payload);
+                return (async function* () {
+                    yield { choices: [{ delta: { content: "完成" } }] };
+                })();
+            });
+        const agentService = {
+            toolManager: { executeTool },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [{ type: "function", function: { name: "insert_in_file", parameters: {} } }],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "truncated-args-user",
+            currentTraceId: "trace-truncated-args",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "补充测试" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(create).toHaveBeenCalledTimes(2);
+        expect(executeTool).not.toHaveBeenCalled();
+
+        const second = payloads[1];
+        const assistant = second.messages.find((m: any) => m.role === "assistant" && m.tool_calls);
+        expect(assistant.tool_calls[0].function.arguments).toBe("{}");
+        expect(() => JSON.parse(assistant.tool_calls[0].function.arguments)).not.toThrow();
+
+        const toolMessage = second.messages.find((m: any) => m.role === "tool");
+        expect(toolMessage.content).toContain("工具参数不是合法 JSON");
+    });
+
+    it("请求前修复孤立代理码元，避免 400 请求格式不合法（insert_in_file 回显场景）", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const loneHigh = "\uD83D";
+        const payloads: any[] = [];
+        // insert_in_file 的 contextSnapshot 会回显文件内容；UTF-16 解码/截断
+        // 可能产生孤立代理码元，直接回传会导致下一次请求 400。
+        const executeTool = vi.fn().mockResolvedValue(`1: line ${loneHigh}`);
+        const create = vi.fn()
+            .mockImplementationOnce(async (payload: Record<string, any>) => {
+                payloads.push(payload);
+                return (async function* () {
+                    yield {
+                        choices: [{
+                            delta: {
+                                content: `准备插入 ${loneHigh}`,
+                                reasoning_content: `推理 ${loneHigh}`,
+                                tool_calls: [{
+                                    index: 0,
+                                    id: "call-insert",
+                                    type: "function",
+                                    function: {
+                                        name: "insert_in_file",
+                                        // 模型流式输出可能直接携带孤立代理码元（非 \uXXXX 转义）
+                                        arguments: `{"path":"a.java","startLine":1,"newText":"class A { // ${loneHigh}"}`,
+                                    },
+                                }],
+                            },
+                        }],
+                    };
+                })();
+            })
+            .mockImplementationOnce(async (payload: Record<string, any>) => {
+                payloads.push(payload);
+                return (async function* () {
+                    yield { choices: [{ delta: { content: "完成" } }] };
+                })();
+            });
+        const agentService = {
+            toolManager: { executeTool },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [{ type: "function", function: { name: "insert_in_file", parameters: {} } }],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "unicode-user",
+            currentTraceId: "trace-unicode",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "补充测试" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(create).toHaveBeenCalledTimes(2);
+        expect(payloads).toHaveLength(2);
+
+        const second = payloads[1];
+        // JSON.stringify 只会把孤立代理码元转义为 \udXXX；合法代理对保持原字符。
+        expect(JSON.stringify(second)).not.toMatch(/\\u[dD][89abAB][0-9a-fA-F]{2}/);
+
+        const toolMessage = second.messages.find((m: any) => m.role === "tool");
+        expect(toolMessage.content).toBe("1: line \uFFFD");
+
+        const assistant = second.messages.find((m: any) => m.role === "assistant" && m.tool_calls);
+        expect(assistant.content).toBe("准备插入 \uFFFD");
+        expect(assistant.reasoning_content).toBe("推理 \uFFFD");
+        expect(assistant.tool_calls[0].function.arguments).not.toContain(loneHigh);
+        expect(assistant.tool_calls[0].function.arguments).toContain("\uFFFD");
+    });
 });
