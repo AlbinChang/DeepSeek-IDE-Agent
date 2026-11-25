@@ -1152,8 +1152,9 @@ export class AgentService extends EventEmitter {
 
         const tempFilePolicyPrompt = [
             '### 临时文件治理',
-            '- 一次性临时产物（调试脚本、构建中转、抓取缓存）只写 `.temp/`，禁止落到 `src/`、`test/`、`docs/` 或根目录；最终交付禁止放 `.temp/`。',
-            '- `.temp/` 由用户清理，不要列为任务、TODO 或交付门禁；技术文章、参考文档存 `docs/references/<主题>/`。'
+            '- 临时产物只写 `.temp/<YYYYMMDD-HHMMSS>-<slug>/{src,data,out,logs,cache}` + `manifest.json`；根目录不放文件，最终交付禁止放 `.temp/`。',
+            '- 文件名 `<step>-<purpose>[-vNN]`，禁止 `ev_1.py`/`vd_a.json`/`final2`；长期数据放 `data/`，>50MB 数据禁止整份复制到多个用例（用原路径/硬链接/子集）。',
+            '- 结束删本轮 src/logs/cache、失败分支和重复副本，留 out + manifest；整理存量先 `read_skill("temp-hygiene")`，默认 dry-run，确认后再删。'
         ].join('\n');
 
         const terminalShellPrompt = [

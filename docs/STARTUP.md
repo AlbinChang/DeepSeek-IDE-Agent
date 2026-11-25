@@ -212,6 +212,7 @@ web-ide-agent/
 │               ├── jar-analysis/SKILL.md
 │               ├── doc-writing/SKILL.md
 │               ├── md-to-pdf/SKILL.md
+│               ├── temp-hygiene/SKILL.md
 │               └── web-research/SKILL.md
 │
 ├── electron/                     # Electron 桌面应用

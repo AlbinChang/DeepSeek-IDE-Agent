@@ -44,6 +44,7 @@
         "【Maven/单测】先查编码配置；mvn 单测带 -DskipTests=false；优先 Mockito，只修出错用例。",
         "【Python 任务】优先标准库与成熟库，禁止造轮子；确认版本兼容、Windows 有 wheel。",
         "【命令免转义】run_powershell_command 参数用单引号、路径用正斜杠、多行用分号。",
-        "【二进制归档】jar/war/aar/class/apk 禁止用 read_file 直接读取或凭文件名猜测；先 `jar tf` 再解压到 `.temp/`（详见 `read_skill(\"jar-analysis\")`）。"
+        "【二进制归档】jar/war/aar/class/apk 禁止用 read_file 直接读取或凭文件名猜测；先 `jar tf` 再解压到 `.temp/`（详见 `read_skill(\"jar-analysis\")`）。",
+        "【临时目录】.temp 按任务建 run 目录（src/data/out/logs/cache+manifest），禁止散文件、无语义命名、大数据重复拷贝。"
     ]
 }

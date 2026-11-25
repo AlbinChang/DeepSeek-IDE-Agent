@@ -14,6 +14,7 @@ const EXPECTED_SKILLS = [
     'md-to-pdf',
     'ppt-design',
     'svg-diagram',
+    'temp-hygiene',
     'web-research',
 ];
 
@@ -67,6 +68,10 @@ describe('BuiltinSkillService', () => {
         const jarTask = await BuiltinSkillService.getInstance()
             .matchSkills('帮我解压这个 jar 包，看看里面的登录逻辑是怎么实现的');
         expect(jarTask[0]?.name).toBe('jar-analysis');
+
+        const tempTask = await BuiltinSkillService.getInstance()
+            .matchSkills('这个工作区的 .temp 临时目录太乱了，帮我整理一下');
+        expect(tempTask.map((skill) => skill.name)).toContain('temp-hygiene');
     });
 
     it('auto-loads matched skill bodies and stays empty for unrelated instructions', async () => {
