@@ -13,6 +13,7 @@ export const READONLY_AGENT_TOOLS = [
     'read_file_by_byte',
     'list_files',
     'calculate',
+    'check_svg',
 ];
 
 export const READONLY_EVALUATOR_TOOLS = [
@@ -20,6 +21,7 @@ export const READONLY_EVALUATOR_TOOLS = [
     'read_file',
     'read_file_by_byte',
     'list_files',
+    'check_svg',
 ];
 
 /** 禁止在 workflow 内部递归/管理的工具 */

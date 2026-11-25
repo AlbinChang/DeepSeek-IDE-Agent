@@ -75,6 +75,7 @@ describe('tool description deduplication contracts', () => {
             ['tools/UserPreferenceTools.ts', 'upsert_user_preference', 150],
             ['tools/UserPreferenceTools.ts', 'delete_user_preference', 120],
             ['tools/custom/CalculatorTool.ts', 'calculate', 400],
+            ['tools/custom/SvgCheckTool.ts', 'check_svg', 200],
         ] as const;
 
         for (const [relativePath, toolName, maxLength] of tools) {

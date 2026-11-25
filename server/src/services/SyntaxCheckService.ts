@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { PathUtils } from '@/utils/PathUtils.js';
 import { FileIO } from '@/utils/FileIO.js';
+import { SvgCheckService } from '@/services/SvgCheckService.js';
 
 export type SyntaxCheckStatus = 'ok' | 'error' | 'skipped';
 
@@ -120,7 +121,8 @@ export class SyntaxCheckService {
     private static readonly ENFORCED_EXTENSIONS = new Set([
         '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts',
         '.json', '.yaml', '.yml', '.py', '.java',
-        '.html', '.htm', '.css', '.xml', '.md', '.markdown'
+        '.html', '.htm', '.css', '.xml', '.md', '.markdown',
+        '.svg'
     ]);
 
     /** 非代码文件扩展名（二进制/媒体/文档），无需语法检查，直接跳过 */
@@ -157,6 +159,25 @@ export class SyntaxCheckService {
         if (!result) return false;
         if (!this.isEnforcedExtension(result.extension)) return true;
         return result.status === 'ok';
+    }
+
+    /**
+     * 写文件工具返回给模型的语法反馈字段。
+     * 只在「门禁不通过」或「有诊断信息」时返回，避免给通过的文件增加 token 噪声。
+     */
+    static buildWriteFeedback(result?: SyntaxCheckResult): Record<string, string> {
+        if (!result) return {};
+        const failed = !this.isGatePass(result);
+        const diagnostics = result.diagnostics ?? [];
+        if (!failed && diagnostics.length === 0) return {};
+
+        const label = failed ? `errors: ${diagnostics.length || '?'}` : `warnings: ${diagnostics.length}`;
+        const first = diagnostics[0];
+        if (!first) return { syntax: label };
+        const where = first.line ? `L${first.line}: ` : '';
+        const message = String(first.message ?? '');
+        const clipped = message.length > 160 ? `${message.slice(0, 160)}…` : message;
+        return { syntax: `${label} - ${where}${clipped}` };
     }
 
     static async checkFiles(workspaceRoot: string, relativePaths: string[]): Promise<SyntaxCheckResult[]> {
@@ -255,6 +276,10 @@ export class SyntaxCheckService {
 
             if (ext === '.xml' || ext === '.pom') {
                 return await this.checkXml(fullPath, relativePath, start);
+            }
+
+            if (ext === '.svg') {
+                return await this.checkSvg(fullPath, relativePath, start);
             }
 
             if (ext === '.md' || ext === '.markdown') {
@@ -924,6 +949,38 @@ export class SyntaxCheckService {
             status: 'error',
             message: `XML 良构性检查发现 ${diagnostics.length} 个问题。`,
             diagnostics, durationMs: Date.now() - start
+        };
+    }
+
+    // ── SVG 检查（XML 良构 + 画布边界溢出） ──
+    private static async checkSvg(fullPath: string, relativePath: string, start: number): Promise<SyntaxCheckResult> {
+        const source = await this.readTextFile(fullPath);
+        const ext = '.svg';
+        const report = SvgCheckService.checkSource(source);
+        const diagnostics: SyntaxCheckDiagnostic[] = report.issues.map((issue) => ({
+            line: issue.line,
+            column: issue.column,
+            message: `${issue.element ? `${issue.element}: ` : ''}${issue.message}${issue.fix ? `（${issue.fix}）` : ''}`,
+        }));
+
+        if (report.status === 'error') {
+            return {
+                path: relativePath, extension: ext, checker: 'svg-bounds',
+                status: 'error',
+                message: `SVG 结构/边界检查失败：${report.summary}`,
+                diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+                durationMs: Date.now() - start
+            };
+        }
+
+        return {
+            path: relativePath, extension: ext, checker: 'svg-bounds',
+            status: 'ok',
+            message: diagnostics.length > 0
+                ? `SVG 结构良构、未越界；有 ${diagnostics.length} 条提示。`
+                : 'SVG 结构良构，边界检查通过。',
+            diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+            durationMs: Date.now() - start
         };
     }
 

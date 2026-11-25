@@ -16,6 +16,7 @@ import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 import { FileIO } from '@/utils/FileIO.js';
 import { SystemTools } from '@/tools/SystemTools.js';
 import { CalculatorTool } from '@/tools/custom/CalculatorTool.js';
+import { SvgCheckTool } from '@/tools/custom/SvgCheckTool.js';
 import { WorkflowTools } from '@/tools/WorkflowTools.js';
 import { McpService } from '@/services/McpService.js';
 import { detectRepeatedControlToken, findControlToken, probeLeadingContent } from '@/services/ModelOutputGuard.js';
@@ -379,10 +380,9 @@ export class AgentService extends EventEmitter {
                 }
 
                 const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
-                const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                 return {
                     ...writeResult,
-                    ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
+                    ...SyntaxCheckService.buildWriteFeedback(syntaxCheck),
                 };
             }
         });
@@ -489,10 +489,9 @@ export class AgentService extends EventEmitter {
                     };
                 }
                 const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
-                const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                 return {
                     ...editResult,
-                    ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
+                    ...SyntaxCheckService.buildWriteFeedback(syntaxCheck),
                 };
             }
         });
@@ -546,10 +545,9 @@ export class AgentService extends EventEmitter {
                     };
                 }
                 const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
-                const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                 return {
                     ...editResult,
-                    ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
+                    ...SyntaxCheckService.buildWriteFeedback(syntaxCheck),
                 };
             }
         });
@@ -605,10 +603,9 @@ export class AgentService extends EventEmitter {
                 }
 
                 const [syntaxCheck] = await SyntaxCheckService.checkFiles(root, [params.path]);
-                const gatePass = SyntaxCheckService.isGatePass(syntaxCheck);
                 return {
                     ...replaceResult,
-                    ...(gatePass ? {} : { syntax: `errors: ${syntaxCheck?.diagnostics?.length || '?'}` }),
+                    ...SyntaxCheckService.buildWriteFeedback(syntaxCheck),
                 };
             }
         });
@@ -692,6 +689,16 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering CalculatorTool (JS script executor + math engine)...');
         // 注册 JS 脚本执行器（mathjs 表达式求值 + vm 沙箱脚本执行）
         this.toolManager.registerTool(CalculatorTool);
+
+        console.log('[AgentService] Registering SvgCheckTool (SVG bounds/overflow checker)...');
+        // 注入工作区根目录，供 path 形式的 SVG 文件解析
+        this.toolManager.registerTool({
+            ...SvgCheckTool,
+            execute: async (params, context) => SvgCheckTool.execute(params, {
+                ...context,
+                workspaceRoot: this.resolveWorkspaceRootFromContext(context),
+            }),
+        });
 
         console.log('[AgentService] Registering WorkflowTools (declarative .workflow)...');
         if (globalConfig.workflow.enabled) {

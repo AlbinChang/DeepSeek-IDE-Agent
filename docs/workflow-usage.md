@@ -156,7 +156,7 @@ do:
           files: { type: array, items: { type: string } }
 ```
 
-- 默认只读工具：`read_skill`、`read_file`、`read_file_by_byte`、`list_files`、`calculate`。
+- 默认只读工具：`read_skill`、`read_file`、`read_file_by_byte`、`list_files`、`calculate`、`check_svg`。
 - 写文件/命令/浏览器工具必须显式写进 `tools`。
 - `verify` / `render` 这类会生成 `verify.csv`、报告 Markdown 的 LLM 阶段，必须把 `write_file` / `replace_in_file` / `insert_in_file` 等写工具列入 `tools`；否则模型只有只读工具，阶段会产出缺失或直接失败。建议在后续 shell 步骤或 `output.schema` 中校验目标文件存在且非空，避免“阶段没有真正落盘”却继续执行。
 - 如果要覆盖既有高价值文件（例如已存在的百 KB 报告），先在写文件 agent 前放一个 `call: approval`；批准后再执行，拒绝则流程取消。

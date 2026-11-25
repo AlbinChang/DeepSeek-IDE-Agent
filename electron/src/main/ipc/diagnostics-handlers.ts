@@ -15,6 +15,7 @@
 import { IpcMain } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import { SvgCheckService } from '@/services/SvgCheckService.js';
 
 // ── 类型定义 ──
 export interface DiagnosticEntry {
@@ -579,6 +580,33 @@ async function checkMarkdown(filePath: string): Promise<DiagnosticsResult> {
     }
 }
 
+/** SVG 检查（XML 良构 + 画布边界溢出），复用服务端几何引擎 */
+async function checkSvg(filePath: string): Promise<DiagnosticsResult> {
+    const start = Date.now();
+    const ext = '.svg';
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const report = SvgCheckService.checkSource(content);
+        const diagnostics: DiagnosticEntry[] = report.issues
+            .slice(0, MAX_DIAGNOSTICS)
+            .map((issue) => ({
+                line: issue.line,
+                column: issue.column,
+                message: `${issue.element ? `${issue.element}: ` : ''}${issue.message}${issue.fix ? `（${issue.fix}）` : ''}`,
+                severity: issue.severity === 'error' ? 'error' : 'warning',
+                code: issue.code,
+            }));
+        return {
+            success: true, filePath, extension: ext, checker: 'svg-bounds',
+            passed: report.status !== 'error',
+            summary: report.summary,
+            diagnostics, durationMs: Date.now() - start
+        };
+    } catch (e: any) {
+        return { success: false, filePath, extension: ext, checker: 'svg-bounds', passed: false, summary: `SVG 检查异常：${e?.message}`, diagnostics: [], durationMs: Date.now() - start };
+    }
+}
+
 // ── 主入口：单文件诊断调度 ──
 async function checkOne(absolutePath: string): Promise<DiagnosticsResult> {
     const ext = path.extname(absolutePath).toLowerCase();
@@ -631,6 +659,8 @@ async function checkOne(absolutePath: string): Promise<DiagnosticsResult> {
             case '.xml':
             case '.pom':
                 return checkXml(absolutePath);
+            case '.svg':
+                return checkSvg(absolutePath);
             case '.md':
             case '.markdown':
                 return checkMarkdown(absolutePath);

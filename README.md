@@ -142,7 +142,7 @@ pnpm run electron:dev
 - **Markdown 预览**：打开 `.md` 文件后点击 `PREVIEW` 按钮实时渲染
 - **PDF/图片预览**：直接打开 `.pdf`、`.png`、`.jpg` 等文件即可预览
 - **Diff 对比**：在 Git 面板中点击文件查看差异
-- **语法检查**：保存文件后自动检查语法（支持 TS/JS/Python/Java/JSON/YAML/HTML/CSS/XML/MD）
+- **语法检查**：保存文件后自动检查语法（支持 TS/JS/Python/Java/JSON/YAML/HTML/CSS/XML/SVG/MD），`.svg` 额外做画布越界校验
 
 ### 3.5 终端使用
 
@@ -183,6 +183,7 @@ pnpm run electron:dev
 | 🔍 代码搜索 | 工作区内的文件搜索与内容搜索 |
 | 📋 文件列表 | 受控递归目录结构获取 |
 | 🔀 Git 版本控制 | 查看状态、历史、差异、分支 |
+| 🖼️ SVG 边界校验 | `check_svg`：解析 `transform`/`path`/图元/文本，静态检测元素是否越出 `viewBox`（含描边外扩、`<use>` 引用、嵌套视口），给出越界像素、行号与修正建议；不渲染、无原生依赖 |
 | 🔌 MCP 工具 | 用户自定义 MCP 服务器工具动态注入 |
 | 🧩 专项技能 | `read_skill` 按需加载内置技能（PPT 设计、SVG 图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱） |
 | 🕸️ 知识图谱 | `kg_*`：DuckDB 独立进程（NDJSON IPC），百万级实体/关系/属性建模、RDF 风格词表（domain/range）、语义唯一性（unique/identity）、`kg_lint` 编译式校验、`kg_merge` 实体归一、多跳属性推理、PageRank/社区分析；数据仅存于工作区 `.duckdb/` |
@@ -221,7 +222,7 @@ pnpm run electron:dev
 - 📝 Markdown 实时预览切换
 - 📄 PDF / 图片文件原生预览
 - 🔄 Git Diff 并排对比
-- ✅ 保存时自动语法检查（TS/JS/Python/Java/JSON/YAML/HTML/CSS/XML）
+- ✅ 保存时自动语法检查（TS/JS/Python/Java/JSON/YAML/HTML/CSS/XML/SVG）
 
 ### 4.4 非代码文件支持
 
@@ -230,6 +231,7 @@ pnpm run electron:dev
 | `.pdf` | 原生 PDF 阅读器（文字选择/缩放/搜索） | 自动跳过 |
 | `.png` `.jpg` `.gif` `.webp` | 原生图片预览 | 自动跳过 |
 | `.docx` `.xlsx` `.pptx` | 暂不支持预览 | 自动跳过 |
+| `.svg` | 源码编辑 / 图片预览 | XML 良构 + 画布越界校验 |
 
 ---
 

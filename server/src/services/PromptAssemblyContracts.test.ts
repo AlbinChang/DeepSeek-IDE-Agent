@@ -67,6 +67,7 @@ describe('system prompt assembly contracts', () => {
         const svg = await readSource('config/skills/svg-diagram/SKILL.md');
         expect(svg).toContain('Mermaid');
         expect(svg).toContain('viewBox');
+        expect(svg).toContain('check_svg');
 
         const pdf = await readSource('config/skills/md-to-pdf/SKILL.md');
         expect(pdf).toContain('md-to-pdf');

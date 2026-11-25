@@ -13,12 +13,15 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@playwright/mcp": "^0.0.75",
     "dotenv": "^16.4.7",
+    "fast-xml-parser": "^5.12.1",
     "iconv-lite": "^0.7.2",
     "js-yaml": "^4.1.1",
     "jschardet": "^3.1.4",
     "mathjs": "^15.2.0",
     "openai": "^6.25.0",
-    "simple-git": "^3.31.1"
+    "simple-git": "^3.31.1",
+    "svg-path-bbox": "^2.1.0",
+    "svgpath": "^2.6.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
