@@ -10,6 +10,11 @@ import {
     type TokenUsage,
 } from "@/services/db";
 import { ChatPersistence } from "@/services/ChatPersistence";
+import {
+    buildFinalizedRow,
+    messagePersistSignature,
+    selectMessagesToPersist,
+} from "@/services/chatHistorySnapshot";
 import { createClientId } from "@/utils/id";
 import { normalizeWorkspaceKey } from "@/utils/path";
 import { electronBridge, type AgentRecoveryInfo } from "@/services/electron-bridge";
@@ -301,6 +306,16 @@ export function useAgentSSE() {
     /** 最新输入草稿：恢复时用于判断用户是否已开始输入，避免覆盖。 */
     const inputRef = useRef(input);
     inputRef.current = input;
+    /**
+     * 本轮 assistant 消息的最新快照（由流式提交处维护）。
+     * 流结束时用它做「终态兜底落库」：不依赖 React 副作用时序，
+     * 保证最后一轮内容（含 isFinal）一定写入 IndexedDB。
+     */
+    const liveAssistantSnapshotRef = useRef<Message | null>(null);
+    /** 已落库消息的内容指纹，避免同一条消息在每个流式分片都重复写库。 */
+    const persistedSignatureRef = useRef<Map<string, string>>(new Map());
+    /** 从 IndexedDB 恢复出来的消息：已是落库快照，不再回写（否则每次重启都会被二次清洗，内容逐次退化）。 */
+    const restoredMessageIdsRef = useRef<Set<string>>(new Set());
 
     // 编辑器上下文：监听当前激活文件与选中范围，用于附加到用户指令
     const editorContextRef = useRef<{
@@ -365,6 +380,8 @@ export function useAgentSSE() {
         const loadStartedAt = Date.now();
         const inputAtRestoreStart = inputRef.current;
         let cancelled = false;
+        /** 是否已经把恢复结果应用到 messages（用于区分「加载前失败」与「已部分恢复」）。 */
+        let appliedRestored = false;
         restoreReadyRef.current = false;
         const restore = async () => {
             try {
@@ -393,15 +410,29 @@ export function useAgentSSE() {
                 ]);
                 if (cancelled) return;
 
-                const restoredMessages = history
-                    .filter(h => h.role === 'user' || h.role === 'assistant')
-                    .map(h => sanitizeMessageForClient({
-                        ...h,
-                        isFinal: true,
-                        parts: Array.isArray(h.parts) && h.parts.length > 0
-                            ? h.parts
-                            : [{ id: createClientId(), type: 'text', content: h.content, timestamp: h.timestamp }],
-                    } as any)) as Message[];
+                const restoredMessages: Message[] = [];
+                let unrestorable = 0;
+                for (const row of history) {
+                    if (row?.role !== 'user' && row?.role !== 'assistant') continue;
+                    try {
+                        restoredMessages.push(sanitizeMessageForClient({
+                            ...row,
+                            isFinal: true,
+                            parts: Array.isArray(row.parts) && row.parts.length > 0
+                                ? row.parts
+                                : [{ id: createClientId(), type: 'text', content: row.content, timestamp: row.timestamp }],
+                        } as any) as Message);
+                    } catch (error) {
+                        // 单条脏数据（历史版本写入的非字符串 content、异常 parts）不应拖垮整段历史恢复。
+                        unrestorable += 1;
+                        console.error('[AgentChat] Skipped an unrestorable chat message:', row?.id, error);
+                    }
+                }
+                if (unrestorable > 0) {
+                    console.warn(`[AgentChat] ${unrestorable} 条历史消息无法还原，已跳过以保证其余内容可恢复。`);
+                }
+                restoredMessageIdsRef.current = new Set(restoredMessages.map(m => m.id));
+                persistedSignatureRef.current = new Map();
 
                 // 恢复期间用户可能已经发送了新消息：保留加载开始后产生、且未在历史中的消息，
                 // 避免异步恢复把刚输入的内容覆盖掉。
@@ -413,6 +444,7 @@ export function useAgentSSE() {
                         .sort((left, right) => left.timestamp - right.timestamp);
                     return trimMessagesForMemory(merged);
                 });
+                appliedRestored = true;
 
                 // 恢复 UI 状态；没有快照时清空旧工作区残留（data / 草稿）。
                 setTodos(Array.isArray(uiState?.todos) ? uiState.todos : []);
@@ -426,8 +458,10 @@ export function useAgentSSE() {
             } catch (error) {
                 if (cancelled) return;
                 console.error('[AgentChat] Failed to restore chat history from IndexedDB:', error);
-                // 恢复失败时至少不要让旧工作区的内容继续显示
-                setMessages(prev => prev.filter(m => m.timestamp >= loadStartedAt));
+                // 已经恢复出部分消息时不要清空（否则一次脏数据就会让整段历史消失）。
+                if (!appliedRestored) {
+                    setMessages(prev => prev.filter(m => m.timestamp >= loadStartedAt));
+                }
             } finally {
                 if (!cancelled) restoreReadyRef.current = true;
             }
@@ -440,33 +474,28 @@ export function useAgentSSE() {
     }, [workspaceRoot, setTodos]);
 
     // ── 流式过程中的异步持久化 ──
-    // 每次 UI 提交（约 50ms 一次）只把「最后一条 assistant 消息」的最新快照放进队列，
-    // 队列按 800ms 合并落库；done / error / 最终答复时立即 flush。
-    // 这样即使关闭应用发生在任务中途，已渲染的内容（含工具调用/结果）也能恢复。
+    // 按消息粒度做「指纹差异」落库：任意一条 assistant 消息内容变化都会入队，
+    // 不再只写「最后一条」——否则一旦末尾追加了提示/错误气泡，正在产出的
+    // assistant 消息就再也写不进 IndexedDB（重启后表现为该轮内容丢失）。
+    // 队列按 800ms 合并落库；isFinal 时立即 flush。
     useEffect(() => {
         if (!workspaceRoot || messages.length === 0) return;
         if (Date.now() < suppressPersistUntilRef.current) return;
 
-        const last = messages[messages.length - 1];
-        if (last.role !== 'assistant') return;
-
         const persistence = persistenceRef.current;
         if (!persistence) return;
 
-        const row: ChatMessage = {
-            id: last.id,
+        const { rows, finalized } = selectMessagesToPersist(messages, {
             workspaceRoot,
             workspaceKey: normalizeWorkspaceKey(workspaceRoot),
-            role: last.role,
-            content: last.content,
-            reasoning_content: last.reasoning_content,
-            parts: last.parts,
-            timestamp: last.timestamp,
-            traceId: last.traceId,
-            isFinal: last.isFinal,
-        };
-        persistence.scheduleMessage(row);
-        if (last.isFinal) {
+            signatures: persistedSignatureRef.current,
+            skipIds: restoredMessageIdsRef.current,
+        });
+
+        for (const row of rows) {
+            persistence.scheduleMessage(row as ChatMessage);
+        }
+        if (finalized) {
             void persistence.flush();
         }
     }, [messages, workspaceRoot]);
@@ -530,6 +559,7 @@ export function useAgentSSE() {
         setData([]); 
         setStreamProgress(null);
         receivedErrorRef.current = false;
+        liveAssistantSnapshotRef.current = null;
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
@@ -880,6 +910,15 @@ export function useAgentSSE() {
                         last.isFinal = true;
                     }
 
+                    // 记录本轮 assistant 消息的最新快照：流结束时用它做终态兜底落库，
+                    // 不依赖 React 副作用是否已经执行（否则最后一段内容会丢在队列外）。
+                    if (last.role === 'assistant') {
+                        liveAssistantSnapshotRef.current = {
+                            ...last,
+                            parts: Array.isArray(last.parts) ? [...last.parts] : [],
+                        };
+                    }
+
                     return trimMessagesForMemory(next);
                 });
             }
@@ -1149,7 +1188,38 @@ export function useAgentSSE() {
             cancelScheduledFlush();
             setIsLoading(false); 
             abortControllerRef.current = null;
-            // 流结束（正常/异常/中止）时兜底落库，确保最后一批快照不留在队列里。
+
+            // ── 终态兜底落库（不依赖 React 副作用时序） ──
+            // 流结束（正常/异常/中止）时把本轮 assistant 消息以 isFinal 立即写入 IndexedDB：
+            // 1) React 的 setMessages 是异步提交，若此处只 flush 队列，最后一段内容还没入队就会丢；
+            // 2) 应用紧接着被关闭时，未提交的快照会让重启后「本轮内容缺失」。
+            const snapshot = liveAssistantSnapshotRef.current as Message | null;
+            liveAssistantSnapshotRef.current = null;
+            // 用户刚点过「清空历史会话」时不要再把本轮快照写回（否则清空后数据重现）
+            if (snapshot && Date.now() >= suppressPersistUntilRef.current) {
+                const finalRow = buildFinalizedRow(
+                    {
+                        id: snapshot.id,
+                        role: 'assistant',
+                        content: snapshot.content,
+                        reasoning_content: snapshot.reasoning_content,
+                        parts: snapshot.parts,
+                        timestamp: snapshot.timestamp,
+                        traceId: snapshot.traceId,
+                        isFinal: true,
+                    },
+                    workspaceRoot,
+                    normalizeWorkspaceKey(workspaceRoot),
+                );
+                persistedSignatureRef.current.set(finalRow.id, messagePersistSignature(finalRow));
+                persistenceRef.current?.scheduleMessage(finalRow as ChatMessage, { immediate: true });
+                // 状态侧同步补上终态标记，避免该消息在本次会话里一直停留在「流式中」分支
+                setMessages(prev => prev.map(m => (
+                    m.id === finalRow.id && !m.isFinal ? { ...m, isFinal: true } : m
+                )));
+            }
+
+            // 兜底 flush：确保队列里剩余快照（含工具结果）全部落库。
             void persistenceRef.current?.flush();
             if (treeRefreshTimer !== null) {
                 clearTimeout(treeRefreshTimer);
@@ -1201,6 +1271,10 @@ export function useAgentSSE() {
             setData([]);
             setStreamProgress(null);
             setTodos([]);
+            // 清空本地缓存指纹，避免旧消息的落库记录影响新一轮写入
+            restoredMessageIdsRef.current = new Set();
+            persistedSignatureRef.current = new Map();
+            liveAssistantSnapshotRef.current = null;
         }
     }, [workspaceRoot, setTodos]);
 
