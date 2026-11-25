@@ -200,6 +200,32 @@ describe('FileTools.editFileByReplace & EOL Normalization', () => {
         expect(fileAfter).toBe('const a = 1;\nconst b = 200;\nconst c = 300;');
     });
 
+    it('returns a bounded preview instead of echoing the whole replacement', async () => {
+        const workspaceRoot = await createWorkspace();
+        const filePath = path.join(workspaceRoot, 'large_edit.txt');
+        const originalLines = Array.from({ length: 120 }, (_, index) => `line-${index + 1}`);
+        await fs.writeFile(filePath, originalLines.join('\n'), 'utf8');
+
+        const oldText = originalLines.slice(19, 80).join('\n');
+        const newText = Array.from({ length: 60 }, (_, index) => `replacement-${index + 1}-${'x'.repeat(40)}`).join('\n');
+
+        const result = await FileTools.editFileByReplace(
+            workspaceRoot,
+            'large_edit.txt',
+            oldText,
+            newText
+        ) as any;
+
+        expect(result.status).toBe('success');
+        expect(result.contextSnapshot).toBeUndefined();
+        expect(result.changedRange).toBe('20-79');
+        expect(result.preview.length).toBeLessThanOrEqual(520);
+        expect(result.preview.split('\n').length).toBeLessThan(10);
+
+        const fileAfter = await fs.readFile(filePath, 'utf8');
+        expect(fileAfter).toContain('replacement-60-');
+    });
+
     it('replaceAllInFile handles CRLF/LF normalization across all occurrences', async () => {
         const workspaceRoot = await createWorkspace();
         const filePath = path.join(workspaceRoot, 'global_sample.txt');
@@ -237,7 +263,7 @@ describe('FileTools 孤立代理码元修复', () => {
         await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
     });
 
-    it('insert_in_file 落盘内容与 contextSnapshot 均不含孤立代理码元', async () => {
+    it('insert_in_file 落盘内容与 preview 均不含孤立代理码元', async () => {
         const workspaceRoot = await createWorkspace();
         const filePath = path.join(workspaceRoot, 'Demo.java');
         await fs.writeFile(filePath, 'class Demo {\n}\n', 'utf8');
@@ -251,8 +277,8 @@ describe('FileTools 孤立代理码元修复', () => {
         ) as any;
 
         expect(result.status).toBe('success');
-        expect(hasLoneSurrogate(result.contextSnapshot)).toBe(false);
-        expect(result.contextSnapshot).toContain('\uFFFD');
+        expect(hasLoneSurrogate(result.preview)).toBe(false);
+        expect(result.preview).toContain('\uFFFD');
 
         const fileAfter = await fs.readFile(filePath, 'utf8');
         expect(hasLoneSurrogate(fileAfter)).toBe(false);

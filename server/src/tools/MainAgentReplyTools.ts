@@ -13,10 +13,17 @@ import { MemoryService } from '@/services/MemoryService.js';
  * 两个工具均为只读，主 Agent 与评估 Agent 共用。
  */
 export class MainAgentReplyTools {
-    private static readonly DEFAULT_LIST_LIMIT = 20;
+    private static readonly DEFAULT_LIST_LIMIT = 10;
     private static readonly MAX_LIST_LIMIT = 100;
+    private static readonly INSTRUCTION_PREVIEW_MAX = 80;
+    private static readonly REPLY_PREVIEW_MAX = 120;
 
     constructor(private workspaceRoot: string) {}
+
+    private static clip(value: string, maxChars: number): string {
+        const text = String(value || '');
+        return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+    }
 
     async listReplies(params: any) {
         const rawLimit = Number(params?.limit);
@@ -34,7 +41,17 @@ export class MainAgentReplyTools {
         return {
             currentDialogIndex,
             total: entries.length,
-            entries,
+            entries: entries.map((entry) => ({
+                ...entry,
+                instructionPreview: MainAgentReplyTools.clip(
+                    entry.instructionPreview,
+                    MainAgentReplyTools.INSTRUCTION_PREVIEW_MAX,
+                ),
+                replyPreview: MainAgentReplyTools.clip(
+                    entry.replyPreview,
+                    MainAgentReplyTools.REPLY_PREVIEW_MAX,
+                ),
+            })),
             hint: entries.length === 0
                 ? '当前工作区还没有主 Agent 回复记忆。'
                 : '用 read_main_agent_reply 按 id 读取完整正文；id 形如 11.2（对话编号.回复序号）。',
@@ -63,7 +80,7 @@ export class MainAgentReplyTools {
         return [
             {
                 name: 'list_main_agent_replies',
-                description: '列出主Agent历史最终回复索引（含摘要），编号如 11.2。',
+                description: '列出主Agent历史最终回复索引（含摘要，默认最近10条），编号如 11.2。',
                 parameters: {
                     type: 'object',
                     properties: {

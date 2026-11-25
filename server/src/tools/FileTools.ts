@@ -10,6 +10,46 @@ import { WORKSPACE_SKILL_CONTAINER_DIRECTORIES, isWorkspaceSkillPath } from '@/u
 import { assertAgentStatePathWritable } from '@/utils/AgentSystemPaths.js';
 import { sanitizeLoneSurrogates } from '@/utils/UnicodeUtils.js';
 
+const EDIT_PREVIEW_MAX_CHARS = 480;
+const EDIT_PREVIEW_LINE_MAX_CHARS = 180;
+
+const clipPreviewLine = (line: string): string => (
+    line.length > EDIT_PREVIEW_LINE_MAX_CHARS
+        ? `${line.slice(0, EDIT_PREVIEW_LINE_MAX_CHARS)}…`
+        : line
+);
+
+/**
+ * 编辑结果只回传变更范围与首尾少量上下文，避免把 newText 整段回显给模型。
+ * 需要完整内容时由模型自行 read_file，节省每次编辑的 token。
+ */
+function buildCompactEditPreview(lines: string[], startIdx: number, endIdx: number) {
+    const safeStart = Math.max(0, Math.min(startIdx, lines.length));
+    const safeEnd = Math.max(safeStart, Math.min(endIdx, lines.length));
+    const parts: string[] = [];
+
+    if (safeStart > 0) parts.push(`${safeStart}: ${clipPreviewLine(lines[safeStart - 1])}`);
+    if (safeStart < lines.length) parts.push(`${safeStart + 1}: ${clipPreviewLine(lines[safeStart])}`);
+
+    const changedCount = safeEnd - safeStart;
+    if (changedCount > 1) {
+        const lastChanged = safeEnd - 1;
+        parts.push(`... ${changedCount - 2} lines ...`);
+        parts.push(`${lastChanged + 1}: ${clipPreviewLine(lines[lastChanged])}`);
+    }
+    if (safeEnd < lines.length) parts.push(`${safeEnd + 1}: ${clipPreviewLine(lines[safeEnd])}`);
+
+    let preview = parts.join('\n');
+    if (preview.length > EDIT_PREVIEW_MAX_CHARS) {
+        preview = `${preview.slice(0, EDIT_PREVIEW_MAX_CHARS)}\n...`;
+    }
+
+    return {
+        changedRange: `${safeStart + 1}-${Math.max(safeStart + 1, safeEnd)}`,
+        preview,
+    };
+}
+
 export class FileTools {
     private static readonly LIST_FILES_MAX_DEPTH = 10;
     private static readonly LIST_FILES_MAX_ITEMS = 1200;
@@ -678,19 +718,17 @@ export class FileTools {
             const finalBuffer = FileIO.encodeString(finalContent, encoding);
             await FileIO.writeFile(unsafePath, workspaceRoot, finalBuffer);
 
-            // 操作后上下文快照（±2 行，供 LLM 快速验证修改效果）
-            const lineNumWidth = String(lines.length).length;
-            const snapshotStart = Math.max(0, startIdx - 2);
-            const snapshotEnd = Math.min(lines.length, startIdx + newLines.length + 2);
-            const contextSnapshot = lines
-                .slice(snapshotStart, snapshotEnd)
-                .map((l, i) => `${String(snapshotStart + i + 1).padStart(lineNumWidth)}: ${l}`)
-                .join('\n');
+            const { changedRange, preview } = buildCompactEditPreview(
+                lines,
+                startIdx,
+                startIdx + newLines.length,
+            );
 
-            return { 
-                status: 'success', 
+            return {
+                status: 'success',
                 newTotalLines: lines.length,
-                contextSnapshot,
+                changedRange,
+                preview,
             };
         } catch (err: any) {
             console.error(`[FileTools] Patch Error: ${err.message}`);
@@ -867,21 +905,20 @@ export class FileTools {
             const finalBuffer = FileIO.encodeString(newContent, encoding);
             await FileIO.writeFile(unsafePath, workspaceRoot, finalBuffer);
 
-            // 构建操作后上下文快照（±2 行，供 LLM 快速验证修改效果）
             const newLines = newContent.split(/\r?\n|\r|\u2028|\u2029/);
             const replacementLine = normOffsetToLine(normOccurrences[0]);
-            const lineNumWidth = String(newLines.length).length;
-            const snapshotStart = Math.max(0, replacementLine - 2);
-            const snapshotEnd = Math.min(newLines.length, replacementLine + newText.split('\n').length + 2);
-            const contextSnapshot = newLines
-                .slice(snapshotStart, snapshotEnd)
-                .map((l, i) => `${String(snapshotStart + i + 1).padStart(lineNumWidth)}: ${l}`)
-                .join('\n');
+            const insertedLines = newText.split('\n').length;
+            const { changedRange, preview } = buildCompactEditPreview(
+                newLines,
+                replacementLine - 1,
+                replacementLine - 1 + (newText ? insertedLines : 0),
+            );
 
             return {
                 status: 'success',
                 newTotalLines: newLines.length,
-                contextSnapshot,
+                changedRange,
+                preview,
             };
         } catch (err: any) {
             console.error(`[FileTools] editFileByReplace Error: ${err.message}`);
@@ -1053,16 +1090,14 @@ export class FileTools {
             const finalBuffer = FileIO.encodeString(newContent, encoding);
             await FileIO.writeFile(unsafePath, workspaceRoot, finalBuffer);
 
-            // 构建操作后上下文快照（取第一个替换位置附近）
             const newLines = newContent.split(/\r?\n|\r|\u2028|\u2029/);
             const firstReplacementLine = replacementLineNumbers[0];
-            const lineNumWidth = String(newLines.length).length;
-            const snapshotStart = Math.max(0, firstReplacementLine - 4);
-            const snapshotEnd = Math.min(newLines.length, firstReplacementLine + Math.max(newText.split('\n').length, oldText.split('\n').length) + 3);
-            const contextSnapshot = newLines
-                .slice(snapshotStart, snapshotEnd)
-                .map((l, i) => `${String(snapshotStart + i + 1).padStart(lineNumWidth)}: ${l}`)
-                .join('\n');
+            const insertedLines = newText.split('\n').length;
+            const { changedRange, preview } = buildCompactEditPreview(
+                newLines,
+                firstReplacementLine - 1,
+                firstReplacementLine - 1 + (newText ? insertedLines : 0),
+            );
 
             // 【Token 优化】replacedLines 截断到前 20 项，剩余用描述代替。
             // 全局替换 50+ 处时，完整行号列表纯属 token 噪音——LLM 只需知道前几处位置做抽查。
@@ -1078,7 +1113,8 @@ export class FileTools {
                 replacedLines: truncatedLines,
                 ...(linesNote ? { replacedLinesNote: linesNote } : {}),
                 newTotalLines: newLines.length,
-                contextSnapshot
+                changedRange,
+                preview,
             };
         } catch (err: any) {
             console.error(`[FileTools] replaceAllInFile Error: ${err.message}`);

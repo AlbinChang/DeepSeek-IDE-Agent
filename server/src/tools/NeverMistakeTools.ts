@@ -54,7 +54,8 @@ export class NeverMistakeTools {
         return {
             status: 'success',
             total: records.length,
-            records
+            applied: prepared.length,
+            ids: records.slice(0, prepared.length).map((record) => record.id),
         };
     }
 

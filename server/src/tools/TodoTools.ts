@@ -61,7 +61,12 @@ export class TodoTools {
         if (!normalizedTodos.length) throw new Error('append_todo 需要提供 todos 数组，每项至少包含 title');
         const appended = await TodoService.appendTodos(this.workspaceRoot, userId, normalizedTodos);
         const total = await this.totalCount(userId);
-        return { status: 'success', appended, total };
+        return {
+            status: 'success',
+            // 新任务内容就是模型刚传入的，只回传标识与状态，避免整段 description 回显。
+            appended: appended.map(({ id, title, status }: any) => ({ id, title, status })),
+            total,
+        };
     }
 
     async updateTodo(params: any, context: any) {
@@ -77,12 +82,12 @@ export class TodoTools {
             updated.push(result);
         }
         const currentTodos = await TodoService.getTodos(this.workspaceRoot, userId);
-        const total = currentTodos.length;
         return {
             status: 'success',
             updated: updated.length === 1 ? updated[0] : updated,
-            total,
-            todos: currentTodos,
+            total: currentTodos.length,
+            // 只回传精简清单，避免每次更新都回显全部 description；需要详情时用 list_todos。
+            todos: currentTodos.map(({ id, title, status }: any) => ({ id, title, status })),
             message: '任务状态已更新。'
         };
     }

@@ -234,13 +234,18 @@ describe('TodoTools atomic tool contract', () => {
             const partialResult: any = await tool.updateTodo({
                 todos: [{ id: 't1', status: 'completed' }]
             }, { userId });
+            expect(partialResult.total).toBe(2);
+            expect(partialResult.updated.status).toBe('completed');
             expect(partialResult.todos).toHaveLength(2);
+            expect(partialResult.todos[0]).not.toHaveProperty('description');
             expect(partialResult.message).toBe('任务状态已更新。');
 
             // Update t2 -> all terminal, but no directive-like guidance is returned
             const finalResult: any = await tool.updateTodo({
                 todos: [{ id: 't2', status: 'completed' }]
             }, { userId });
+            const saved = await TodoService.getTodos(workspaceRoot, userId);
+            expect(saved.every((t: any) => t.status === 'completed')).toBe(true);
             expect(finalResult.todos.every((t: any) => t.status === 'completed')).toBe(true);
             expect(finalResult.message).toBe('任务状态已更新。');
             expect(finalResult.allTerminal).toBeUndefined();

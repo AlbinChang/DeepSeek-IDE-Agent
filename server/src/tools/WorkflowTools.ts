@@ -125,7 +125,7 @@ export class WorkflowTools {
                         name: { type: 'string', description: '可选：工作流名称或相对路径' },
                         strict: { type: 'boolean', description: 'true 时 warning 也算不通过' },
                         deep: { type: 'boolean', description: 'true 时检查资产文件与子工作流是否存在' },
-                        maxIssues: { type: 'integer', minimum: 1, maximum: 500, description: '返回问题条数上限，默认 100' },
+                        maxIssues: { type: 'integer', minimum: 1, maximum: 500, description: '返回问题条数上限，默认 20' },
                         codes: {
                             type: 'array',
                             items: { type: 'string' },
@@ -145,7 +145,7 @@ export class WorkflowTools {
                         deep: params?.deep === true,
                         maxIssues: Number.isFinite(Number(params?.maxIssues))
                             ? Number(params.maxIssues)
-                            : undefined,
+                            : 20,
                         codes: Array.isArray(params?.codes)
                             ? params.codes.map(String).filter(Boolean)
                             : undefined,

@@ -143,7 +143,7 @@ message = client.messages.create(
 - 按 UTF-16 解码的文件内容（字节数为奇数或文件本身损坏）；
 - 模型输出被截断，末尾停在代理对中间；
 - 工具结果回显文件内容（`insert_in_file` / `replace_in_file` / `file_patch` 的
-  `contextSnapshot` 最容易命中，因为它在一次工具调用后把整段插入内容带回模型）；
+  `preview` 最容易命中，因为它会在一次工具调用后把部分变更内容带回模型；现已限制为首尾少量行）；
 - 记忆/规则等被按 code unit 截断后注入提示词。
 
 防御分三层（`server/src/utils/UnicodeUtils.ts`）：
@@ -154,7 +154,7 @@ message = client.messages.create(
 2. **写入历史前修复**：assistant 的 `content` / `reasoning_content` / `tool_calls.arguments`
    以及工具结果在进入 `activeHistory` 前清洗，避免污染后续所有轮次。
 3. **落盘前修复**：`write_file` / `insert_in_file` / `replace_in_file` /
-   `replace_all_in_file` 先清洗模型传入的文本，保证文件内容与 `contextSnapshot` 一致。
+   `replace_all_in_file` 先清洗模型传入的文本，保证文件内容与工具回显一致。
 
 > 合法代理对（emoji 等）不受影响；只替换无法组成代理对的单个 code unit。
 

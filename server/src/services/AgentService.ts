@@ -265,7 +265,7 @@ export class AgentService extends EventEmitter {
         // 注册文件核心工具 (原子化 IO)
         this.toolManager.registerTool({
             name: 'read_file',
-            description: `按行读工作区文件，上限 ${globalConfig.readFile.maxLines} 行/约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段，超长行改用 read_file_by_byte。相同范围重复读取只返回摘要，需要正文传 force:true。`,
+            description: `按行读工作区文件，上限 ${globalConfig.readFile.maxLines} 行/约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段且不要重叠回读，超长行改用 read_file_by_byte。相同范围重复读取只返回摘要，需要正文传 force:true。`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -1162,6 +1162,7 @@ export class AgentService extends EventEmitter {
             `- run_powershell_command：${envInfo.powershellAvailable ? `✅ 可用（${envInfo.powershellVersion}）` : '❌ 不可用，禁止调用'}。跨平台；Windows 调 powershell.exe，Linux/macOS 调 pwsh。command 直接写原生命令体；PS 5.1 无 &&，多命令用分号。`,
             `- run_cmd_command：${envInfo.cmdAvailable ? `✅ 可用（${envInfo.cmdVersion}）` : '❌ 不可用，禁止调用'}。仅限 Windows，仅在用户明确要求或只能 cmd.exe 时使用。`,
             '- timeout 毫秒：简单命令 30000，构建/测试 120000~300000，装依赖 600000。完整输出写入 `.command/output.txt`，返回被截断时用 `read_file` 读全文。',
+            '- 查文件优先 `read_file` 分段，不重叠回读已读区间；编辑后只读变更附近。终端只输出摘要：`Get-Content -TotalCount/-Tail`、`Select-String ... | Select-Object -First N`、`git diff --stat`。',
         ].join('\n');
 
         const processSafetyGuard = ProcessSafetyGuard.getInstance();
