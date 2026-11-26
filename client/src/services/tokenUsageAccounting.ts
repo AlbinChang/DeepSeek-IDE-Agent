@@ -28,8 +28,10 @@ export interface TokenUsageWrite extends UsageTotals {
     timestamp: number;
     /** 北京日期 key，与 timestamp 对应 */
     date: string;
-    /** 本次新增的 token 数（用于速率采样），恒为正 */
+    /** 本次新增的 token 数（含 prompt），用于分日统计 */
     deltaTotalTokens: number;
+    /** 本次新增的**生成** token 数（不含 prompt），用于状态栏 T/s 速率 */
+    deltaOutputTokens: number;
 }
 
 export interface UsageRecorderOptions {
@@ -99,6 +101,7 @@ export const createUsageRecorder = (options: UsageRecorderOptions): UsageRecorde
                 date,
                 ...next,
                 deltaTotalTokens: deltaTotal,
+                deltaOutputTokens: deltaOutput,
             };
         },
 

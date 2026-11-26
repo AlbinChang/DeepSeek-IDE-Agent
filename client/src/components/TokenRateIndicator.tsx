@@ -3,7 +3,7 @@ import { Zap } from 'lucide-react';
 import { getTokenRateSnapshot, subscribeTokenRate } from '@/services/tokenRate';
 
 /**
- * 状态栏 token 速率指示器（T/s）。
+ * 状态栏 token 生成速率指示器（T/s）。
  *
  * 采样与通知都在 `@/services/tokenRate` 里按 1s 节拍异步完成，本组件只负责显示；
  * 通过 `useSyncExternalStore` 订阅，重渲染范围仅限本组件，不影响状态栏其余部分
@@ -16,7 +16,7 @@ const TokenRateIndicatorImpl: React.FC = () => {
     return (
         <div
             className="flex items-center gap-2 border-l border-white/10 pl-4 h-[10px]"
-            title={`模型 token 吞吐：近 15 秒平均 ${rate.toLocaleString()} tokens/s（1 秒采样一次）`}
+            title={`模型生成速率：近 15 秒平均 ${rate.toLocaleString()} 输出 tokens/s（1 秒采样一次，不含 prompt）`}
         >
             <Zap size={9} className={active ? 'text-emerald-300' : 'text-white opacity-20'} />
             <div className="flex items-baseline gap-1">

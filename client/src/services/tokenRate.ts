@@ -1,5 +1,9 @@
 /**
- * 模型 token 吞吐速率采样器（供状态栏「T/s」实时显示）。
+ * 模型**生成** token 吞吐速率采样器（供状态栏「T/s」实时显示）。
+ *
+ * 只统计输出的 token：prompt token 每次调用都要把整个上下文重算一遍
+ * （本机真实数据里输入:输出 ≈ 100:1），混进来会让速率放大两个数量级，
+ * 看起来就像「忘记除以窗口秒数」。
  *
  * 设计约束（避免拖慢主渲染）：
  * - 只保存最近一个窗口内的采样点，`recordTokenDelta` 是 O(1) 摊还操作；
@@ -28,7 +32,7 @@ export interface TokenRateSample {
 }
 
 /**
- * 纯函数：按滑动窗口计算平均 token 速率（tokens/s）。
+ * 纯函数：按滑动窗口计算平均生成速率（tokens/s）。
  * 窗口外的采样点不参与计算。
  */
 export const computeTokenRate = (
@@ -85,7 +89,7 @@ const stopTimerIfIdle = (): void => {
 };
 
 /**
- * 记录一次 token 增量（每次模型调用返回的 usage 就是一段增量）。
+ * 记录一次生成 token 增量（每次模型调用返回的 usage.outputTokens 就是一段增量）。
  * 非正数与非有限值会被忽略，避免污染速率。
  */
 export const recordTokenDelta = (tokens: number, at: number = Date.now()): void => {

@@ -640,8 +640,10 @@ export function useAgentSSE() {
             const write = usageRecorder.record(usage);
             if (!write) return;
 
-            // 状态栏「T/s」实时速率（采样窗口见 tokenRate）
-            recordTokenDelta(write.deltaTotalTokens, write.timestamp);
+            // 状态栏「T/s」速率：只统计**生成**（输出）token。
+            // 用量里的 prompt token 每次调用都会把整个上下文重算一遍（实测输入:输出 ≈ 100:1），
+            // 混进来会把速率放大两个数量级，看起来像「没有除以窗口秒数」。
+            recordTokenDelta(write.deltaOutputTokens, write.timestamp);
 
             tokenUsagePersisted = true;
             const record = {

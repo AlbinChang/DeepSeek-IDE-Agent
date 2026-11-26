@@ -31,6 +31,7 @@ describe('createUsageRecorder', () => {
             outputTokens: 10,
             totalTokens: 110,
             deltaTotalTokens: 110,
+            deltaOutputTokens: 10,
         });
 
         // 第二轮模型调用：累计值涨到 150 + 20
@@ -41,6 +42,8 @@ describe('createUsageRecorder', () => {
             outputTokens: 20,
             totalTokens: 170,
             deltaTotalTokens: 60,
+            // 速率只按生成 token 增量计算（不含 prompt）
+            deltaOutputTokens: 10,
         });
     });
 
@@ -73,12 +76,13 @@ describe('createUsageRecorder', () => {
             outputTokens: 100,
             totalTokens: 700,
             deltaTotalTokens: 700,
+            deltaOutputTokens: 100,
         });
 
         // 再跨回凌晨也仍然累加到 11-26 这一天
         clock = Date.UTC(2026, 10, 25, 16, 20);
         const later = recorder.record(totals(1700, 250));
-        expect(later).toMatchObject({ id: 'm2:2026-11-26', totalTokens: 850, deltaTotalTokens: 150 });
+        expect(later).toMatchObject({ id: 'm2:2026-11-26', totalTokens: 850, deltaTotalTokens: 150, deltaOutputTokens: 50 });
     });
 
     it('没有新增用量时不产生写入（重复/乱序事件不重复计数）', () => {
