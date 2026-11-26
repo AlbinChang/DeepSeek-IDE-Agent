@@ -2,10 +2,10 @@
  * BrowserMcpAdapter — Playwright MCP 浏览器自动化适配器
  *
  * 设计理念：
- * - 纯适配器模式：不管理浏览器会话，Playwright MCP 自身具备会话管理能力
- * - Agent 初始化阶段即建立 MCP Client 连接，获取工具定义 / 资源定义 / 提示模板
- * - 将 Playwright MCP 原生工具桥接为 Agent ToolDefinition，直接转发调用
- * - 无会话管理、无预览服务器、无协议自愈、无参数标准化——全部交由 Playwright MCP 处理
+ * - 纯适配器模式：不自己实现浏览器会话，直接桥接 Playwright MCP 的原生工具
+ * - Agent 初始化阶段即建立连接，获取工具定义 / 资源定义 / 提示模板
+ * - MCP Client 与它拉起的浏览器托管在独立 Worker 进程里（PlaywrightWorkerClient
+ *   负责超时看门狗与退避重建），僵死时连进程树一起杀掉重建，不再拖垮主进程
  *
  * 架构参考：
  * - McpService 的 Client 管理 + 工具桥接模式
@@ -16,10 +16,17 @@ import * as fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { ToolDefinition } from '@/services/ToolManager.js';
 import { getBeijingLogTimePrefix } from '@/utils/TimeUtils.js';
+import { PlaywrightWorkerClient } from '@/services/PlaywrightWorkerClient.js';
+import { ChildProcessPlaywrightSpawner } from '@/services/childProcessPlaywrightSpawner.js';
+import type {
+    PlaywrightMcpLaunchConfig,
+    PlaywrightNativePromptDescriptor,
+    PlaywrightNativeResourceDescriptor,
+    PlaywrightNativeToolDescriptor,
+    PlaywrightWorkerSpawner,
+} from '@/services/playwrightWorkerProtocol.js';
 
 const getTS = () => getBeijingLogTimePrefix();
 
@@ -27,40 +34,27 @@ const getTS = () => getBeijingLogTimePrefix();
 // 类型定义
 // ============================================================
 
-/** Playwright MCP 原生工具描述 */
-export interface PlaywrightNativeTool {
-    name: string;
-    description?: string;
-    inputSchema: {
-        type: 'object';
-        properties?: Record<string, unknown>;
-        required?: string[];
-    };
-}
+/** Playwright MCP 原生工具描述（与 Worker 协议共用同一结构） */
+export type PlaywrightNativeTool = PlaywrightNativeToolDescriptor;
 
 /** Playwright MCP 原生资源描述 */
-export interface PlaywrightNativeResource {
-    uri: string;
-    name: string;
-    description?: string;
-    mimeType?: string;
-}
+export type PlaywrightNativeResource = PlaywrightNativeResourceDescriptor;
 
 /** Playwright MCP 原生提示模板 */
-export interface PlaywrightNativePrompt {
-    name: string;
-    description?: string;
-    arguments?: Array<{ name: string; description?: string; required?: boolean }>;
-}
+export type PlaywrightNativePrompt = PlaywrightNativePromptDescriptor;
 
 /** 适配器连接状态 */
 interface AdapterState {
-    client: Client;
-    transport: StdioClientTransport;
+    /**
+     * Worker 监督器：MCP Client 与 Chrome 都跑在独立进程里。
+     * 这里只持有句柄，不再直接持有 transport/client——旧实现把僵死的 MCP 连接
+     * 留在主进程内存里，超时后既杀不掉也无法感知，只能重启应用。
+     */
+    worker: PlaywrightWorkerClient;
     connected: boolean;
-    tools: PlaywrightNativeTool[];
-    resources: PlaywrightNativeResource[];
-    prompts: PlaywrightNativePrompt[];
+    tools: PlaywrightNativeToolDescriptor[];
+    resources: PlaywrightNativeResourceDescriptor[];
+    prompts: PlaywrightNativePromptDescriptor[];
     lastConnectedAt: number;
     errorCount: number;
     lastError?: string;
@@ -81,6 +75,43 @@ const CIRCUIT_BREAKER_THRESHOLD = 3;
 
 /** 默认工具调用超时（ms） */
 const DEFAULT_TOOL_TIMEOUT = 30_000;
+
+/**
+ * 断连后等待监督器自愈的时间（ms）。
+ * 超时重置的恢复通常只需 1 次退避（500ms），给 3s 足够覆盖两次退避。
+ */
+const RECOVERY_WAIT_MS = 3_000;
+
+/**
+ * 导航类工具：真实耗时由 `--timeout-navigation` 决定（默认 120s），
+ * 旧的统一 30s 宿主超时会把「页面还在正常加载」误判成僵死。
+ */
+const NAVIGATION_TOOL_NAMES = new Set([
+    'browser_navigate',
+    'browser_navigate_back',
+    'browser_wait_for',
+]);
+
+/**
+ * 计算单个工具调用的宿主超时。
+ * 必须给 MCP CLI 自身的预算留出余量，否则会在 CLI 还正常工作时就把它杀掉。
+ */
+export function resolvePlaywrightToolTimeout(
+    nativeToolName: string,
+    env: NodeJS.ProcessEnv = process.env,
+): number {
+    const readPositive = (value: string | undefined, fallback: number): number => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    };
+
+    if (NAVIGATION_TOOL_NAMES.has(nativeToolName)) {
+        const navigationBudget = readPositive(env.BROWSER_MCP_TIMEOUT_NAVIGATION, 120_000);
+        return Math.max(DEFAULT_TOOL_TIMEOUT, navigationBudget + 30_000);
+    }
+    const actionBudget = readPositive(env.BROWSER_MCP_TIMEOUT_ACTION, 10_000);
+    return Math.max(DEFAULT_TOOL_TIMEOUT, actionBudget + 20_000);
+}
 
 /** 构建桥接工具名 */
 export function buildPlaywrightToolName(nativeToolName: string): string {
@@ -105,6 +136,14 @@ export function parsePlaywrightToolName(agentToolName: string): { nativeToolName
 export class BrowserMcpAdapter {
     private static instance: BrowserMcpAdapter;
 
+    /**
+     * Worker 启动器：Electron 主进程注入 utilityProcess 版本；
+     * 未注入时（纯 Node / 本地调试）回退到 child_process.fork。
+     */
+    private static workerSpawner: PlaywrightWorkerSpawner | null = null;
+    /** Worker bundle 路径；为空时按约定目录探测 */
+    private static workerEntry: string | null = null;
+
     /** userId\u0000workspaceRoot → AdapterState */
     private connections = new Map<string, AdapterState>();
 
@@ -115,6 +154,48 @@ export class BrowserMcpAdapter {
             BrowserMcpAdapter.instance = new BrowserMcpAdapter();
         }
         return BrowserMcpAdapter.instance;
+    }
+
+    /**
+     * 注入 Worker 运行时（由 Electron 主进程在启动时调用）。
+     * 不注入时自动使用 child_process 版本，保证非 Electron 环境同样具备隔离能力。
+     */
+    public static configureWorkerRuntime(options: {
+        spawner?: PlaywrightWorkerSpawner | null;
+        entry?: string | null;
+    }): void {
+        BrowserMcpAdapter.workerSpawner = options.spawner ?? null;
+        BrowserMcpAdapter.workerEntry = options.entry ?? null;
+    }
+
+    /** 解析 Worker bundle 路径（开发/打包两种布局） */
+    public static resolveWorkerEntry(): string | null {
+        if (BrowserMcpAdapter.workerEntry && existsSync(BrowserMcpAdapter.workerEntry)) {
+            return BrowserMcpAdapter.workerEntry;
+        }
+        const resourcesPath = (process as unknown as { resourcesPath?: string }).resourcesPath || '';
+        const candidates = [
+            path.resolve(process.cwd(), 'dist', 'workers', 'playwrightMcpWorker.cjs'),
+            path.resolve(process.cwd(), 'workers', 'playwrightMcpWorker.cjs'),
+            // 从仓库根目录启动（如独立 server 进程）时指向 electron 产物
+            path.resolve(process.cwd(), 'electron', 'dist', 'workers', 'playwrightMcpWorker.cjs'),
+            path.resolve(process.cwd(), '..', 'dist', 'workers', 'playwrightMcpWorker.cjs'),
+            resourcesPath ? path.resolve(resourcesPath, 'workers', 'playwrightMcpWorker.cjs') : '',
+        ].filter(Boolean);
+        return candidates.find((candidate) => existsSync(candidate)) || null;
+    }
+
+    private static resolveWorkerSpawner(): PlaywrightWorkerSpawner {
+        if (BrowserMcpAdapter.workerSpawner) return BrowserMcpAdapter.workerSpawner;
+        const entry = BrowserMcpAdapter.resolveWorkerEntry();
+        if (!entry) {
+            throw new Error(
+                '未找到 Playwright Worker bundle（playwrightMcpWorker.cjs）。'
+                + '请先执行 `pnpm --filter deepseek-ide-agent-electron run build:playwright-worker`。',
+            );
+        }
+        BrowserMcpAdapter.workerSpawner = new ChildProcessPlaywrightSpawner({ entry, env: process.env });
+        return BrowserMcpAdapter.workerSpawner;
     }
 
     /** 构建隔离 key */
@@ -147,9 +228,33 @@ export class BrowserMcpAdapter {
         const startedAt = Date.now();
         console.log(`${getTS()} [BrowserMcpAdapter] Connecting Playwright MCP for user ${userId} @ ${workspaceRoot}...`);
 
+        let spawner: PlaywrightWorkerSpawner;
+        try {
+            spawner = BrowserMcpAdapter.resolveWorkerSpawner();
+        } catch (err: any) {
+            // Worker bundle 缺失属于部署问题，直接失败并保留原状态，不抛给调用方
+            console.error(`${getTS()} [BrowserMcpAdapter] ❌ Worker runtime unavailable: ${err?.message || err}`);
+            return;
+        }
+
         const state: AdapterState = {
-            client: null as any,
-            transport: null as any,
+            worker: new PlaywrightWorkerClient({
+                spawner,
+                onStateChange: (connected, reason) => {
+                    const current = this.connections.get(key);
+                    if (!current || current !== state) return;
+                    if (connected !== current.connected) {
+                        console.log(
+                            `${getTS()} [BrowserMcpAdapter] Worker state → ${connected ? 'connected' : 'disconnected'}`
+                            + (reason ? ` (${reason})` : ''),
+                        );
+                    }
+                    current.connected = connected;
+                    if (!connected && reason) {
+                        current.lastError = reason;
+                    }
+                },
+            }),
             connected: false,
             tools: [],
             resources: [],
@@ -159,145 +264,24 @@ export class BrowserMcpAdapter {
         };
 
         try {
-            // 1. 解析 Playwright MCP CLI 路径
-            const cliPath = BrowserMcpAdapter.resolveMcpCliPath();
-            const outputRoot = path.join(workspaceRoot, '.temp', 'playwright-mcp', 'adapter');
-            await fs.mkdir(outputRoot, { recursive: true });
+            const launchConfig = await this.buildLaunchConfig(workspaceRoot);
+            const result = await state.worker.connect(launchConfig, true);
 
-            // 2. 构建启动参数
-            const cliArgs: string[] = [
-                cliPath,
-                '--browser',
-                String(process.env.BROWSER_MCP_BROWSER || 'chrome'),
-                '--output-dir',
-                outputRoot,
-                '--timeout-navigation',
-                String(process.env.BROWSER_MCP_TIMEOUT_NAVIGATION || '120000'),
-                '--timeout-action',
-                String(process.env.BROWSER_MCP_TIMEOUT_ACTION || '10000'),
-            ];
-
-            // 允许访问 file:// 本地 HTML 文件（默认开启，方便预览本地页面）
-            // 关闭方式：设置 BROWSER_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS=false
-            if (String(process.env.BROWSER_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS || 'true').toLowerCase() !== 'false') {
-                cliArgs.push('--allow-unrestricted-file-access');
-            }
-
-            // headless 模式（默认非 headless，方便调试）
-            if (String(process.env.BROWSER_MCP_HEADLESS || '').toLowerCase() === 'true') {
-                cliArgs.push('--headless');
-            }
-
-            // 忽略 HTTPS 证书错误（本地开发服务器常用自签名证书）
-            if (String(process.env.BROWSER_MCP_IGNORE_HTTPS_ERRORS || '').toLowerCase() === 'true') {
-                cliArgs.push('--ignore-https-errors');
-            }
-
-            // 禁用沙箱（Docker/CI 环境需要）
-            if (String(process.env.BROWSER_MCP_NO_SANDBOX || '').toLowerCase() === 'true') {
-                cliArgs.push('--no-sandbox');
-            }
-
-            // 自定义视口大小
-            const viewportSize = String(process.env.BROWSER_MCP_VIEWPORT_SIZE || '').trim();
-            if (viewportSize) {
-                cliArgs.push('--viewport-size', viewportSize);
-            }
-
-            // 隔离模式：每次会话独立 profile，不持久化
-            if (String(process.env.BROWSER_MCP_ISOLATED || '').toLowerCase() === 'true') {
-                cliArgs.push('--isolated');
-            }
-
-            // 3. 创建 stdio transport + MCP client
-            //
-            // 注意：Electron 单进程架构下 AgentService/BrowserMcpAdapter 直接运行在
-            // Electron 主进程中，此时 process.execPath 指向 electron.exe 而非 node.exe。
-            // 若不加区分地把 electron.exe 当作 Node 可执行文件去启动 Playwright MCP CLI，
-            // Electron 会尝试把该 CLI 脚本当作应用入口加载（而不是以纯 Node 脚本运行），
-            // 导致 MCP stdio 握手失败 → state.connected 恒为 false → 系统提示词报告
-            // "浏览器自动化工具当前不可用"。
-            // 设置 ELECTRON_RUN_AS_NODE=1 强制子进程以纯 Node 进程运行；在非 Electron
-            // 环境（如独立 server 进程）下该变量被忽略，不影响行为。
-            const transport = new StdioClientTransport({
-                command: process.execPath,
-                args: cliArgs,
-                cwd: workspaceRoot,
-                env: {
-                    ...(process.env as Record<string, string>),
-                    ELECTRON_RUN_AS_NODE: '1',
-                },
-            });
-
-            const client = new Client(
-                { name: 'deepseek-ide-agent-playwright-adapter', version: '1.0.0' },
-                { capabilities: {} },
-            );
-
-            await client.connect(transport);
-
-            // 4. 获取工具定义（无需打开网页）
-            const toolsResult = await client.listTools();
-            const tools: PlaywrightNativeTool[] = (toolsResult?.tools || []).map((t: any) => ({
-                name: String(t.name || ''),
-                description: typeof t.description === 'string' ? t.description : undefined,
-                inputSchema: {
-                    type: 'object' as const,
-                    properties: (t.inputSchema && typeof t.inputSchema === 'object' && !Array.isArray(t.inputSchema))
-                        ? (t.inputSchema.properties as Record<string, unknown> || {})
-                        : {},
-                    required: Array.isArray(t.inputSchema?.required) ? t.inputSchema.required : [],
-                },
-            }));
-
-            // 5. 获取资源定义（如果 Playwright MCP 支持）
-            let resources: PlaywrightNativeResource[] = [];
-            try {
-                const resourcesResult = await client.listResources();
-                resources = (resourcesResult?.resources || []).map((r: any) => ({
-                    uri: String(r.uri || ''),
-                    name: String(r.name || ''),
-                    description: typeof r.description === 'string' ? r.description : undefined,
-                    mimeType: typeof r.mimeType === 'string' ? r.mimeType : undefined,
-                }));
-            } catch (err: any) {
-                // listResources 是可选的，某些 MCP 服务器可能不支持
-                console.log(`${getTS()} [BrowserMcpAdapter] listResources not supported or failed: ${err?.message || err}`);
-            }
-
-            // 6. 获取提示模板（如果 Playwright MCP 支持）
-            let prompts: PlaywrightNativePrompt[] = [];
-            try {
-                const promptsResult = await client.listPrompts();
-                prompts = (promptsResult?.prompts || []).map((p: any) => ({
-                    name: String(p.name || ''),
-                    description: typeof p.description === 'string' ? p.description : undefined,
-                    arguments: Array.isArray(p.arguments) ? p.arguments.map((a: any) => ({
-                        name: String(a.name || ''),
-                        description: typeof a.description === 'string' ? a.description : undefined,
-                        required: Boolean(a.required),
-                    })) : undefined,
-                }));
-            } catch (err: any) {
-                console.log(`${getTS()} [BrowserMcpAdapter] listPrompts not supported or failed: ${err?.message || err}`);
-            }
-
-            // 7. 更新状态
-            state.client = client;
-            state.transport = transport;
             state.connected = true;
-            state.tools = tools;
-            state.resources = resources;
-            state.prompts = prompts;
+            state.tools = result.tools;
+            state.resources = result.resources;
+            state.prompts = result.prompts;
             state.lastConnectedAt = startedAt;
             state.errorCount = 0;
+            state.lastError = undefined;
 
             this.connections.set(key, state);
 
             const duration = Date.now() - startedAt;
             console.log(
-                `${getTS()} [BrowserMcpAdapter] ✅ Connected Playwright MCP ` +
-                `(${tools.length} tools, ${resources.length} resources, ${prompts.length} prompts, ${duration}ms)`,
+                `${getTS()} [BrowserMcpAdapter] ✅ Connected Playwright MCP via worker `
+                + `(${result.tools.length} tools, ${result.resources.length} resources, `
+                + `${result.prompts.length} prompts, ${duration}ms, worker pid=${result.pid ?? 'n/a'})`,
             );
         } catch (err: any) {
             state.connected = false;
@@ -306,12 +290,81 @@ export class BrowserMcpAdapter {
             this.connections.set(key, state);
             console.error(`${getTS()} [BrowserMcpAdapter] ❌ Failed to connect: ${state.lastError}`);
 
-            // 尝试清理
-            try { await state.transport?.close(); } catch {}
-            try { await state.client?.close(); } catch {}
+            // 连接失败不保留半死状态：杀掉 worker，下次 connect 会重新拉起干净进程
+            try { await state.worker.dispose(); } catch {}
         }
     }
 
+    /**
+     * 构建 Playwright MCP 启动配置。
+     *
+     * 注意：Electron 主进程下 process.execPath 指向 electron.exe 而非 node.exe。
+     * 若不加区分地把 electron.exe 当作 Node 可执行文件去启动 Playwright MCP CLI，
+     * Electron 会尝试把该 CLI 脚本当作应用入口加载（而不是以纯 Node 脚本运行），
+     * 导致 MCP stdio 握手失败。因此设置 ELECTRON_RUN_AS_NODE=1 强制子进程以纯
+     * Node 进程运行；非 Electron 环境下该变量被忽略。
+     */
+    private async buildLaunchConfig(workspaceRoot: string): Promise<PlaywrightMcpLaunchConfig> {
+        // 1. 解析 Playwright MCP CLI 路径
+        const cliPath = BrowserMcpAdapter.resolveMcpCliPath();
+        const outputRoot = path.join(workspaceRoot, '.temp', 'playwright-mcp', 'adapter');
+        await fs.mkdir(outputRoot, { recursive: true });
+
+        // 2. 构建启动参数
+        const cliArgs: string[] = [
+            cliPath,
+            '--browser',
+            String(process.env.BROWSER_MCP_BROWSER || 'chrome'),
+            '--output-dir',
+            outputRoot,
+            '--timeout-navigation',
+            String(process.env.BROWSER_MCP_TIMEOUT_NAVIGATION || '120000'),
+            '--timeout-action',
+            String(process.env.BROWSER_MCP_TIMEOUT_ACTION || '10000'),
+        ];
+
+        // 允许访问 file:// 本地 HTML 文件（默认开启，方便预览本地页面）
+        // 关闭方式：设置 BROWSER_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS=false
+        if (String(process.env.BROWSER_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS || 'true').toLowerCase() !== 'false') {
+            cliArgs.push('--allow-unrestricted-file-access');
+        }
+
+        // headless 模式（默认非 headless，方便调试）
+        if (String(process.env.BROWSER_MCP_HEADLESS || '').toLowerCase() === 'true') {
+            cliArgs.push('--headless');
+        }
+
+        // 忽略 HTTPS 证书错误（本地开发服务器常用自签名证书）
+        if (String(process.env.BROWSER_MCP_IGNORE_HTTPS_ERRORS || '').toLowerCase() === 'true') {
+            cliArgs.push('--ignore-https-errors');
+        }
+
+        // 禁用沙箱（Docker/CI 环境需要）
+        if (String(process.env.BROWSER_MCP_NO_SANDBOX || '').toLowerCase() === 'true') {
+            cliArgs.push('--no-sandbox');
+        }
+
+        // 自定义视口大小
+        const viewportSize = String(process.env.BROWSER_MCP_VIEWPORT_SIZE || '').trim();
+        if (viewportSize) {
+            cliArgs.push('--viewport-size', viewportSize);
+        }
+
+        // 隔离模式：每次会话独立 profile，不持久化
+        if (String(process.env.BROWSER_MCP_ISOLATED || '').toLowerCase() === 'true') {
+            cliArgs.push('--isolated');
+        }
+
+        return {
+            command: process.execPath,
+            args: cliArgs,
+            cwd: workspaceRoot,
+            env: {
+                ...(process.env as Record<string, string>),
+                ELECTRON_RUN_AS_NODE: '1',
+            },
+        };
+    }
     /**
      * 断开指定用户+workspace 的 Playwright MCP 连接
      */
@@ -321,9 +374,17 @@ export class BrowserMcpAdapter {
         if (!state) return;
 
         console.log(`${getTS()} [BrowserMcpAdapter] Disconnecting Playwright MCP for user ${userId} @ ${workspaceRoot}`);
-        try { await state.transport?.close(); } catch {}
-        try { await state.client?.close(); } catch {}
+        try { await state.worker.dispose(); } catch (err: any) {
+            console.warn(`${getTS()} [BrowserMcpAdapter] Worker dispose failed: ${err?.message || err}`);
+        }
         this.connections.delete(key);
+    }
+
+    /** 关闭所有 worker（应用退出时调用） */
+    async shutdown(): Promise<void> {
+        const states = Array.from(this.connections.values());
+        this.connections.clear();
+        await Promise.allSettled(states.map((state) => state.worker.dispose()));
     }
 
     /**
@@ -446,32 +507,32 @@ export class BrowserMcpAdapter {
         }
 
         if (!state.connected) {
-            // 尝试重连（熔断阈值内）
-            if (state.errorCount < CIRCUIT_BREAKER_THRESHOLD) {
+            // 自愈窗口内（超时后监督器正在退避重建）优先等它自己恢复，
+            // 避免每次工具调用都重建整个 worker 进程。
+            const recovered = await state.worker.waitForConnected(RECOVERY_WAIT_MS);
+            if (recovered) {
+                console.log(`${getTS()} [BrowserMcpAdapter] Worker recovered automatically, retrying ${nativeToolName}`);
+            } else if (state.errorCount < CIRCUIT_BREAKER_THRESHOLD) {
+                // 自动恢复没赶上，主动重建一次（熔断阈值内）
                 console.log(`${getTS()} [BrowserMcpAdapter] Attempting reconnect...`);
                 await this.connect(userId, workspaceRoot);
-                const newState = this.connections.get(key);
-                if (newState?.connected) {
-                    return await this.executeTool(agentToolName, params, userId, workspaceRoot);
-                }
+            }
+
+            const newState = this.connections.get(key);
+            if (newState?.connected) {
+                return await this.executeTool(agentToolName, params, userId, workspaceRoot);
             }
             return {
                 status: 'error',
-                message: `Playwright MCP 未连接（${state.lastError || '未知原因'}）`,
+                message: `Playwright MCP 未连接（${newState?.lastError || state.lastError || '未知原因'}）`,
             };
         }
 
-        const timeout = DEFAULT_TOOL_TIMEOUT;
+        const timeout = resolvePlaywrightToolTimeout(nativeToolName);
         const startedAt = Date.now();
 
         try {
-            const result = await this.withTimeout(
-                state.client.callTool({
-                    name: nativeToolName,
-                    arguments: params || {},
-                }),
-                timeout,
-            );
+            const result = await state.worker.callTool(nativeToolName, params || {}, timeout);
 
             const duration = Date.now() - startedAt;
             console.log(`${getTS()} [BrowserMcpAdapter] ✅ ${agentToolName} (${duration}ms)`);
@@ -483,10 +544,9 @@ export class BrowserMcpAdapter {
             state.lastError = String(err?.message || err);
             console.error(`${getTS()} [BrowserMcpAdapter] ❌ ${agentToolName} failed (${duration}ms): ${state.lastError}`);
 
-            // 检查是否为连接级错误
-            if (this.isConnectionError(err)) {
-                state.connected = false;
-            }
+            // 连接级故障（超时/进程退出/协议中断）由监督器负责重建，
+            // 这里只需读取最新状态，避免把已自动恢复的连接误标为断开。
+            state.connected = state.worker.getStatus().connected;
 
             return {
                 status: 'error',
@@ -519,7 +579,8 @@ export class BrowserMcpAdapter {
         }
 
         if (!state.connected) {
-            if (state.errorCount < CIRCUIT_BREAKER_THRESHOLD) {
+            const recovered = await state.worker.waitForConnected(RECOVERY_WAIT_MS);
+            if (!recovered && state.errorCount < CIRCUIT_BREAKER_THRESHOLD) {
                 await this.connect(userId, workspaceRoot);
                 state = this.connections.get(key);
             }
@@ -529,10 +590,7 @@ export class BrowserMcpAdapter {
         }
 
         try {
-            const result = await this.withTimeout(
-                state.client.callTool({ name: nativeToolName, arguments: args || {} }),
-                timeoutMs,
-            );
+            const result = await state.worker.callTool(nativeToolName, args || {}, timeoutMs);
 
             const res = result as Record<string, unknown>;
             const textParts: string[] = [];
@@ -547,9 +605,7 @@ export class BrowserMcpAdapter {
         } catch (err: any) {
             state.errorCount += 1;
             state.lastError = String(err?.message || err);
-            if (this.isConnectionError(err)) {
-                state.connected = false;
-            }
+            state.connected = state.worker.getStatus().connected;
             throw err;
         }
     }
@@ -675,34 +731,5 @@ export class BrowserMcpAdapter {
         if (existsSync(fallback)) return fallback;
 
         throw new Error(`Unable to locate Playwright MCP CLI. packageRoot=${pkgRoot}`);
-    }
-
-    /**
-     * 带超时的 Promise
-     */
-    private withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-        return new Promise<T>((resolve, reject) => {
-            const timer = setTimeout(() => {
-                reject(new Error(`Playwright MCP tool call timed out after ${timeoutMs}ms`));
-            }, timeoutMs);
-
-            promise
-                .then((result) => {
-                    clearTimeout(timer);
-                    resolve(result);
-                })
-                .catch((err) => {
-                    clearTimeout(timer);
-                    reject(err);
-                });
-        });
-    }
-
-    /**
-     * 判断错误是否为连接级错误
-     */
-    private isConnectionError(err: unknown): boolean {
-        const msg = String((err as any)?.message || err || '').toLowerCase();
-        return /econnrefused|enotfound|econnreset|epipe|not connected|transport closed|connection.*closed/i.test(msg);
     }
 }

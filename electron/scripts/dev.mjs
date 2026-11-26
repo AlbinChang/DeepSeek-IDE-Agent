@@ -4,6 +4,8 @@
  * 开发模式启动流程：
  * 1. 编译 preload 脚本（esbuild，CJS）
  * 2. 编译 workflow worker（esbuild，CJS 单文件）
+ * 2.5 编译 duckdb worker（esbuild，CJS 单文件）
+ * 2.7 编译 Playwright MCP worker（esbuild，CJS 单文件）
  * 3. 编译 main process（esbuild，ESM）
  * 4. 启动 Vite dev server（Renderer 热更新）
  * 5. 启动 Electron（加载编译后的 main process）
@@ -139,6 +141,21 @@ function buildDuckdbWorker() {
         log('DUCKDB', colors.green, 'DuckDB worker built → dist/workers/duckdbWorker.cjs');
     } catch (err) {
         log('DUCKDB', colors.red, 'DuckDB worker build failed:', err.message);
+        process.exit(1);
+    }
+}
+
+// ── 步骤 2.7: 编译 Playwright MCP Worker ──
+function buildPlaywrightWorker() {
+    log('PW-WORKER', colors.magenta, 'Building Playwright MCP worker...');
+    try {
+        execSync('node scripts/build-playwright-worker.mjs', {
+            cwd: ELECTRON_ROOT,
+            stdio: 'pipe',
+        });
+        log('PW-WORKER', colors.green, 'Playwright worker built → dist/workers/playwrightMcpWorker.cjs');
+    } catch (err) {
+        log('PW-WORKER', colors.red, 'Playwright worker build failed:', err.message);
         process.exit(1);
     }
 }
@@ -493,6 +510,9 @@ async function main() {
 
     // 2.5 编译 DuckDB Worker（独立进程，CJS）
     buildDuckdbWorker();
+
+    // 2.7 编译 Playwright MCP Worker（独立进程，CJS）
+    buildPlaywrightWorker();
 
     // 3. 编译 Main Process（ESM）
     buildMainProcess();

@@ -93,6 +93,7 @@ async function registerIpcHandlers() {
     const { registerDiagnosticsIpc } = await import('./ipc/diagnostics-handlers.js');
     const { registerWorkflowIpc } = await import('./ipc/workflow-handlers.js');
     const { WorkflowRuntime } = await import('./workflow/workflow-runtime.js');
+    const { configurePlaywrightWorkerRuntime } = await import('./browser/playwright-runtime.js');
 
     registerAgentIpc(ipcMain, mainWindow!);
     registerFileIpc(ipcMain);
@@ -108,6 +109,9 @@ async function registerIpcHandlers() {
     WorkflowRuntime.getInstance().initialize(() => mainWindow);
     registerWorkflowIpc(ipcMain);
     await WorkflowRuntime.getInstance().start();
+
+    // Playwright MCP：把浏览器自动化托管到独立 worker 进程
+    configurePlaywrightWorkerRuntime();
 
     console.log('[Electron] All IPC handlers registered.');
 }
@@ -211,6 +215,13 @@ app.on('before-quit', (event) => {
 
     normalShutdownStarted = true;
     void (async () => {
+        try {
+            const { shutdownPlaywrightWorkers } = await import('./browser/playwright-runtime.js');
+            await shutdownPlaywrightWorkers();
+        } catch (error) {
+            console.error('[Electron] Failed to shutdown Playwright workers:', error);
+        }
+
         try {
             const { WorkflowRuntime } = await import('./workflow/workflow-runtime.js');
             await WorkflowRuntime.getInstance().shutdown();
