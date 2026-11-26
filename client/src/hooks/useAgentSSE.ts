@@ -10,6 +10,8 @@ import {
     type TokenUsage,
 } from "@/services/db";
 import { ChatPersistence } from "@/services/ChatPersistence";
+import { recordTokenDelta } from "@/services/tokenRate";
+import { createUsageRecorder } from "@/services/tokenUsageAccounting";
 import {
     buildFinalizedRow,
     messagePersistSignature,
@@ -622,20 +624,33 @@ export function useAgentSSE() {
         // 双重 setMessages + setData 调用，大幅减少重渲染次数。
         // ═══════════════════════════════════════════════════════════════
         const currentAssistantMsgId = createClientId();
-        const usageTimestamp = Date.now();
         let accumulatedUsage: TokenUsage | null = null;
         let tokenUsagePersisted = false;
         let tokenUsageWriteQueue = Promise.resolve();
+        const usageRecorder = createUsageRecorder({
+            messageId: currentAssistantMsgId,
+            workspaceRoot,
+        });
         const persistTokenUsage = (usage: TokenUsage | null) => {
             if (!usage || !Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) return;
+
+            // 落库的是增量、并按北京自然日分桶（见 tokenUsageAccounting）：
+            // 时间取真实发生时刻——否则 23:45 开始、跨过零点的长任务会把 00:00 之后的
+            // 全部用量都算进前一天，状态栏「今日」在第二天长时间显示 0。
+            const write = usageRecorder.record(usage);
+            if (!write) return;
+
+            // 状态栏「T/s」实时速率（采样窗口见 tokenRate）
+            recordTokenDelta(write.deltaTotalTokens, write.timestamp);
+
             tokenUsagePersisted = true;
             const record = {
-                id: currentAssistantMsgId,
-                workspaceRoot,
-                timestamp: usageTimestamp,
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                totalTokens: usage.totalTokens,
+                id: write.id,
+                workspaceRoot: write.workspaceRoot,
+                timestamp: write.timestamp,
+                inputTokens: write.inputTokens,
+                outputTokens: write.outputTokens,
+                totalTokens: write.totalTokens,
             };
             tokenUsageWriteQueue = tokenUsageWriteQueue
                 .then(() => recordTokenUsage(record))

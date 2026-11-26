@@ -1,5 +1,6 @@
 import Dexie, { type EntityTable } from 'dexie';
 import { normalizeWorkspaceKey } from '@/utils/path';
+import { getBeijingDateKey } from '@/utils/beijingDate';
 
 const DB_INLINE_STRING_LIMIT = 1200;
 const DB_RENDERED_TEXT_LIMIT = 200_000;
@@ -130,20 +131,7 @@ export interface WorkspaceTokenUsageSummary {
 
 export const TOKEN_USAGE_UPDATED_EVENT = 'ui:token-usage:updated';
 
-const beijingDateFormatter = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'Asia/Shanghai',
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-});
-
-export const getBeijingDateKey = (timestamp: number): string => {
-  const parts = beijingDateFormatter.formatToParts(new Date(timestamp));
-  const year = parts.find(part => part.type === 'year')?.value || '0000';
-  const month = parts.find(part => part.type === 'month')?.value || '00';
-  const day = parts.find(part => part.type === 'day')?.value || '00';
-  return `${year}-${month}-${day}`;
-};
+export { getBeijingDateKey };
 
 /**
  * 聊天历史持久化 (IndexedDB)

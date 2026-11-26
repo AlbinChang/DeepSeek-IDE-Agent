@@ -3,6 +3,7 @@ import { GitBranch, Hash, Activity, User, Code2 } from 'lucide-react';
 import { USER_ID, GATEWAY_EVENT } from '@/config';
 import { useAgentContext } from '@/providers/AgentContext';
 import { electronBridge } from '@/services/electron-bridge';
+import { TokenRateIndicator } from '@/components/TokenRateIndicator';
 import {
     getBeijingDateKey,
     getWorkspaceTokenUsageSummary,
@@ -304,6 +305,8 @@ export const StatusBar: React.FC = () => {
                         </span>
                     </div>
                 </div>
+
+                {workspaceRoot && <TokenRateIndicator />}
 
                 {status?.memory && (
                     <div className="flex items-center gap-2 border-l border-white/10 pl-4 h-[10px]" title={`后端内存: ${status.memory.heapUsed} / ${status.memory.heapLimit}`}>
