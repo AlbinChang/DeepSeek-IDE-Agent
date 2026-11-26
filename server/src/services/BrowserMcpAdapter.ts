@@ -20,6 +20,10 @@ import type { ToolDefinition } from '@/services/ToolManager.js';
 import { getBeijingLogTimePrefix } from '@/utils/TimeUtils.js';
 import { PlaywrightWorkerClient } from '@/services/PlaywrightWorkerClient.js';
 import { ChildProcessPlaywrightSpawner } from '@/services/childProcessPlaywrightSpawner.js';
+import {
+    isBrowserSessionUnhealthy,
+    prepareNavigation,
+} from '@/services/PlaywrightNavigation.js';
 import type {
     PlaywrightMcpLaunchConfig,
     PlaywrightNativePromptDescriptor,
@@ -365,6 +369,88 @@ export class BrowserMcpAdapter {
             },
         };
     }
+
+    /**
+     * 工具调用前改写参数。
+     *
+     * 目前只处理 `browser_navigate`：目标是把浏览器当文档渲染的 SVG 会让
+     * `@playwright/mcp` 内部僵死 30s（详见 PlaywrightNavigation 的实测矩阵），
+     * 因此改写成自动生成的 HTML 包装页。
+     */
+    private async prepareToolParams(
+        nativeToolName: string,
+        params: Record<string, unknown>,
+        workspaceRoot: string,
+    ): Promise<{ params: Record<string, unknown>; rewrittenFrom?: string }> {
+        if (nativeToolName !== 'browser_navigate') {
+            return { params };
+        }
+        const url = typeof params.url === 'string' ? params.url : '';
+        if (!url) return { params };
+
+        try {
+            const prepared = await prepareNavigation(url, { workspaceRoot });
+            if (!prepared.rewrittenFrom) return { params };
+            console.log(
+                `${getTS()} [BrowserMcpAdapter] 🎞  SVG 导航改写为 HTML 包装页: ${prepared.rewrittenFrom} → ${prepared.url}`,
+            );
+            return {
+                params: { ...params, url: prepared.url },
+                rewrittenFrom: prepared.rewrittenFrom,
+            };
+        } catch (err: any) {
+            // 改写失败就按原样交给 MCP（保持既有行为），由上层超时兜底
+            console.warn(`${getTS()} [BrowserMcpAdapter] SVG 导航改写失败，回退原样: ${err?.message || err}`);
+            return { params };
+        }
+    }
+
+    /** 把结果文本里出现过的包装页 URL 还原成用户请求的原始 URL */
+    private restoreOriginalUrl(formatted: unknown, originalUrl: string): unknown {
+        if (typeof formatted !== 'string') return formatted;
+        const viewPath = path.join('.temp', 'playwright-mcp', 'view');
+        if (!formatted.includes(viewPath) && !formatted.includes('.temp/playwright-mcp/view')) {
+            return formatted;
+        }
+        return formatted.replace(/file:\/\/\/[^\s'"`)]*\.temp\/playwright-mcp\/view\/[0-9a-f]+\.html/gi, originalUrl);
+    }
+
+    /**
+     * 记录会话健康度。
+     *
+     * MCP 的 `isError` 结果并不代表「这次调用只是失败」：带 `browserBackend.callTool`
+     * 前缀的超时、以及 `Target page, context or browser has been closed` 意味着浏览器
+     * 后端已经僵死，继续复用只会让后续每个调用都白等 30s（真实日志里就是这样连锁失败的）。
+     * 这里主动让监督器重建 worker，让下一次调用拿到干净的浏览器。
+     *
+     * 注意不要把普通的 `page.goto: Timeout 120000ms exceeded` 也算进来——那只是这一次
+     * 导航慢，重建会连带丢掉当前标签与会话。
+     */
+    private noteSessionHealth(state: AdapterState, rawResult: unknown, nativeToolName: string): void {
+        if (!rawResult || typeof rawResult !== 'object') return;
+        const result = rawResult as Record<string, unknown>;
+        if (!result.isError) return;
+
+        const text = Array.isArray(result.content)
+            ? (result.content as Array<Record<string, unknown>>)
+                .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+                .map((item) => String(item.text))
+                .join('\n')
+            : '';
+        if (!isBrowserSessionUnhealthy(text)) return;
+        // 一次僵死只触发一次重建（重建期间 connected 已经是 false）
+        if (!state.connected) return;
+
+        state.connected = false;
+        state.lastError = `浏览器会话已失效（${nativeToolName}）`;
+        console.warn(
+            `${getTS()} [BrowserMcpAdapter] ⚠️ ${nativeToolName} 返回 MCP 级错误，判定浏览器已僵死，重建 worker`,
+        );
+        void state.worker.restart(`unhealthy_result:${nativeToolName}`).catch((err: any) => {
+            console.error(`${getTS()} [BrowserMcpAdapter] worker restart failed: ${err?.message || err}`);
+        });
+    }
+
     /**
      * 断开指定用户+workspace 的 Playwright MCP 连接
      */
@@ -532,12 +618,19 @@ export class BrowserMcpAdapter {
         const startedAt = Date.now();
 
         try {
-            const result = await state.worker.callTool(nativeToolName, params || {}, timeout);
+            const { params: callParams, rewrittenFrom } = await this.prepareToolParams(
+                nativeToolName,
+                params || {},
+                workspaceRoot,
+            );
+            const result = await state.worker.callTool(nativeToolName, callParams, timeout);
 
             const duration = Date.now() - startedAt;
             console.log(`${getTS()} [BrowserMcpAdapter] ✅ ${agentToolName} (${duration}ms)`);
 
-            return this.formatResult(result);
+            const formatted = this.formatResult(result);
+            this.noteSessionHealth(state, result, nativeToolName);
+            return rewrittenFrom ? this.restoreOriginalUrl(formatted, rewrittenFrom) : formatted;
         } catch (err: any) {
             const duration = Date.now() - startedAt;
             state.errorCount += 1;
@@ -590,7 +683,8 @@ export class BrowserMcpAdapter {
         }
 
         try {
-            const result = await state.worker.callTool(nativeToolName, args || {}, timeoutMs);
+            const { params: callArgs } = await this.prepareToolParams(nativeToolName, args || {}, workspaceRoot);
+            const result = await state.worker.callTool(nativeToolName, callArgs, timeoutMs);
 
             const res = result as Record<string, unknown>;
             const textParts: string[] = [];
@@ -601,6 +695,7 @@ export class BrowserMcpAdapter {
                     }
                 }
             }
+            this.noteSessionHealth(state, result, nativeToolName);
             return { text: textParts.join('\n'), isError: Boolean(res?.isError) };
         } catch (err: any) {
             state.errorCount += 1;

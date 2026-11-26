@@ -49,6 +49,36 @@ Electron 主进程
 
 `BrowserMcpAdapter` 对外 API 保持不变（`connect` / `disconnect` / `getConnectionState` / `isConnected` / `getBridgeToolDefinitions` / `getBridgeToolsMetadata` / `executeTool` / `callNativeTool` / `buildSystemPrompt`）；工作区切换与退出时会 `dispose` Worker，浏览器进程随之结束。
 
+### 3.1 SVG 文档：导航目标自动改写（`PlaywrightNavigation`）
+
+`@playwright/mcp` 的 `browser_navigate` **只要目标被浏览器当作 `image/svg+xml` 渲染就会卡死 30s**
+（`TimeoutError: browserBackend.callTool: Timeout 30000ms exceeded`），并把整条浏览器后端拖进僵死状态，
+之后 `browser_close` / `browser_tabs` / `browser_resize` 也全部 30s 失败。真实日志里 22 次
+`file://*.svg` 导航 0 次成功、连带 13 次 `browser_close` 失败，累计白等约 20 分钟。
+
+隔离实验（同一份 SVG 字节，仅改服务方式）：
+
+| 服务方式 | 结果 |
+|---|---|
+| `.svg` + `image/svg+xml` | ❌ 30s 超时 |
+| 无后缀 + `image/svg+xml` | ❌ 30s 超时 |
+| `.svg` 内容 + `text/html` | ✅ 2.1s |
+| `.html` + `<img src="*.svg">` | ✅ 1.5s，截图正常 |
+
+同样的文件用裸 Playwright `page.goto()` 打开只需 37ms，所以这是 MCP 自身缺陷，CLI 参数无法规避。
+
+因此 `browser_navigate` 的 `file://*.svg` / `http(s)://*.svg` 目标会在交给 MCP 之前被改写成
+工作区内自动生成的 HTML 包装页（`<workspace>/.temp/playwright-mcp/view/<hash>.html`），
+用 `<img>` 内嵌原文件并按 SVG 固有尺寸（`width/height`，回退 `viewBox`）渲染。
+改写后导航 ~100ms、截图/快照/关闭全部正常，返回给模型的文本里 URL 会被还原成原始地址。
+
+### 3.2 MCP 级错误触发主动重建
+
+MCP 返回 `isError` 只表示「这次调用失败」，但 `browserBackend.callTool` 前缀的超时与
+`Target page, context or browser has been closed` 说明后端已经僵死——继续复用会让后续**每个**调用
+都白等 30s。适配器识别这类信号后立即 `restart` worker，下一次调用拿到干净的浏览器。
+普通的 `page.goto: Timeout 120000ms exceeded` 不在此列（只是这一次导航慢，不能丢掉当前会话）。
+
 ## 4. 配置
 
 | 环境变量 | 默认 | 说明 |
@@ -66,5 +96,7 @@ Electron 主进程
 ## 5. 排查
 
 - 工具持续返回 `Playwright MCP 未连接`：先看主进程日志中的 `[PlaywrightWorker]`，能看到重建原因（`tool_timeout` / `worker_exited:<code>` / `watchdog_timeout`）。
+- 看到 `🎞  SVG 导航改写为 HTML 包装页` 说明命中了 3.1 的改写路径；包装页在 `<workspace>/.temp/playwright-mcp/view/`，可随时删除，会自动重建。
+- 看到 `⚠️ ... 返回 MCP 级错误，判定浏览器已僵死，重建 worker` 说明触发了 3.2 的主动重建。
 - Worker 异常退出会附带最近 20 行 stderr（Chrome 输出），用于定位启动失败。
 - Worker 的 stdout/stderr 必须被宿主持续消费；管道写满会让子进程阻塞在写系统调用上，表现为「所有工具调用卡死」——新增 spawner 时不要留下无人读取的 `'pipe'`。
