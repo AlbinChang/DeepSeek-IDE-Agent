@@ -32,6 +32,20 @@ describe('SystemTools failure hints', () => {
         expect(hint).toContain('重试');
     });
 
+    it('本地子进程超时不会被误判成「外部接口不可达」', () => {
+        // 真实故障（2026-11-26）：Chrome 被相对路径的 --user-data-dir 卡在错误对话框上，
+        // Python 抛 subprocess.TimeoutExpired，旧逻辑因为匹配 "timed out" 给出了网络建议。
+        const stderr = [
+            'Traceback (most recent call last):',
+            'subprocess.TimeoutExpired: Command \'[\'C:/Program Files/Google/Chrome/Application/chrome.exe\', '
+            + '\'--headless=new\', \'--user-data-dir=.temp/render/edge-profile\']\' timed out after 90 seconds',
+        ].join('\n');
+        const hint = buildFailureHints('python render_png.py --run-dir .temp/x', '', stderr);
+        expect(hint).not.toContain('外部接口不可达');
+        expect(hint).toContain('子进程超时');
+        expect(hint).toContain('绝对路径');
+    });
+
     it('adds nothing for unrecognized failures', () => {
         expect(buildFailureHints('echo hi', '', 'boom')).toBe('');
     });

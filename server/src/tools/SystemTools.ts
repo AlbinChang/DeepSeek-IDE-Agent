@@ -27,8 +27,8 @@ export function terminatePosixCommandGroup(child: Pick<ChildProcess, 'pid' | 'ki
 /**
  * 失败时给出可执行的下一步建议。
  *
- * 只覆盖日志里高频出现的四类失败（内联脚本被 shell 破坏、路径不存在、
- * 外部接口不可达、已有部分输出），最多两条，避免污染 stderr。
+ * 只覆盖日志里高频出现的五类失败（内联脚本被 shell 破坏、路径不存在、
+ * 网络不可达、GUI/子进程超时、已有部分输出），最多两条，避免污染 stderr。
  */
 export function buildFailureHints(command: string, stdout: string, stderr: string): string {
     const hints: string[] = [];
@@ -42,8 +42,18 @@ export function buildFailureHints(command: string, stdout: string, stderr: strin
     if (/Cannot find path|ItemNotFound|No such file|cannot access|does not exist/i.test(stderr)) {
         hints.push('路径不存在：先用 Test-Path 守卫或 -ErrorAction SilentlyContinue，避免整条命令以 exit 1 结束。');
     }
-    if (/Max retries exceeded|HTTPSConnectionPool|Connection(?:Error|Refused|Reset)|ConnectTimeout|timed out/i.test(stderr)) {
+    // 只有真正的网络类错误才提示「不可达/限流」。
+    // 不能只匹配 timed out：本地子进程超时（如 Chrome 弹窗卡住）也会命中，
+    // 会给出完全错误的「外部接口不可达」建议（2026-11-26 真实误判）。
+    const networkLike = /Max retries exceeded|HTTPSConnectionPool|Connection(?:Error|Refused|Reset|Aborted)|ConnectTimeout|Name or service not known|getaddrinfo|SSLError|SSL: /i.test(stderr);
+    const subprocessTimeoutLike = /TimeoutExpired|timed out after \d+\s*(?:ms|s|seconds|秒)|Command timed out|进程超时/i.test(stderr);
+    if (networkLike) {
         hints.push('外部接口不可达或限流：加重试/退避并复用本地缓存，避免整批重跑。');
+    } else if (subprocessTimeoutLike) {
+        hints.push(
+            '子进程超时：GUI 程序（Chrome/Edge 等）弹窗时不会自己退出，会一直等到超时；'
+            + '改用 --headless 并把 --user-data-dir/--screenshot 写成绝对路径，失败时清理临时 profile。',
+        );
     }
     if (!hints.length) return '';
     if (stdout.trim()) {
