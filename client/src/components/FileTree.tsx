@@ -12,6 +12,7 @@ import { GATEWAY_EVENT } from '@/config';
 import { electronBridge } from '@/services/electron-bridge';
 import { getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspaceEntry } from '@/services/RecentWorkspaces';
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from '@/components/ContextMenu';
+import { createRefreshGate } from '@/services/refreshGate';
 
 interface FileNode {
   name: string;
@@ -122,6 +123,12 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile, is
   const [createError, setCreateError] = useState<string | null>(null);
   /** 空白区域右键菜单（仅含新建文件/文件夹） */
   const [emptyMenu, setEmptyMenu] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * 刷新闸门：右键菜单打开期间冻结目录树刷新。
+   * Virtuoso 在数据变化时会重新测量并可能调整滚动位置，而右键菜单靠全局 scroll 监听关闭，
+   * 于是 Agent 频繁写文件时「树一刷新，菜单立刻消失」，用户根本来不及点。
+   */
+  const refreshGateRef = useRef(createRefreshGate());
 
   // ── 拖拽移动状态 ──
   const [dragNodePath, setDragNodePath] = useState<string | null>(null);
@@ -147,6 +154,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile, is
     e.preventDefault();
     e.stopPropagation();
     setEmptyMenu(null);
+    // 同步冻结刷新（不能等 React 副作用，否则同一 tick 内落地的刷新仍会把菜单关掉）
+    refreshGateRef.current.freeze();
     setContextMenu({ x: e.clientX, y: e.clientY, node });
   };
 
@@ -555,6 +564,11 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile, is
     // 15s + 版本命中时只 stat 目录，不再每 5s 重传/重渲染整棵树。
     const pollInterval = setInterval(() => {
       if (!workspaceRoot || !isVisible || document.visibilityState === 'hidden' || pollInFlightRef.current) return;
+      // 菜单打开期间跳过轮询（它绕过了 refreshPath 的闸门），关闭后由闸门补刷一次
+      if (refreshGateRef.current.isFrozen()) {
+        refreshGateRef.current.defer('.');
+        return;
+      }
 
       const pathsToRefresh = ['.', ...collectOpenPaths()].slice(0, MAX_AUTO_REFRESH_PATHS);
       pollInFlightRef.current = true;
@@ -683,6 +697,13 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile, is
   const refreshPath = async (parentPath: string, silent = false, force = false) => {
     if (!workspaceRoot) return;
 
+    // 右键菜单打开期间不动树：数据变化会让 Virtuoso 重新测量/滚动，
+    // 而菜单的全局 scroll 监听会立刻把它关掉。先记账，菜单关闭后合并补刷。
+    if (refreshGateRef.current.isFrozen()) {
+      refreshGateRef.current.defer(parentPath);
+      return;
+    }
+
     // 轮询与 Agent 事件可能在短时间内重复请求同一目录；非强制刷新时节流避免重复 IPC。
     const now = Date.now();
     const lastStartedAt = refreshStartedAtRef.current.get(parentPath) ?? 0;
@@ -737,6 +758,22 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile, is
       if (!silent) setIsLoading(false);
     }
   };
+
+  // 右键菜单关闭后放开闸门，把期间攒下的刷新合并补跑一次（去重，最多 8 个目录）。
+  // 打开期间不补跑：那正是会把菜单关掉的操作。
+  useEffect(() => {
+    const menuOpen = contextMenu !== null || emptyMenu !== null;
+    if (menuOpen) {
+      refreshGateRef.current.freeze();
+      return;
+    }
+    const pendingPaths = refreshGateRef.current.release();
+    for (const pendingPath of pendingPaths) {
+      void refreshPath(pendingPath, true, true);
+    }
+    // refreshPath 每次渲染都是新函数，这里只关心「菜单开/关」的状态跃迁
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextMenu, emptyMenu]);
 
   const findNodeInMutableTree = (nodes: FileNode[], path: string): FileNode | null => {
     for (const node of nodes) {
@@ -1430,6 +1467,8 @@ export const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, activeFile, is
               e.preventDefault();
               e.stopPropagation();
               setContextMenu(null);
+              // 同 handleContextMenu：同步冻结，避免空白区菜单被紧随其后的刷新关掉
+              refreshGateRef.current.freeze();
               setEmptyMenu({ x: e.clientX, y: e.clientY });
             }}
           >

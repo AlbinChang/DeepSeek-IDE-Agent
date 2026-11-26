@@ -73,6 +73,8 @@ export const ContextMenuSeparator: React.FC = () => (
  * 3. 智能翻转（Flip）：当下侧或右侧空间不足时，自动向上 / 向左翻转弹出
  * 4. 极端窗口安全防护：配置 maxHeight 与 overflow-y，确保小屏幕下菜单项全量可滚、可点
  * 5. 全局生命周期治理：点击外部、按 Escape、滚动或窗口 resize 时自动关闭
+ * 6. 开窗保护期：刚弹出的极短时间内不响应 scroll / blur 关闭，避免虚拟列表重新测量
+ *    （目录树刷新时 Virtuoso 会调整滚动位置）或焦点抖动把菜单「秒关」
  */
 export const ContextMenu: React.FC<ContextMenuProps> = ({
   x,
@@ -83,11 +85,17 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   testId = 'context-menu',
 }) => {
   const menuRef = useRef<HTMLDivElement | null>(null);
+  /** 打开时刻：保护期内忽略 scroll / blur，避免被宿主列表的布局调整误伤 */
+  const openedAtRef = useRef<number>(Date.now());
   const [coords, setCoords] = useState<{ top: number; left: number; isReady: boolean }>({
     top: y,
     left: x,
     isReady: false,
   });
+
+  useEffect(() => {
+    openedAtRef.current = Date.now();
+  }, [x, y]);
 
   // 测量真实 DOM 尺寸并自适应视口边界
   useLayoutEffect(() => {
@@ -131,6 +139,10 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
   // 全局交互与关闭监听
   useEffect(() => {
+    /** 刚打开的保护期：期间忽略 scroll / blur（目录树刷新会让 Virtuoso 重新测量并滚动） */
+    const GUARD_MS = 500;
+    const withinGuard = () => Date.now() - openedAtRef.current < GUARD_MS;
+
     const handlePointerDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
@@ -149,24 +161,28 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
       if (menuRef.current && menuRef.current.contains(e.target as Node)) {
         return;
       }
+      if (withinGuard()) return;
       onClose();
     };
 
     const handleBlur = () => {
+      if (withinGuard()) return;
       onClose();
     };
+
+    const handleResize = () => onClose();
 
     document.addEventListener('mousedown', handlePointerDown);
     document.addEventListener('keydown', handleKeyDown, true);
     window.addEventListener('scroll', handleScroll, true);
-    window.addEventListener('resize', onClose);
+    window.addEventListener('resize', handleResize);
     window.addEventListener('blur', handleBlur);
 
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('scroll', handleScroll, true);
-      window.removeEventListener('resize', onClose);
+      window.removeEventListener('resize', handleResize);
       window.removeEventListener('blur', handleBlur);
     };
   }, [onClose]);
