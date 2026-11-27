@@ -54,6 +54,13 @@ import {
     type CorruptionPhase,
     type ModelOutputDiagnostics,
 } from "@/services/ModelOutputGuard.js";
+import {
+    buildClaimCorrectionDirective,
+    buildClaimDisclosure,
+    evaluateCompletionClaims,
+    toToolEvidence,
+    type ToolEvidence,
+} from "@/services/CompletionClaimGuard.js";
 
 const getTS = () => getBeijingLogTimePrefix();
 
@@ -77,6 +84,13 @@ const CORRUPTION_RECOVERY_ROUNDS = 1;
 
 /** 模型输出异常重试的退避基数（毫秒），随重试次数线性放大。 */
 const CORRUPTION_RETRY_BASE_DELAY_MS = 600;
+
+/**
+ * 完成声明核验未通过时，允许注入纠正指令后重新作答的轮数。
+ * 只给一次机会：纠正后仍缺凭证说明模型确实没做，直接附加系统核验提示，
+ * 避免无止境的「再答一次」消耗 token。
+ */
+const CLAIM_GUARD_RECOVERY_ROUNDS = 1;
 
 function resolveHost(baseURL?: string): string | undefined {
     if (!baseURL) return undefined;
@@ -400,6 +414,14 @@ export interface AgentTurnEngineOptions {
     stepPath?: string;
     /** 执行该轮次的 worker 标识（透传给工具上下文）。 */
     workerId?: string;
+    /**
+     * 工具执行凭证容器（完成声明校验用）。
+     * 外层 Agent 循环会多次调用 runTurns，传入同一个数组即可跨轮次累积凭证；
+     * 缺省时由本次调用内部创建，仅覆盖本次 runTurns。
+     */
+    claimEvidence?: ToolEvidence[];
+    /** 关闭完成声明凭证校验（默认开启）。 */
+    disableClaimGuard?: boolean;
 }
 
 export interface AgentTurnEngineResult {
@@ -485,6 +507,14 @@ export class AgentTurnEngine {
             stepPath,
             workerId,
         } = options;
+
+        /**
+         * 完成声明凭证：外层循环复用同一数组可跨 runTurns 累积，
+         * 保证「上一轮做、这一轮汇报」的合法声明不会被误判成幻觉。
+         */
+        const claimEvidence: ToolEvidence[] = options.claimEvidence ?? [];
+        const claimGuardEnabled = options.disableClaimGuard !== true;
+        let claimGuardRounds = 0;
 
         let activeHistory = options.resumeRequest
             ? [...options.resumeRequest.payload.messages]
@@ -1556,6 +1586,15 @@ export class AgentTurnEngine {
                             console.log(`${getTS()} [AgentTurnEngine] [DEBUG] Tool ${tc.function.name} result success.`);
                         }
 
+                        // 完成声明校验的可信凭证来源：只有真实执行成功的调用才算数，
+                        // 工具以 status/error 形式返回失败时同样记为失败。
+                        claimEvidence.push(toToolEvidence(
+                            tc.function.name,
+                            !(result && typeof result === "object"
+                                && ((result as any).status === "error" || (result as any).error)),
+                            parsedArgs as Record<string, unknown>,
+                        ));
+
                         // 文件编辑工具执行后附上文件路径，供前端编辑器感知刷新：
                         // - filePath: Agent 传入的相对路径（原样）
                         // - absolutePath: 基于工作区 root 解析的绝对路径
@@ -1612,6 +1651,11 @@ export class AgentTurnEngine {
                             `${getTS()} [AgentTurnEngine] Tool execution error (${tc.function.name}):`,
                             toolErr
                         );
+                        claimEvidence.push(toToolEvidence(
+                            tc.function.name,
+                            false,
+                            parsedArgs as Record<string, unknown>,
+                        ));
                         // 工具执行错误属于可恢复错误，不应以 type:"error" 发送，
                         // 否则前端/Electron bridge 会将其视为致命错误终止整个会话。
                         // 改用 annotation 事件，模型可在下一轮根据错误信息修正参数重试。
@@ -1693,6 +1737,52 @@ export class AgentTurnEngine {
                             assistantMsg.content = fallbackReply;
                             emit({ type: "text", content: fallbackReply, turn: turns });
                         }
+                    }
+                }
+
+                // 交付前确定性核验：完成声明必须对得上本轮真实的工具凭证。
+                // 这是「说了做了、其实没做」这类幻觉的唯一可靠防线（提示词只能降低概率）。
+                if (claimGuardEnabled && assistantMsg.content) {
+                    const claimIssues = evaluateCompletionClaims(assistantMsg.content, claimEvidence);
+                    if (claimIssues.length > 0) {
+                        if (!finalTurnRequested && claimGuardRounds < CLAIM_GUARD_RECOVERY_ROUNDS) {
+                            claimGuardRounds++;
+                            console.warn(
+                                `${getTS()} [AgentTurnEngine] 完成声明缺少工具凭证，注入纠正指令后重新作答：`,
+                                claimIssues.map((issue) => issue.message).join(' | '),
+                            );
+                            emit({
+                                type: "notice",
+                                code: "COMPLETION_CLAIM_UNVERIFIED",
+                                level: "warning",
+                                content: '检测到完成声明缺少工具执行凭证，已要求回读核实后再作答。',
+                                params: { issues: claimIssues },
+                            });
+                            emit({
+                                type: "text",
+                                content: '\n\n_[系统核验：上一条答复的完成声明缺少工具凭证，正在回读核实并重新作答...]_ \n\n',
+                                turn: turns,
+                            });
+                            // 模型必须看到自己刚才的草稿，才能在纠正轮里针对性核实
+                            activeHistory.push(assistantMsg);
+                            activeHistory.push(
+                                AIProviderFactory.buildMidConversationDirective(
+                                    options.provider,
+                                    buildClaimCorrectionDirective(claimIssues),
+                                ),
+                            );
+                            activeHistory = await prepareMessages(activeHistory);
+                            continue;
+                        }
+
+                        // 纠正轮仍未通过：不静默放行，把核验结论附在答复末尾供用户判断
+                        const disclosure = buildClaimDisclosure(claimIssues);
+                        assistantMsg.content = `${assistantMsg.content}${disclosure}`;
+                        emit({ type: "text", content: disclosure, turn: turns });
+                        console.warn(
+                            `${getTS()} [AgentTurnEngine] 完成声明核验未通过且纠正轮无改善，已附加系统核验提示：`,
+                            claimIssues.map((issue) => issue.message).join(' | '),
+                        );
                     }
                 }
 

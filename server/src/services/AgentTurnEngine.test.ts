@@ -1962,3 +1962,167 @@ describe("AgentTurnEngine request recovery", () => {
         expect(assistant.tool_calls[0].function.arguments).toContain("\uFFFD");
     });
 });
+
+describe("AgentTurnEngine completion claim guard", () => {
+    let root: string;
+
+    beforeEach(async () => {
+        root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-turn-claim-"));
+    });
+
+    afterEach(async () => {
+        vi.restoreAllMocks();
+        await LLMResponseLog.getInstance().flush();
+        await fs.rm(root, { recursive: true, force: true });
+    });
+
+    it("re-asks the model when a completion claim has no tool evidence", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const payloads: Record<string, any>[] = [];
+        const create = vi.fn().mockImplementation(async (payload: Record<string, any>) => {
+            payloads.push(payload);
+            const isFirst = payloads.length === 1;
+            return (async function* () {
+                yield {
+                    choices: [{
+                        delta: {
+                            content: isFirst
+                                ? "本次任务已经完成：`gitcode访问令牌.txt` 已加入 `.gitignore`。"
+                                : "未完成：`.gitignore` 中并未包含 `gitcode访问令牌.txt`。",
+                        },
+                    }],
+                };
+            })();
+        });
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "claim-user",
+            currentTraceId: "trace-claim",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "gitcode访问令牌.txt 添加到 gitignore" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(create).toHaveBeenCalledTimes(2);
+        expect(payloads[1].messages).toContainEqual(expect.objectContaining({
+            content: expect.stringContaining("系统核验未通过"),
+        }));
+        expect(result.finalAssistantContent).toContain("未完成");
+        expect(result.finalAssistantContent).not.toContain("系统核验提示");
+    });
+
+    it("does not re-ask when the claim is backed by a successful write", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const executeTool = vi.fn().mockResolvedValue({ status: "success" });
+        const create = vi.fn()
+            .mockImplementationOnce(async () => (async function* () {
+                yield {
+                    choices: [{
+                        delta: {
+                            tool_calls: [{
+                                index: 0,
+                                id: "call-write",
+                                type: "function",
+                                function: {
+                                    name: "write_file",
+                                    arguments: JSON.stringify({
+                                        path: ".gitignore",
+                                        content: "gitcode访问令牌.txt\n",
+                                    }),
+                                },
+                            }],
+                        },
+                    }],
+                };
+            })())
+            .mockImplementationOnce(async () => (async function* () {
+                yield {
+                    choices: [{
+                        delta: { content: "已把 `gitcode访问令牌.txt` 加入 `.gitignore`。" },
+                    }],
+                };
+            })());
+        const agentService = {
+            toolManager: { executeTool },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [{ type: "function", function: { name: "write_file", parameters: {} } }],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "claim-user",
+            currentTraceId: "trace-claim-ok",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "gitcode访问令牌.txt 添加到 gitignore" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        expect(create).toHaveBeenCalledTimes(2);
+        expect(result.finalAssistantContent).toContain("已把");
+    });
+
+    it("appends a system disclosure when the model insists after the corrective round", async () => {
+        vi.spyOn(TodoService, "getTodos").mockResolvedValue([]);
+        const create = vi.fn().mockImplementation(async () => (async function* () {
+            yield {
+                choices: [{
+                    delta: { content: "本次任务已经完成：`gitcode访问令牌.txt` 已加入 `.gitignore`。" },
+                }],
+            };
+        })());
+        const agentService = {
+            toolManager: { executeTool: vi.fn() },
+            updateSessionHistory: vi.fn(),
+        } as unknown as AgentService;
+
+        const result = await AgentTurnEngine.runTurns({
+            client: { chat: { completions: { create } } },
+            finalModelId: "test-model",
+            activeHistory: [],
+            toolsMetadata: [],
+            thinkingOptions: {},
+            agentService,
+            root,
+            userId: "claim-user",
+            currentTraceId: "trace-claim-stubborn",
+            optimizedMessages: [],
+            lastUserMsgRecord: { role: "user", content: "gitcode访问令牌.txt 添加到 gitignore" },
+            prepareMessages: async (messages) => messages,
+            emit: vi.fn(),
+            startTimeStamp: Date.now(),
+            skipJournal: true,
+            skipPersist: true,
+            skipTelemetry: true,
+        });
+
+        // 一次原始答复 + 一次纠正回合，之后不再无限重试
+        expect(create).toHaveBeenCalledTimes(2);
+        expect(result.finalAssistantContent).toContain("系统核验提示");
+    });
+});

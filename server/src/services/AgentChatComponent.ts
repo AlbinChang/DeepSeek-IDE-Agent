@@ -8,6 +8,7 @@ import { TelemetryService } from "@/services/TelemetryService.js";
 import { AgentTurnEngine, type PrepareMessagesOptions } from "@/services/AgentTurnEngine.js";
 import { EvaluationAgentService } from "@/services/EvaluationAgentService.js";
 import { requiresUserInputOrDecision } from "@/services/UserInputIntent.js";
+import type { ToolEvidence } from "@/services/CompletionClaimGuard.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
 import { FileIO } from "@/utils/FileIO.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
@@ -298,6 +299,9 @@ export class AgentChatComponent {
             let evaluatorRepairConfirmationRetries = 0;
             let mainAgentFinalReply = "";
             let totalUsage: TokenUsage | null = null;
+            // 整个用户指令周期共用同一份工具执行凭证（外层循环会多次调用 runTurns），
+            // 保证完成声明可以跨轮次核对，不会把「上一轮真的做了」误判成幻觉。
+            const claimEvidence: ToolEvidence[] = [];
             let pendingResumeRequest = resumeRequest?.metadata.agentStage === "主Agent"
                 ? resumeRequest
                 : undefined;
@@ -450,6 +454,7 @@ export class AgentChatComponent {
                         pinnedUserMessage: currentPinnedUserMessage,
                     },
                     resumeRequest: initialResumeRequest,
+                    claimEvidence,
                 });
 
                 activeHistory = turnResult.activeHistory;

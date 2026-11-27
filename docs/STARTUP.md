@@ -201,6 +201,7 @@ web-ide-agent/
 │       ├── services/
 │       │   ├── AgentService.ts        # 工具注册 & 生命周期
 │       │   ├── AgentTurnEngine.ts     # AI 流式调用 & 工具执行
+│       │   ├── CompletionClaimGuard.ts # 完成声明凭证核验（拦截「说了做了其实没做」）
 │       │   └── AgentChatComponent.ts  # 对话循环
 │       └── config/
 │           ├── main-agent.json        # 主 Agent 提示词（仅常驻核心契约）

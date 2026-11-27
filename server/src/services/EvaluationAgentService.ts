@@ -249,6 +249,11 @@ export class EvaluationAgentService {
                 totalSteps: 0,
                 /** 评估Agent对话旅程独立存放，不污染主Agent持久化历史 */
                 skipPersist: true,
+                /**
+                 * 评估报告由本服务落盘（`.evaluate/` 对 Agent 工具写保护），
+                 * 评估 Agent 无法也无需用工具证明「报告已写入」，因此关闭完成声明凭证校验。
+                 */
+                disableClaimGuard: true,
                 provider: providerConfig,
                 agentStage: "评估Agent",
                 allowedToolNames,

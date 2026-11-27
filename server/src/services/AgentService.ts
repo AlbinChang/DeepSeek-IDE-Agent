@@ -1290,7 +1290,8 @@ export class AgentService extends EventEmitter {
             '1. 所有行为与工具调用必须服务【当前意图】，严防意图漂移；【当前意图】模糊或涉及连续操作时参考 assistant 消息补全上下文，但不要被旧任务带偏。',
             '2. `list_todos` 是纯只读真值（SSOT），无必填参数，传 `{}` 即取全量；新建任务用 `append_todo`，改状态用 `update_todo`。状态/ID 不确定、历史被裁剪或用户询问时先 `list_todos`；与【当前意图】冲突时以【当前意图】为准。仅顶层 Agent 可操作。',
             '3. **【终态门禁】最终答复前**：调 `list_todos` → 把 `not-started`/`in-progress` 项置为 `completed`/`failed` → 全部终态才可答复；仍有可推进任务时禁止强行终态。',
-            '4. **【记忆反思】终态确认后**：失败模式→`append_never_mistake_rule`；用户偏好或项目知识→`upsert_user_preference`（项目知识 type=`project`、source=`inferred`）；冲突→先取旧 ID 再用 `conflictIds` 淘汰。仅记录复用≥2次/曾因此走弯路/有指导价值/用户要求记住者。'
+            '4. **【完成声明凭证】每条「已完成/已加入/已修改/已提交」都必须有本轮真实工具调用支撑**；用户点名的目标（文件名、条目名、键名）必须先用 `read_file`/`grep` 回读确认它确实存在且内容正确，才可宣称完成。没做或失败就写「未完成：<原因>」，禁止用完成措辞掩盖。系统会对最终答复做凭证核验，无凭证的声明会被退回重答并在答复末尾附加核验提示。',
+            '5. **【记忆反思】终态确认后**：失败模式→`append_never_mistake_rule`；用户偏好或项目知识→`upsert_user_preference`（项目知识 type=`project`、source=`inferred`）；冲突→先取旧 ID 再用 `conflictIds` 淘汰。仅记录复用≥2次/曾因此走弯路/有指导价值/用户要求记住者。'
         ].join('\n');
 
         // MCP 工具系统提示词（动态：随 workspace 的 .mcp/ 配置变化）
