@@ -3,12 +3,54 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentService } from "@/services/AgentService.js";
-import { AgentTurnEngine } from "@/services/AgentTurnEngine.js";
+import { AgentTurnEngine, buildToolArgumentErrorMessage } from "@/services/AgentTurnEngine.js";
 import { LLMRequestJournal } from "@/services/LLMRequestJournal.js";
 import { LLMResponseLog } from "@/services/LLMResponseLog.js";
 import { TelemetryService } from "@/services/TelemetryService.js";
 import { TodoService } from "@/services/TodoService.js";
 import { config as globalConfig } from "@/config/index.js";
+
+describe("buildToolArgumentErrorMessage", () => {
+    it("tells the model to chunk write_file when finish_reason=length truncated the arguments", () => {
+        const { message, looksTruncated } = buildToolArgumentErrorMessage(
+            "write_file",
+            12000,
+            '{"path":"out.csv","content":"id,severity',
+            "length",
+            new SyntaxError("Unexpected end of JSON input"),
+        );
+        expect(looksTruncated).toBe(true);
+        expect(message).toContain("长度上限");
+        expect(message).toContain("write_file");
+        expect(message).toContain("insert_in_file");
+        expect(message).toContain("≤100 行/8KB");
+    });
+
+    it("treats a long unclosed argument blob as truncated even without finish_reason=length", () => {
+        const { message, looksTruncated } = buildToolArgumentErrorMessage(
+            "write_file",
+            6000,
+            '{"path":"out.csv","content":"very long partial',
+            null,
+            new SyntaxError("Unexpected end of JSON input"),
+        );
+        expect(looksTruncated).toBe(true);
+        expect(message).toContain("参数被截断");
+    });
+
+    it("keeps the generic JSON error for short malformed arguments", () => {
+        const { message, looksTruncated } = buildToolArgumentErrorMessage(
+            "append_todo",
+            40,
+            '{"todos":',
+            "stop",
+            new SyntaxError("Unexpected end of JSON input"),
+        );
+        expect(looksTruncated).toBe(false);
+        expect(message).toContain("不是合法 JSON");
+        expect(message).toContain("缩小单次参数体积");
+    });
+});
 
 describe("AgentTurnEngine request recovery", () => {
     let root: string;

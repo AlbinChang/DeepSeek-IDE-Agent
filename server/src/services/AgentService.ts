@@ -345,12 +345,12 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering write_file...');
         this.toolManager.registerTool({
             name: 'write_file',
-            description: '创建或完整覆写文件；局部修改用 replace_in_file/insert_in_file，多处替换用 replace_all_in_file。',
+            description: '创建或完整覆写文件；局部修改用 replace_in_file/insert_in_file，多处替换用 replace_all_in_file。单次 content 建议 ≤100 行/8KB，大文件先 write_file 再 insert_in_file 追加。',
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '文件相对路径' },
-                    content: { type: 'string', description: '完整文本内容' },
+                    content: { type: 'string', description: '完整文本内容；建议 ≤100 行/8KB，超出请分块写入（write_file + insert_in_file 追加）' },
                     encoding: { type: 'string', description: '写入编码（如 GBK、UTF-8），仅新建文件生效' }
                 },
                 required: ['path', 'content']

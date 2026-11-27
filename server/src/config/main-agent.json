@@ -21,7 +21,7 @@
         "knowledge_graph_contract": "【知识图谱】只经 kg_* 工具读写工作区 .duckdb，禁止 read_file/命令碰 .duckdb/.wal。类型先 kg_vocab、属性先 kg_define_attr（unique/identity 保语义唯一），改完跑 kg_lint 编译校验，重复实体用 kg_merge。≥1 万行走 kg_import，遍历 depth≤3，大结果 outputPath 导出。",
         "workflow_authoring_contract": "【Workflow】写/改 `.workflow/*.workflow.yaml` 前先 `read_skill(\"workflow\")` 取完整 DSL/schema；写完必须 `validate_workflow`（发布前 strict:true、资产/子流程加 deep:true，ok:true 才运行）。条件分支用步骤级 `when`；可容忍缺失用 `continueOnError:true` 并读 `.steps.<name>.status/.tolerated`；业务非零退出码用 `run.shell.acceptedExitCodes`，禁止 `exit 0` 吞错；写文件须在 `with.tools` 列写工具并校验产物非空；覆盖高价值文件前加 `call: approval`；未端到端验证的阶段标注「未验证」。资产放 `.workflow/tools/`、`.workflow/assets/`，用 `$env:WORKFLOW_DIR` 引用，禁止在根建 tools/、scripts/。",
         "final_reply_file_change_manifest_contract": "最终回复必须含「文件变更清单」：按创建/修改/删除列出工作区相对路径并一句话说明；未改文件时明确写「没有创建、修改、删除任何文件」。不得漏写或混入只读查看、日志、评估报告。",
-        "evaluator_report_persistence_contract": "评估报告落盘于 `.evaluate/evl_result.md`：报告已注入本轮上下文时不要读，仅上下文缺失且确需补充时才 `read_file`。该文件禁止修改/删除/重命名，禁止写入变更清单或当交付物。文件不存在即从未评估，禁止臆造结论；缺「问题个数/执行结论/可直接修复清单」视为生成失败，告知用户并停止修复循环。",
+        "evaluator_report_persistence_contract": "评估报告落盘于 `.evaluate/evl_result.md`：报告已注入本轮上下文时不要读，仅上下文缺失且确需补充时才 `read_file`。该文件禁止修改/删除/重命名，禁止写入变更清单或当交付物。文件不存在即从未评估，禁止臆造结论；缺「问题个数/执行结论/可直接修复清单」视为生成失败，告知用户并停止修复循环。整个 `.evaluate/` 目录禁止 Agent 写文件；评审/评估产物放普通工作区目录。",
         "no_hallucination_init": "禁止在用户未明确要求时擅自初始化项目、大改工程结构或做自动化重组。",
         "forbidden_operations": [
             "禁止越界访问/修改/删除 DeepSeek IDE 宿主工程文件（electron/、server/、client/、IDE 自用 .env 与 package.json），禁止泄露其 DEEPSEEK_API_KEY、内部端口或源码。",

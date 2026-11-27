@@ -153,6 +153,22 @@ describe('FileTools.readFile', () => {
     });
 });
 
+describe('FileTools.writeFile hard limits', () => {
+    it('rejects content above the 5M-character limit and asks for chunked writes', async () => {
+        const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'deepseek-ide-agent-write-file-'));
+        try {
+            const oversized = 'a'.repeat(5 * 1024 * 1024 + 1);
+            const result = await FileTools.writeFile(workspaceRoot, 'oversized.txt', oversized);
+            expect(result.status).toBe('error');
+            expect(result.error).toBe('CONTENT_TOO_LARGE');
+            expect(result.message).toContain('5M');
+            expect(result.message).toContain('拆分');
+        } finally {
+            await fs.rm(workspaceRoot, { recursive: true, force: true });
+        }
+    });
+});
+
 describe('FileTools.editFileByReplace & EOL Normalization', () => {
     const tempDirs: string[] = [];
 

@@ -427,6 +427,31 @@ export interface AgentTurnEngineResult {
 // 引擎主体
 // ---------------------------------------------------------------------------
 
+/**
+ * 构造「工具参数 JSON 非法/被截断」回传给模型的错误信息。
+ * finish_reason=length 或参数明显未闭合时，明确提示是输出长度上限导致，并给出分块写入方案，
+ * 避免模型把问题误判成工具自身的长度限制而反复重试同一段内容。
+ */
+export function buildToolArgumentErrorMessage(
+    toolName: string,
+    argumentsLength: number,
+    argumentsText: string,
+    finishReason: string | null,
+    parseError: unknown,
+): { message: string; looksTruncated: boolean } {
+    const looksTruncated = finishReason === "length"
+        || (argumentsLength >= 4096 && !/[}\]]\s*$/.test(argumentsText));
+    const splitHint = toolName === "write_file"
+        || toolName === "insert_in_file"
+        || toolName === "replace_in_file"
+        ? '请拆成多次较小调用：先用 write_file 写表头+前 N 行，再用 insert_in_file（startLine=当前总行数+1）追加后续块；单次 content 建议 ≤100 行/8KB，CSV 中的换行和双引号必须正确转义，或改用脚本生成后再写。'
+        : '请缩小单次参数体积后重新调用，确保 JSON 完整闭合。';
+    const message = looksTruncated
+        ? `模型输出达到长度上限（finish_reason=${finishReason ?? 'unknown'}），工具 ${toolName} 的参数被截断，已跳过执行（argumentsLength=${argumentsLength}）。${splitHint}`
+        : `工具参数不是合法 JSON（已跳过执行）：${String(parseError)}。${splitHint}`;
+    return { message, looksTruncated };
+}
+
 export class AgentTurnEngine {
     /**
      * 执行 Agent 内层轮次循环：
@@ -1467,17 +1492,24 @@ export class AgentTurnEngine {
                         } catch (e: any) {
                             // 参数被截断/污染时不要退化成空参数执行工具（可能造成误操作），
                             // 把错误回传给模型，让它在下一轮重新发起合法调用。
-                            const errMessage = `工具参数不是合法 JSON（已跳过执行）：${String(e?.message || e)}`;
                             const originalArgumentsLength = typeof tc.function.arguments === "string"
                                 ? tc.function.arguments.length
                                 : 0;
+                            const { message: errMessage, looksTruncated } = buildToolArgumentErrorMessage(
+                                tc.function.name,
+                                originalArgumentsLength,
+                                String(tc.function.arguments || ""),
+                                finishReason,
+                                e?.message || e,
+                            );
                             // 被截断/污染的 arguments 不能原样回放：严格网关会校验
                             // tool_calls[].function.arguments 必须是合法 JSON，否则整个请求
                             // 返回 400（如「请求格式不合法」）。收敛为 "{}"：工具不会执行，
                             // 下一轮由模型根据 tool 错误信息重新发起合法调用。
                             tc.function.arguments = "{}";
                             console.error(
-                                `${getTS()} [AgentTurnEngine] JSON parse error for tool ${tc.function.name}. argumentsLength=${originalArgumentsLength}`
+                                `${getTS()} [AgentTurnEngine] JSON parse error for tool ${tc.function.name}.`
+                                + ` argumentsLength=${originalArgumentsLength} finishReason=${finishReason ?? 'unknown'} looksTruncated=${looksTruncated}`
                             );
                             emit({
                                 type: "annotation",

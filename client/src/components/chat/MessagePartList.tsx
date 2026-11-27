@@ -142,6 +142,12 @@ export const MessagePartView = React.memo(({
         const res = part.params?.result;
         const isErr = !!part.params?.error || res?.status === 'error';
         const toolName = part.params?.toolName;
+        const rawError = typeof part.params?.error === 'string'
+            ? part.params.error
+            : (isErr && res && typeof res === 'object'
+                ? String(res.message || res.error || '')
+                : '');
+        const errorText = rawError.length > 600 ? `${rawError.slice(0, 600)}…` : rawError;
         return (
             <div className={`my-2 overflow-hidden rounded border ${isErr ? 'border-red-500/20 bg-red-500/5' : 'border-white/10 bg-emerald-500/5'}`}>
                 <div className={`flex items-center gap-2 px-3 py-1 border-b border-white/5 ${isErr ? 'bg-red-500/10' : 'bg-emerald-500/10'}`}>
@@ -152,6 +158,11 @@ export const MessagePartView = React.memo(({
                         {isErr ? '执行失败' : '执行成功'}: {toolName}
                     </span>
                 </div>
+                {isErr && errorText && (
+                    <div className='px-3 py-1.5 text-[7.5pt] leading-snug text-red-200/70 whitespace-pre-wrap break-words'>
+                        {errorText}
+                    </div>
+                )}
             </div>
         );
     }
