@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { SystemTools, buildFailureHints, terminatePosixCommandGroup } from '@/tools/SystemTools.js';
+import { SystemTools, buildFailureHints, findDestructiveCommand, terminatePosixCommandGroup } from '@/tools/SystemTools.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 
 describe('SystemTools failure hints', () => {
@@ -139,5 +139,62 @@ describe('SystemTools.executeCmdCommand validation', () => {
         await expect(SystemTools.executeCmdCommand('cmd /c "echo hello"', process.cwd(), undefined, 30000, null)).rejects.toThrow(
             'command 中禁止再嵌套 shell 启动器'
         );
+    });
+
+    it('blocks real disk formatting before spawning the shell', async () => {
+        await expect(SystemTools.executeCmdCommand('format D:', process.cwd(), undefined, 30000, null)).rejects.toThrow(
+            '稳定性拦截'
+        );
+    });
+});
+
+describe('SystemTools destructive command detection', () => {
+    it('does not mistake git --pretty=format: for the disk format command', () => {
+        // 生产日志回归：cmd/powershell 都被误拦截，模型只能反复猜关键词
+        expect(findDestructiveCommand(
+            'git log --since=2026-09-27 --name-only --pretty=format: > .command/output.txt'
+        )).toBeNull();
+        expect(findDestructiveCommand('git log --pretty=format:"%h %s" -5')).toBeNull();
+        expect(findDestructiveCommand(
+            'git log --name-only --since=2026-09-27 --pretty=format: | Select-Object -First 5'
+        )).toBeNull();
+    });
+
+    it('ignores the word format/shutdown in comments, strings and arguments', () => {
+        expect(findDestructiveCommand(
+            '# Parse report files to check the format\nGet-Content "report.txt" -TotalCount 5'
+        )).toBeNull();
+        expect(findDestructiveCommand('git commit -m "format the code; shutdown handling"')).toBeNull();
+        expect(findDestructiveCommand('dotnet format')).toBeNull();
+        expect(findDestructiveCommand('Get-ChildItem | Format-Table Name, Length')).toBeNull();
+    });
+
+    it('still blocks real disk formatting', () => {
+        expect(findDestructiveCommand('format D:')).toBe('format（磁盘格式化）');
+        expect(findDestructiveCommand('Format /q C:')).toBe('format（磁盘格式化）');
+        expect(findDestructiveCommand('C:\\Windows\\System32\\format.com D:')).toBe('format（磁盘格式化）');
+        expect(findDestructiveCommand('cmd /c "format D:"')).toBe('format（磁盘格式化）');
+    });
+
+    it('still blocks destructive commands', () => {
+        expect(findDestructiveCommand('rm -rf /')).not.toBeNull();
+        expect(findDestructiveCommand('sudo rm -rf /etc')).not.toBeNull();
+        expect(findDestructiveCommand('mkfs.ext4 /dev/sdb1')).not.toBeNull();
+        expect(findDestructiveCommand('dd if=/dev/zero of=/dev/sda')).not.toBeNull();
+        expect(findDestructiveCommand('shutdown /s /t 0')).not.toBeNull();
+        expect(findDestructiveCommand('net user attacker P@ss /add')).not.toBeNull();
+        expect(findDestructiveCommand('reg add HKLM\\Software\\X /v Y /d 1')).not.toBeNull();
+        expect(findDestructiveCommand('icacls C:\\Windows /grant Everyone:F')).not.toBeNull();
+        expect(findDestructiveCommand(':(){ :|:& };:')).not.toBeNull();
+        expect(findDestructiveCommand('echo x > /dev/sda')).not.toBeNull();
+        expect(findDestructiveCommand('bash -c "rm -rf /"')).not.toBeNull();
+    });
+
+    it('allows normal cleanup and safe redirections', () => {
+        expect(findDestructiveCommand('rm -rf ./build')).toBeNull();
+        expect(findDestructiveCommand('rm -rf node_modules')).toBeNull();
+        expect(findDestructiveCommand('git log > /dev/null 2>&1')).toBeNull();
+        expect(findDestructiveCommand('net use Z: \\\\server\\share')).toBeNull();
+        expect(findDestructiveCommand('reg query HKCU\\Software')).toBeNull();
     });
 });

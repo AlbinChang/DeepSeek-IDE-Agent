@@ -377,6 +377,8 @@ do:
 
 ## 5. Agent 工具
 
+编写/修改/排障 workflow 前，先调用 `read_skill("workflow")`：该技能随应用分发（打包后位于 `resources/config/skills/workflow`），内含完整 DSL/schema、步骤字段与校验诊断码，生产环境无需查找其他文档。
+
 聊天 Agent 可直接使用：
 
 | 工具 | 作用 |
@@ -404,7 +406,7 @@ validate_workflow { name: "feature-delivery", strict: true, deep: true }
 | `strict` | `true` 时 warning 也算不通过（发布门禁用） |
 | `deep` | 额外的链接检查：`.workflow/**` 资产是否存在、子工作流是否存在 |
 | `codes` | 只返回指定诊断码，便于聚焦某类问题 |
-| `maxIssues` | 返回条数上限（默认 100，最大 500） |
+| `maxIssues` | 返回条数上限（默认 20，最大 500） |
 
 返回结构：`{ validation: { ok, issues, infos, errorCount, warningCount, infoCount }, summary }`。`issues` 只含 error/warning，info 单独放在 `infos`，不参与 `ok`。
 

@@ -62,6 +62,233 @@ export function buildFailureHints(command: string, stdout: string, stderr: strin
     return `\n[提示] ${hints.slice(0, 2).join(' ')}`;
 }
 
+// ============================================================================
+// 破坏性命令识别（系统稳定性保护）
+//
+// 只在「语句起始位置 + 命令名」上判定，绝不扫描参数、注释、引号内的普通文本。
+// 真实故障（2026-05/06 生产日志）：`git log --pretty=format:`、注释里的
+// "check the format"、提交信息里的 "shutdown" 都被旧的全文关键词匹配误拦截。
+// ============================================================================
+
+interface CommandTokens {
+    /** 小写命令名（已去掉目录与 .exe/.com 等后缀） */
+    head: string;
+    /** 命令参数（已去掉外层引号） */
+    args: string[];
+}
+
+/** shell 语句分隔符：cmd / PowerShell / bash 通用 */
+const STATEMENT_SEPARATORS = new Set([';', '&', '|', '\n', '\r']);
+
+/** 出现在真正命令前的包装器：它们不改变后随命令的破坏性 */
+const COMMAND_WRAPPERS = new Set([
+    'sudo', 'doas', 'nohup', 'exec', 'command', 'env', 'time', 'start',
+    'start-process', 'invoke-expression', 'xargs',
+    'powershell', 'pwsh', 'cmd', 'bash', 'sh', 'zsh',
+]);
+
+/** 去掉目录、扩展名并转小写，得到可比较的命令名 */
+function toCommandName(token: string): string {
+    const base = token.replace(/^.*[\\/]/, '').toLowerCase();
+    return base.replace(/\.(?:exe|com|bat|cmd|ps1|sh)$/, '');
+}
+
+/** 包装器里带值选项（如 sudo -u root）：跳过选项本身与它的值。
+ *  注意不能加 i 标志：`-C` 是带值选项，而 `-c`（bash -c）后面跟的正是要检查的命令本身。 */
+const WRAPPER_OPTIONS_WITH_VALUE = /^-(?:u|g|p|U|C|D|h|r|t|user|group|prompt|host|role|type)$/;
+
+/** 去掉整体包裹的一对引号（`cmd /c "format D:"` 的内部命令需要按裸命令继续解析） */
+function unquoteStatement(statement: string): string {
+    const trimmed = statement.trim();
+    if (trimmed.length >= 2) {
+        const first = trimmed[0];
+        const last = trimmed[trimmed.length - 1];
+        if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+            return trimmed.slice(1, -1);
+        }
+    }
+    return trimmed;
+}
+
+/** 剥离 sudo/env/cmd /c/powershell -Command 等包装器，返回真正执行的命令文本 */
+function stripCommandWrappers(statement: string): string {
+    let rest = statement.trim();
+    for (;;) {
+        const wrapper = rest.match(/^(\S+)\s+/);
+        if (!wrapper || !COMMAND_WRAPPERS.has(toCommandName(wrapper[1]))) break;
+        rest = rest.slice(wrapper[0].length).trim();
+        // 跳过包装器自身的选项与 FOO=bar 赋值（如 cmd /c、sudo -E）
+        for (;;) {
+            const option = rest.match(/^(\S+)\s+/);
+            if (!option) break;
+            const token = option[1];
+            const isAssignment = /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+            const isSwitch = /^-{1,2}/.test(token) || /^\/[A-Za-z]+$/.test(token);
+            if (!isAssignment && !isSwitch) break;
+            rest = rest.slice(option[0].length).trim();
+            if (WRAPPER_OPTIONS_WITH_VALUE.test(token)) {
+                const value = rest.match(/^\S+\s+/);
+                if (value) rest = rest.slice(value[0].length).trim();
+            }
+        }
+        // `cmd /c` 之后仍可能是另一层包装器（如 cmd /c powershell -Command ...）
+    }
+    return rest;
+}
+
+/** 按 shell 语句切分命令；引号内的分隔符不切分（避免提交信息里的 "a; b" 被当成两条命令） */
+function splitShellStatements(command: string): string[] {
+    const statements: string[] = [];
+    let current = '';
+    let quote: '"' | "'" | null = null;
+    for (const ch of command) {
+        if (quote) {
+            current += ch;
+            if (ch === quote) quote = null;
+            continue;
+        }
+        if (ch === '"' || ch === "'") {
+            quote = ch;
+            current += ch;
+            continue;
+        }
+        if (STATEMENT_SEPARATORS.has(ch)) {
+            statements.push(current);
+            current = '';
+            continue;
+        }
+        current += ch;
+    }
+    statements.push(current);
+    return statements;
+}
+
+/** 词法切分：保留引号内空格，去掉成对引号 */
+function tokenizeCommand(text: string): string[] {
+    const tokens: string[] = [];
+    let current = '';
+    let hasToken = false;
+    let quote: '"' | "'" | null = null;
+    for (const ch of text) {
+        if (quote) {
+            if (ch === quote) quote = null;
+            else current += ch;
+            continue;
+        }
+        if (ch === '"' || ch === "'") {
+            quote = ch;
+            hasToken = true;
+            continue;
+        }
+        if (/\s/.test(ch)) {
+            if (hasToken) {
+                tokens.push(current);
+                current = '';
+                hasToken = false;
+            }
+            continue;
+        }
+        current += ch;
+        hasToken = true;
+    }
+    if (hasToken) tokens.push(current);
+    return tokens;
+}
+
+function toCommandTokens(statement: string): CommandTokens | null {
+    // 先去掉整条语句的外层引号（`"rm -rf /"`），再剥离包装器；
+    // 包装器参数本身也常常是引号包裹的命令（`cmd /c "format D:"`），需要二次去引号。
+    const inner = stripCommandWrappers(unquoteStatement(statement));
+    const tokens = tokenizeCommand(unquoteStatement(inner));
+    if (tokens.length === 0) return null;
+    return { head: toCommandName(tokens[0]), args: tokens.slice(1) };
+}
+
+/** rm -r -f 且目标是绝对路径（`rm -rf ./build`、`rm -rf node_modules` 是正常清理） */
+function isRecursiveForceRm(args: string[]): boolean {
+    let recursive = false;
+    let force = false;
+    for (const arg of args) {
+        if (arg === '--recursive') recursive = true;
+        else if (arg === '--force') force = true;
+        else if (/^-[a-z]+$/i.test(arg)) {
+            if (/r/i.test(arg)) recursive = true;
+            if (/f/i.test(arg)) force = true;
+        }
+    }
+    return recursive && force && args.some(arg => arg.startsWith('/'));
+}
+
+const DESTRUCTIVE_COMMAND_RULES: Array<{ label: string; test: (tokens: CommandTokens) => boolean }> = [
+    {
+        label: 'rm -rf（递归强删绝对路径）',
+        test: ({ head, args }) => head === 'rm' && isRecursiveForceRm(args),
+    },
+    {
+        label: 'format（磁盘格式化）',
+        test: ({ head, args }) => head === 'format'
+            && (args.length === 0 || args.some(arg => /^[a-z]:/i.test(arg) || /^\/[a-z]/i.test(arg))),
+    },
+    {
+        label: 'mkfs（文件系统格式化）',
+        test: ({ head }) => /^mkfs(?:\.[a-z0-9]+)?$/.test(head) || head === 'mke2fs',
+    },
+    {
+        label: 'dd if=（裸设备写入）',
+        test: ({ head, args }) => head === 'dd' && args.some(arg => /^if=/i.test(arg)),
+    },
+    {
+        label: 'shutdown / reboot（关机重启）',
+        test: ({ head }) => ['shutdown', 'reboot', 'poweroff', 'halt'].includes(head),
+    },
+    {
+        label: 'nc -e（远程命令执行）',
+        test: ({ head, args }) => ['nc', 'ncat', 'netcat'].includes(head)
+            && args.some(arg => /^--exec$/i.test(arg) || /^-[a-z]*e[a-z]*$/i.test(arg)),
+    },
+    {
+        label: 'net user / net localgroup（系统账户操作）',
+        test: ({ head, args }) => head === 'net' && ['user', 'localgroup'].includes((args[0] || '').toLowerCase()),
+    },
+    {
+        label: 'reg add / reg delete（注册表写入）',
+        test: ({ head, args }) => head === 'reg' && ['add', 'delete'].includes((args[0] || '').toLowerCase()),
+    },
+    {
+        label: 'icacls / takeown / passwd（权限与凭据修改）',
+        test: ({ head }) => ['icacls', 'takeown', 'passwd'].includes(head),
+    },
+];
+
+/** 无法用「命令名 + 参数」表达的形态（fork bomb、重定向到裸设备等） */
+const DESTRUCTIVE_COMMAND_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
+    { label: 'fork bomb', pattern: /:\s*\(\s*\)\s*\{[^}]*:\s*\|\s*:[^}]*\}/ },
+    { label: '反弹 shell（/dev/tcp）', pattern: /\/dev\/(?:tcp|udp)\//i },
+    {
+        label: '直写设备文件（> /dev/xxx）',
+        pattern: />{1,2}\s*\/dev\/(?!null\b|zero\b|full\b|random\b|urandom\b|stdout\b|stderr\b|tty\b|fd\/|pts\/)/i,
+    },
+];
+
+/**
+ * 识别破坏性命令，返回命中的规则名；未命中返回 null。
+ * 只有位于语句起始位置（可带 sudo/env/嵌套 shell 前缀）的命令名才会参与匹配。
+ */
+export function findDestructiveCommand(command: string): string | null {
+    const text = String(command ?? '');
+    for (const rule of DESTRUCTIVE_COMMAND_PATTERNS) {
+        if (rule.pattern.test(text)) return rule.label;
+    }
+    for (const statement of splitShellStatements(text)) {
+        const tokens = toCommandTokens(statement);
+        if (!tokens) continue;
+        for (const rule of DESTRUCTIVE_COMMAND_RULES) {
+            if (rule.test(tokens)) return rule.label;
+        }
+    }
+    return null;
+}
+
 export class SystemTools {
     /** 命令输出持久化目录（相对于工作区根目录） */
     private static readonly COMMAND_OUTPUT_DIR = '.command';
@@ -125,21 +352,6 @@ export class SystemTools {
             return null;
         }
     }
-
-    /**
-     * 系统稳定性保护 (System Stability Protection)
-     * 对齐 5.0 & 17.0 节运行规范：仅保留物理破坏性指令
-     */
-    public static readonly PROTECTED_COMMANDS = [
-        'rm -rf /', 'format ', ':(){ :|:& };:', 
-        'mkfs', 'dd if=', 'shutdown', 'reboot',
-        '> /dev/', 'nc -e', 'bash -i >&',
-        // Windows 物理破坏指令（del /s / rd /s 是常见开发清理命令，不在此列）
-        'net user', 'net localgroup',
-        'reg add', 'reg delete', 'icacls', 'takeown',
-        // 防内核破坏 (保留最低限度的物理安全)
-        'passwd ', 'rm -rf /etc', 'rm -rf /var'
-    ];
 
     /**
      * 对齐 3.2 节：获取当前环境变量、OS 类型及Agent助手工具链快照 (单例初始化时调用)
@@ -283,31 +495,15 @@ export class SystemTools {
         const finalTimeout = timeout;
 
         // 1. 增强型稳定性校验 (5.0 & 17.0 节运行规范)
-        // 对齐 Section 17.0：增强型匹配逻辑，避免误伤参数（如 PowerShell 的 -Format）
-        const isForbidden = this.PROTECTED_COMMANDS.some(b => {
-            const lowerCmd = command.toLowerCase();
-            const lowerB = b.toLowerCase().trim(); // 去掉末尾空格进行更精确的边界探测
-            const startIdx = lowerCmd.indexOf(lowerB);
-            if (startIdx === -1) return false;
-
-            // 检查关键词前后边界，确保它是一个独立的 token 而非参数的一部分
-            const charBefore = startIdx > 0 ? lowerCmd[startIdx - 1] : '';
-            const charAfter = startIdx + lowerB.length < lowerCmd.length ? lowerCmd[startIdx + lowerB.length] : '';
-
-            // 如果前一个字符是字母、数字或连字符，判定为参数（如 -format）或大单词的一部分
-            if (charBefore && /[a-zA-Z0-9\-]/.test(charBefore)) return false;
-            
-            // 如果是 format 关键词，后面如果是冒号 (D:) 也算命中
-            if (lowerB === 'format') {
-                return (charAfter === '' || /[\s\:\/]/.test(charAfter));
-            }
-            
-            return true;
-        });
-
-        if (isForbidden) {
-            // 对齐 15.0 节：本地化稳定性提示
-            throw new Error(`[稳定性拦截] 检测到潜在的高风险物理损坏命令，执行已被阻止。相关关键词处于保护名单内。`);
+        //    只在语句起始位置识别命令名，不扫描参数/注释/引号内文本：
+        //    旧实现用全文关键词匹配，导致 `git log --pretty=format:`、
+        //    注释里的 "check the format" 等正常命令被误拦截。
+        const destructiveRule = findDestructiveCommand(command);
+        if (destructiveRule) {
+            throw new Error(
+                `[稳定性拦截] 检测到潜在的高风险破坏性命令（命中规则：${destructiveRule}），执行已被阻止。` +
+                `请改用不会破坏系统或数据的方式；确需执行时由用户手动操作。`
+            );
         }
 
         // [Agent 存活护航] 使用 ProcessSafetyGuard 统一拦截杀进程指令

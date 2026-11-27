@@ -210,6 +210,12 @@ do:
         expect(result.validation.ok).toBe(true); // 链接问题按 warning 处理
     });
 
+    it('points agents at the packaged workflow schema skill', () => {
+        for (const name of ['list_workflows', 'get_workflow', 'validate_workflow', 'run_workflow']) {
+            expect(tool(name).description).toContain('read_skill("workflow")');
+        }
+    });
+
     it('summarizes run payloads unless includeStepOutput is requested', async () => {
         const bigOutput = { stdout: 'x'.repeat(5000), stderr: '', status: 'success', code: 0 };
         const run = {

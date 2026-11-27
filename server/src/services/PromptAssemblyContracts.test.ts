@@ -80,6 +80,13 @@ describe('system prompt assembly contracts', () => {
         const review = await readSource('config/skills/code-review/SKILL.md');
         expect(review).toContain('P0');
         expect(review).toContain('问题清单');
+
+        const workflow = await readSource('config/skills/workflow/SKILL.md');
+        expect(workflow).toContain('validate_workflow');
+        expect(workflow).toContain('run_workflow');
+        expect(workflow).toContain('acceptedExitCodes');
+        expect(workflow).toContain('call: agent');
+        expect(workflow).toContain('document.input.schema');
     });
 
     it('routes java archive inspection to the jar skill instead of reading binaries', async () => {

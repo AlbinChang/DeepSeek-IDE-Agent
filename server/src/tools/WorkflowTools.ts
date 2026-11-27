@@ -76,7 +76,7 @@ export class WorkflowTools {
         return [
             {
                 name: 'list_workflows',
-                description: '列出工作区 .workflow 下的声明式工作流。',
+                description: '列出工作区 .workflow 下的声明式工作流；编写/修改前先 read_skill("workflow") 获取 DSL/schema。',
                 parameters: {
                     type: 'object',
                     properties: {},
@@ -90,11 +90,11 @@ export class WorkflowTools {
             },
             {
                 name: 'get_workflow',
-                description: '读取工作流完整 YAML、元数据与校验结果。',
+                description: '读取工作流完整 YAML、元数据与校验结果；字段含义见 read_skill("workflow")。',
                 parameters: {
                     type: 'object',
                     properties: {
-                        name: { type: 'string', description: '工作流名称或 .workflow 下的相对路径' },
+                        name: { type: 'string', description: '工作流名称（document.name）或 .workflow 下的相对路径' },
                     },
                     required: ['name'],
                     additionalProperties: false,
@@ -118,7 +118,7 @@ export class WorkflowTools {
             },
             {
                 name: 'validate_workflow',
-                description: '编译检查工作流：结构+表达式+引用+权限+schema；deep 校验资产/子工作流；不传 name 校验全部。',
+                description: '编译检查工作流：结构+表达式+引用+权限+schema；deep 校验资产/子工作流；不传 name 校验全部。DSL/schema 见 read_skill("workflow")。',
                 parameters: {
                     type: 'object',
                     properties: {
@@ -173,12 +173,12 @@ export class WorkflowTools {
             },
             {
                 name: 'run_workflow',
-                description: '入队执行工作流；默认返回 runId，wait=true 时等到终态或审批暂停。',
+                description: '入队执行工作流；默认返回 runId，wait=true 时等到终态或审批暂停。执行前先 validate_workflow；inputs 需匹配 document.input.schema；DSL 见 read_skill("workflow")。',
                 parameters: {
                     type: 'object',
                     properties: {
-                        name: { type: 'string', description: '工作流名称或相对路径' },
-                        inputs: { type: 'object', description: '工作流输入', additionalProperties: true },
+                        name: { type: 'string', description: '工作流名称（document.name）或相对路径' },
+                        inputs: { type: 'object', description: '工作流输入，需匹配 document.input.schema', additionalProperties: true },
                         wait: { type: 'boolean', description: '是否等待运行结束（默认 false）' },
                         timeoutSeconds: { type: 'number', description: 'wait=true 时的最长等待秒数', minimum: 1 },
                         concurrencyGroup: { type: 'string', description: '可选并发组（同组串行）' },
@@ -222,7 +222,7 @@ export class WorkflowTools {
                 parameters: {
                     type: 'object',
                     properties: {
-                        runId: { type: 'string', description: '运行 ID' },
+                        runId: { type: 'string', description: 'run_workflow 返回的 run ID' },
                         includeEvents: { type: 'boolean', description: '是否附带最近事件（默认 false）' },
                         includeStepOutput: { type: 'boolean', description: '返回每步完整 output（默认 false，仅预览）' },
                     },
@@ -287,7 +287,7 @@ export class WorkflowTools {
                 parameters: {
                     type: 'object',
                     properties: {
-                        runId: { type: 'string', description: '运行 ID' },
+                        runId: { type: 'string', description: 'run_workflow 返回的 run ID' },
                     },
                     required: ['runId'],
                     additionalProperties: false,
@@ -306,7 +306,7 @@ export class WorkflowTools {
                 parameters: {
                     type: 'object',
                     properties: {
-                        runId: { type: 'string', description: '运行 ID' },
+                        runId: { type: 'string', description: 'run_workflow 返回的 run ID' },
                         decision: {
                             type: 'string',
                             enum: ['approve', 'reject'],
@@ -314,7 +314,7 @@ export class WorkflowTools {
                         },
                         inputs: {
                             type: 'object',
-                            description: '恢复运行时重新提供的工作流输入',
+                            description: '恢复时重新提供的工作流输入（敏感输入被脱敏后必填）',
                             additionalProperties: true,
                         },
                     },

@@ -16,6 +16,7 @@ const EXPECTED_SKILLS = [
     'svg-diagram',
     'temp-hygiene',
     'web-research',
+    'workflow',
 ];
 
 describe('BuiltinSkillService', () => {
