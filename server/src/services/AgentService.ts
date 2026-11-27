@@ -266,14 +266,15 @@ export class AgentService extends EventEmitter {
         // 注册文件核心工具 (原子化 IO)
         this.toolManager.registerTool({
             name: 'read_file',
-            description: `按行读工作区文件，上限 ${globalConfig.readFile.maxLines} 行/约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段且不要重叠回读，超长行改用 read_file_by_byte。相同范围重复读取只返回摘要，需要正文传 force:true。`,
+            description: `按行读工作区文件，自动识别 UTF-8/GBK/UTF-16，乱码可传 encoding 强制；上限 ${globalConfig.readFile.maxLines} 行/约 ${Math.round(globalConfig.readFile.maxContentBytes / 1024)}KB；大文件用 startLine/lineCount 分段且不要重叠回读，超长行改用 read_file_by_byte。相同范围重复读取只返回摘要，需要正文传 force:true。`,
             parameters: {
                 type: 'object',
                 properties: {
                     path: { type: 'string', description: '工作区相对路径' },
                     startLine: { type: 'number', description: '起始行号，默认 1' },
                     lineCount: { type: 'number', description: '读取行数' },
-                    force: { type: 'boolean', description: '重复读取同一范围时强制返回正文（默认返回摘要提示）' }
+                    force: { type: 'boolean', description: '重复读取同一范围时强制返回正文（默认返回摘要提示）' },
+                    encoding: { type: 'string', description: '可选：强制解码编码（GBK/GB18030/UTF-8 等）；默认自动识别' },
                 },
                 required: ['path']
             },
@@ -283,8 +284,11 @@ export class AgentService extends EventEmitter {
                 if (!params || !params.path || typeof params.path !== 'string') {
                     throw new Error('The "path" parameter is missing or invalid.');
                 }
+                const encodingOverride = typeof params.encoding === 'string' && params.encoding.trim()
+                    ? params.encoding.trim()
+                    : undefined;
                 const result = await FileTools.readFile(
-                    root, params.path, params.startLine, params.lineCount, params.force === true,
+                    root, params.path, params.startLine, params.lineCount, params.force === true, encodingOverride,
                 );
                 // 【Token 优化】将结构化 JSON 对象扁平化为纯文本字符串。
                 // 消除 JSON.stringify 导致的 \n → \\n 和 \" → \\\" 双重转义（实测节省 10-15% token）。
@@ -299,7 +303,7 @@ export class AgentService extends EventEmitter {
                 if (ok.hasMore) flags.push('has more');
                 if (ok.deduplicated) flags.push('duplicate-omitted');
                 const flagStr = flags.length > 0 ? ` (${flags.join(', ')})` : '';
-                const header = `[read_file] path=${params.path} lines=${ok.startLine}-${ok.endLine}/${ok.totalLines}${flagStr}`;
+                const header = `[read_file] path=${params.path} lines=${ok.startLine}-${ok.endLine}/${ok.totalLines} encoding=${ok.encoding}${flagStr}`;
                 return header + '\n' + (ok.content || '');
             }
         });
@@ -613,7 +617,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_powershell_command...');
         this.toolManager.registerTool({
             name: 'run_powershell_command',
-            description: '在工作区执行 PowerShell 命令。',
+            description: '在工作区执行 PowerShell 命令；输出自动识别 UTF-8/GBK。读文本文件优先 read_file（自动识别编码，可传 encoding）；PS 5.1 的 Get-Content 默认 ANSI，读中文请显式 -Encoding Default/UTF8。',
             parameters: {
                 type: 'object',
                 properties: {
@@ -649,7 +653,7 @@ export class AgentService extends EventEmitter {
         console.log('[AgentService] Registering run_cmd_command...');
         this.toolManager.registerTool({
             name: 'run_cmd_command',
-            description: '仅限 Windows，在工作区执行 CMD 命令。',
+            description: '仅限 Windows，在工作区执行 CMD 命令；输出自动识别 UTF-8/GBK。读文本文件优先 read_file（自动识别编码，可传 encoding）。',
             parameters: {
                 type: 'object',
                 properties: {

@@ -11,12 +11,69 @@ import jschardet from 'jschardet';
  * 供 IDE 前端 (Editor)、后端服务及 AI Agent 使用的底层文件读写工具。
  */
 export class FileIO {
-    /** 置信度阈值：低于此值不信任 jschardet 的推断，回退到 UTF-8 */
+    /** 置信度阈值：低于此值不信任 jschardet 的推断 */
     private static readonly CONFIDENCE_THRESHOLD = 0.7;
+
+    /** 常见多字节中日韩编码：短样本下 jschardet 置信度偏低，适当放宽阈值 */
+    private static readonly MULTIBYTE_CJK_ENCODING = /^(?:gb2312|gbk|gb18030|gb_2312-80|big5|big5-hkscs|shift[_-]?jis|euc[_-]?jp|euc[_-]?kr)$/i;
+
+    /** 严格 UTF-8 校验：允许末尾不完整的多字节序列（用于 64KB 采样） */
+    private static isValidUtf8(buffer: Buffer): boolean {
+        try {
+            new TextDecoder('utf-8', { fatal: true }).decode(buffer, { stream: true });
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * 判断 GB18030 解码结果是否像中文文本。
+     * 短 GBK 样本（如「中文」）常被 jschardet 误判为 KOI8-R / ISO-8859-2，
+     * 此时用 GB18030 解码并检查 CJK 占比，避免直接回退 UTF-8 产生乱码。
+     */
+    private static looksLikeChineseText(text: string): boolean {
+        if (!text || text.includes('\uFFFD')) return false;
+        const nonAscii = text.match(/[^\x00-\x7F]/g)?.length ?? 0;
+        if (nonAscii === 0) return false;
+        const cjkLike = text.match(/[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/g)?.length ?? 0;
+        return cjkLike >= 1 && cjkLike / nonAscii >= 0.5;
+    }
+
+    /**
+     * 推断文本编码（不含 UTF-16 BOM，调用方先处理）：
+     * 1. UTF-8 BOM / 严格合法 UTF-8 直接判定；
+     * 2. jschardet 高置信度结果优先（多字节 CJK 编码放宽到 0.5）；
+     * 3. UTF-8 非法且置信度低时用 GB18030 兜底（中文 Windows 的短 GBK 文档）。
+     */
+    public static inferEncoding(buffer: Buffer): string {
+        if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) {
+            return 'UTF-8-BOM';
+        }
+        if (buffer.length === 0) return 'utf-8';
+        if (this.isValidUtf8(buffer)) return 'utf-8';
+
+        const detected = jschardet.detect(buffer);
+        const detectedName = (detected?.encoding || '').toLowerCase();
+        const confidence = detected?.confidence ?? 0;
+        // ISO-8859-x 是 jschardet 与 Windows-1252 混淆的重灾区；多字节 CJK 短样本置信度普遍偏低
+        const threshold = detectedName.startsWith('iso-8859')
+            ? 0.85
+            : FileIO.MULTIBYTE_CJK_ENCODING.test(detectedName)
+                ? 0.5
+                : FileIO.CONFIDENCE_THRESHOLD;
+        if (detectedName && confidence >= threshold) {
+            return detectedName === 'ascii' ? 'utf-8' : detectedName;
+        }
+
+        const gbText = iconv.decode(buffer, 'gb18030');
+        if (this.looksLikeChineseText(gbText)) return 'GB18030';
+        return 'utf-8';
+    }
 
     /**
      * 智能解码 Buffer，支持 GBK、UTF-8、UTF-8-BOM 等多种编码。
-     * 置信度低于 0.7 时安全回退至 UTF-8，避免短文件/纯ASCII头部误判。
+     * 短/混合 GBK 文档在 jschardet 低置信度时回退 GB18030，避免误判 UTF-8。
      * UTF-8-BOM：读取时剥离 \uFEFF 前缀，但通过 encoding='UTF-8-BOM' 保留标记供写回时复原。
      *
      * @param forcedEncoding 指定编码（如调用方已持久化 encoding），命中时跳过探测直接解码
@@ -43,22 +100,10 @@ export class FileIO {
             }
         }
 
-        const detected = jschardet.detect(buffer);
-
-        let encoding = 'utf-8'; // 安全默认值
-        // ISO-8859-x 系列是 jschardet 与 Windows-1252 混淆的重灾区，提高置信度阈值至 0.85
-        const threshold = (detected?.encoding?.toLowerCase().startsWith('iso-8859'))
-            ? 0.85
-            : FileIO.CONFIDENCE_THRESHOLD;
-        if (detected && detected.encoding && detected.confidence >= threshold) {
-            encoding = detected.encoding;
-        }
-
-        // ASCII 是 UTF-8 的严格子集，直接升级为 utf-8
-        if (encoding.toLowerCase() === 'ascii') encoding = 'utf-8';
+        const encoding = this.inferEncoding(buffer);
+        const encLower = encoding.toLowerCase();
 
         // UTF-8-BOM：剥离 BOM 字符后以 'UTF-8-BOM' 标记保留编码类型
-        const encLower = encoding.toLowerCase();
         if (encLower === 'utf-8-bom' || encLower === 'utf-8 bom') {
             let str = buffer.toString('utf-8');
             if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
@@ -157,15 +202,7 @@ export class FileIO {
                 encoding = 'UTF-16-BE';
                 decodedHead = iconv.decode(slice.slice(2), 'utf-16be');
             } else {
-                encoding = 'utf-8';
-                const detected = jschardet.detect(slice);
-                // ISO-8859-x 系列提高阈值至 0.85（与 decodeBuffer 保持一致），防止误判为 Windows-1252
-                const threshold = detected?.encoding?.toLowerCase().startsWith('iso-8859')
-                    ? 0.85
-                    : FileIO.CONFIDENCE_THRESHOLD;
-                if (detected && detected.encoding && detected.confidence >= threshold) {
-                    encoding = detected.encoding.toLowerCase() === 'ascii' ? 'utf-8' : detected.encoding;
-                }
+                encoding = this.inferEncoding(slice);
                 const encLower = encoding.toLowerCase();
                 if (encLower === 'utf-8-bom' || encLower === 'utf-8 bom') {
                     decodedHead = slice.toString('utf-8');

@@ -3,8 +3,53 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import iconv from 'iconv-lite';
 
 import { FileIO } from '@/utils/FileIO.js';
+
+describe('FileIO encoding inference', () => {
+    it('decodes short and mixed GBK samples instead of falling back to UTF-8', () => {
+        const samples = [
+            '中文',
+            '你好，世界',
+            'hello 中文 world',
+            'This is a long ASCII line with one Chinese word: 测试',
+            '中文编码测试：既有 GBK 文档，也有 UTF-8 文档。',
+        ];
+        for (const text of samples) {
+            const { content, encoding } = FileIO.decodeBuffer(iconv.encode(text, 'gbk'));
+            expect(content, encoding).toBe(text);
+            expect(encoding.toUpperCase()).toMatch(/GB/);
+        }
+    });
+
+    it('keeps valid UTF-8 (with and without BOM) intact', () => {
+        const text = '中文编码测试：既有 GBK 文档，也有 UTF-8 文档。';
+        const plain = FileIO.decodeBuffer(Buffer.from(text, 'utf8'));
+        expect(plain.content).toBe(text);
+        expect(plain.encoding).toBe('utf-8');
+
+        const bom = FileIO.decodeBuffer(Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(text, 'utf8')]));
+        expect(bom.content).toBe(text);
+        expect(bom.encoding).toBe('UTF-8-BOM');
+    });
+
+    it('honors a forced encoding override', () => {
+        const result = FileIO.decodeBuffer(iconv.encode('中文', 'gbk'), 'gbk');
+        expect(result.content).toBe('中文');
+    });
+
+    it('does not misclassify short Russian/Japanese/Korean samples as GB18030', () => {
+        const samples: Array<[string, string]> = [
+            ['Привет', 'koi8-r'],
+            ['これは日本語のテストです。', 'shift_jis'],
+            ['안녕하세요.', 'euc-kr'],
+        ];
+        for (const [text, encoding] of samples) {
+            expect(FileIO.decodeBuffer(iconv.encode(text, encoding)).content).toBe(text);
+        }
+    });
+});
 
 describe('FileIO.createPath', () => {
     const tempDirs: string[] = [];

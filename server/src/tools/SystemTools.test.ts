@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
+import iconv from 'iconv-lite';
 
-import { SystemTools, buildFailureHints, findDestructiveCommand, terminatePosixCommandGroup } from '@/tools/SystemTools.js';
+import {
+    SystemTools,
+    buildEncodingHint,
+    buildFailureHints,
+    decodeCommandOutput,
+    findDestructiveCommand,
+    terminatePosixCommandGroup,
+} from '@/tools/SystemTools.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 
 describe('SystemTools failure hints', () => {
@@ -48,6 +56,44 @@ describe('SystemTools failure hints', () => {
 
     it('adds nothing for unrecognized failures', () => {
         expect(buildFailureHints('echo hi', '', 'boom')).toBe('');
+    });
+});
+
+describe('SystemTools encoding hints', () => {
+    it('suggests read_file / explicit -Encoding for Get-Content without encoding', () => {
+        const hint = buildEncodingHint('Get-Content docs/需求.md', '中文内容', '');
+        expect(hint).toContain('read_file');
+        expect(hint).toContain('-Encoding Default');
+        expect(hint).toContain('-Encoding UTF8');
+    });
+
+    it('does not nag when the command already specifies -Encoding', () => {
+        expect(buildEncodingHint('Get-Content -Encoding UTF8 docs/a.md', '中文内容', '')).toBe('');
+        expect(buildEncodingHint('Get-Content -Encoding Default docs/a.md', '中文内容', '')).toBe('');
+    });
+
+    it('does not nag for ASCII output or non-reader commands', () => {
+        expect(buildEncodingHint('Get-Content docs/a.txt', 'plain ascii', '')).toBe('');
+        expect(buildEncodingHint('git log --pretty=format:', '中文提交信息', '')).toBe('');
+    });
+
+    it('flags replacement characters regardless of command shape', () => {
+        const hint = buildEncodingHint('echo test', '\uFFFD\uFFFD\uFFFD', '');
+        expect(hint).toContain('read_file');
+        expect(hint).not.toContain('-Encoding Default');
+    });
+});
+
+describe('SystemTools command output encoding', () => {
+    it('decodes GBK command output bytes instead of assuming UTF-8', () => {
+        const text = '中文编码测试：GBK 输出';
+        expect(decodeCommandOutput(iconv.encode(text, 'gbk'))).toContain(text);
+        expect(decodeCommandOutput(Buffer.from(text, 'utf8'))).toContain(text);
+    });
+
+    it('strips ANSI escapes after decoding', () => {
+        const raw = Buffer.concat([Buffer.from('\x1b[31m'), iconv.encode('中文', 'gbk'), Buffer.from('\x1b[0m')]);
+        expect(decodeCommandOutput(raw)).toBe('中文');
     });
 });
 

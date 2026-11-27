@@ -4,12 +4,61 @@ import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 import { GitService } from '@/services/GitService.js';
+import { FileIO } from '@/utils/FileIO.js';
 
 export interface CommandResult {
     stdout: string;
     stderr: string;
     status: 'success' | 'error';
     code: number | string | null;
+}
+
+interface FinalizedCommandOutput {
+    fullStdout: string;
+    fullStderr: string;
+    stdoutFinal: string;
+    stderrFinal: string;
+    isTruncated: boolean;
+}
+
+/**
+ * 命令输出疑似乱码时给出可执行的下一步建议。
+ * 典型场景：PS 5.1 的 Get-Content 默认按 ANSI 读文件，混合 GBK/UTF-8 文档必然读错；
+ * 或旧版 PowerShell 把 GBK 输出交给 UTF-8 解码。
+ */
+export function buildEncodingHint(command: string, stdout: string, stderr: string): string {
+    const combined = `${stdout}\n${stderr}`;
+    const looksGarbled = /\uFFFD|锟斤拷|ï¿½/.test(combined);
+    const readsText = /\b(?:get-content|select-string|gc|type|cat)\b/i.test(command);
+    // 只认真正的参数（前面是空白/引号），避免路径里的 "ds-encoding-test" 之类误判
+    const missingEncoding = readsText && !/(?:^|[\s"'`])-Enc(?:oding)?\b/i.test(command);
+    const hasNonAscii = /[^\x00-\x7F]/.test(combined);
+    const hasQuestionRuns = /\?{3,}/.test(combined);
+
+    if (looksGarbled) {
+        const psHint = missingEncoding
+            ? ' PowerShell 5.1 的 Get-Content 请显式 -Encoding Default（GBK）或 -Encoding UTF8。'
+            : '';
+        return `\n[编码提示] 输出疑似乱码：读文本文件优先 read_file（自动识别 GBK/UTF-8，可传 encoding 强制）。${psHint}`;
+    }
+
+    // 未显式 -Encoding 的文本读取：只给温和提示，不武断判定为乱码
+    if (missingEncoding && (hasNonAscii || hasQuestionRuns)) {
+        return '\n[编码提示] Get-Content 未指定 -Encoding；若中文异常，改用 read_file（自动识别 GBK/UTF-8，可传 encoding）或显式 -Encoding Default（GBK）或 -Encoding UTF8。';
+    }
+    return '';
+}
+
+/**
+ * 解码命令输出字节流：
+ * 1. 完整字节流交给 FileIO（严格 UTF-8 优先，GB18030/GBK 兜底）；
+ * 2. 剥离 ANSI 颜色/控制序列；
+ * 3. 过滤 JVM 因 JAVA_TOOL_OPTIONS 注入而打印的 "Picked up ..." 噪音。
+ */
+export function decodeCommandOutput(buffer: Buffer): string {
+    return FileIO.decodeBuffer(buffer).content
+        .replace(/\x1b\[[0-9;]*[mGKHFABCDJRsul]|\x1b\].*?\x07|\x1b[>=]/g, '')
+        .replace(/^Picked up (?:JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS):.*(?:\r?\n|$)/gm, '');
 }
 
 export function terminatePosixCommandGroup(child: Pick<ChildProcess, 'pid' | 'kill'>, toolName: string): void {
@@ -644,8 +693,8 @@ export class SystemTools {
                 child.stdin.end();
             }
 
-            let stdout = '';
-            let stderr = '';
+            const stdoutChunks: Buffer[] = [];
+            const stderrChunks: Buffer[] = [];
             let totalLength = 0;
 
             /**
@@ -661,13 +710,10 @@ export class SystemTools {
             const PROCESS_HARD_LIMIT = 5 * 1024 * 1024; // 5MB 物理熔断红线
             const FULL_OUTPUT_FILE_LIMIT = 10 * 1024 * 1024; // 10MB 文件持久化上限
             
-            let isTruncated = false;
             let isHardKilled = false; // OOM 熔断标志，供 close 事件附加错误提示
 
             // 完整输出缓冲区（不截断），用于持久化到 .command/output.txt
             // Agent 可通过 read_file 按需检索，避免长输出被截断损失信息
-            let fullStdout = '';
-            let fullStderr = '';
             let fullTotalLength = 0;
             const commandStartTime = Date.now();
 
@@ -690,47 +736,21 @@ export class SystemTools {
             }
 
             const onData = (data: Buffer, pipeType: 'stdout' | 'stderr') => {
-                
-                // ANSI 剥离：防止颜色转义码污染 LLM 推理（如 npm 颜色输出、git 颜色 diff 等）
-                // 同时过滤 JVM 因 JAVA_TOOL_OPTIONS 注入而打印的 "Picked up ..." 提示行（属于 JVM 噪音）
-                const chunk = data.toString('utf8')
-                    .replace(/\x1b\[[0-9;]*[mGKHFABCDJRsul]|\x1b\].*?\x07|\x1b[>=]/g, '')
-                    .replace(/^Picked up (?:JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS):.*(?:\r?\n|$)/gm, '');
                 totalLength += data.length;
 
-                // [DECOUPLING OPTIMIZATION] Agent 终端数据不再广播至前端 PTY 区域。
-                // 仅保留逻辑层缓冲区供 LLM 使用和链路追踪记录。
-
-                // 1. 完整输出缓冲区（用于文件持久化，不做 LLM 截断）
+                // 保留原始字节：流式 chunk 可能把多字节字符截成两半，
+                // 且 PowerShell 5.1 / CMD 在中文 Windows 上可能输出 GBK 而非 UTF-8，
+                // 必须在完整字节流上做编码识别，不能逐块 data.toString('utf8')。
                 if (fullTotalLength < FULL_OUTPUT_FILE_LIMIT) {
                     fullTotalLength += data.length;
                     if (pipeType === 'stdout') {
-                        fullStdout += chunk;
+                        stdoutChunks.push(data);
                     } else {
-                        fullStderr += chunk;
+                        stderrChunks.push(data);
                     }
                 }
 
-                // 2. 逻辑层缓冲区 (用于返回给 LLM 或后续处理)
-                // stdout 采用滚动尾部窗口：构建结果/测试报告/错误堆栈总在末尾，保留尾部才有意义
-                // stderr 独立截断，不受 stdout isTruncated 影响
-                if (pipeType === 'stdout') {
-                    stdout += chunk;
-                    // 滚动窗口：超过 2× 上限时丢弃头部，保留最近 LLM_MAX_OUTPUT 字节
-                    if (stdout.length > LLM_MAX_OUTPUT * 2) {
-                        stdout = stdout.substring(stdout.length - LLM_MAX_OUTPUT);
-                        isTruncated = true;
-                    }
-                } else {
-                    // stderr 独立截断，不受 stdout isTruncated 影响
-                    if (stderr.length < LLM_MAX_OUTPUT) {
-                        stderr += chunk;
-                    } else if (!stderr.includes('[stderr截断]')) {
-                        stderr = stderr.substring(0, LLM_MAX_OUTPUT) + '\n[stderr截断]';
-                    }
-                }
-
-                // 3. 极速熔断：防止恶意/坏死进程无限输出冲毁内存 (OOM 保护)
+                // 极速熔断：防止恶意/坏死进程无限输出冲毁内存 (OOM 保护)
                 if (totalLength > PROCESS_HARD_LIMIT) {
                     if (!child.killed) {
                         isHardKilled = true;
@@ -743,6 +763,32 @@ export class SystemTools {
             child.stdout.on('data', (d) => onData(d, 'stdout'));
             child.stderr.on('data', (d) => onData(d, 'stderr'));
 
+            /** 完整字节流解码：严格 UTF-8 优先，非法时按 GB18030 兜底（GBK 超集），再剥离 ANSI/JVM 噪音。 */
+            const decodeOutput = (chunks: Buffer[]): string => {
+                if (chunks.length === 0) return '';
+                return decodeCommandOutput(Buffer.concat(chunks));
+            };
+
+            const finalizeOutput = (): FinalizedCommandOutput => {
+                const fullStdout = decodeOutput(stdoutChunks);
+                const fullStderr = decodeOutput(stderrChunks);
+
+                // stdout 采用滚动尾部窗口：构建结果/测试报告/错误堆栈总在末尾，保留尾部才有意义
+                let stdoutFinal = fullStdout;
+                let isTruncated = false;
+                if (stdoutFinal.length > LLM_MAX_OUTPUT * 2) {
+                    stdoutFinal = stdoutFinal.slice(stdoutFinal.length - LLM_MAX_OUTPUT);
+                    isTruncated = true;
+                }
+
+                let stderrFinal = fullStderr;
+                if (stderrFinal.length > LLM_MAX_OUTPUT) {
+                    stderrFinal = stderrFinal.substring(0, LLM_MAX_OUTPUT) + '\n[stderr截断]';
+                }
+
+                return { fullStdout, fullStderr, stdoutFinal, stderrFinal, isTruncated };
+            };
+
             /**
              * 在命令执行完毕后，将完整输出写入 .command/output.txt 供 Agent 按需检索
              */
@@ -750,20 +796,27 @@ export class SystemTools {
                 exitCode: number | string | null,
                 status: 'success' | 'error',
                 extraStderr: string,
-                outputFilePath: string | null
+                outputFilePath: string | null,
+                output: FinalizedCommandOutput,
             ) => {
-                const stdoutFinal = isTruncated ? '[截断，仅保留尾部]\n' + stdout : stdout;
-                const hint = status === 'error' ? buildFailureHints(command, stdout, stderr + extraStderr) : '';
-                const resultStderr = stderr + extraStderr + hint;
+                const encodingHint = buildEncodingHint(
+                    command,
+                    output.stdoutFinal,
+                    output.stderrFinal + extraStderr,
+                );
+                const hint = status === 'error'
+                    ? buildFailureHints(command, output.stdoutFinal, output.stderrFinal + extraStderr)
+                    : '';
+                const resultStderr = output.stderrFinal + extraStderr + encodingHint + hint;
 
                 // 仅当输出被截断或熔断时才追加简短提示，避免每次命令执行都浪费 ~150 字符
                 // 完整输出始终持久化到 .command/output.txt（已在系统提示词中说明）
-                const fileHint = (outputFilePath && (isTruncated || isHardKilled))
+                const fileHint = (outputFilePath && (output.isTruncated || isHardKilled))
                     ? `\n[截断，完整日志: ${this.COMMAND_OUTPUT_DIR}/${this.COMMAND_OUTPUT_FILE}]`
                     : '';
 
                 resolve({
-                    stdout: stdoutFinal + fileHint,
+                    stdout: (output.isTruncated ? '[截断，仅保留尾部]\n' : '') + output.stdoutFinal + fileHint,
                     stderr: resultStderr,
                     status,
                     code: exitCode
@@ -780,17 +833,18 @@ export class SystemTools {
                 // 超时路径：异步持久化后再 resolve
                 const exitCode = 'SIGTERM';
                 const duration = Date.now() - commandStartTime;
+                const output = finalizeOutput();
                 if (workspaceRoot) {
                     this.persistCommandOutput(
                         workspaceRoot, command, shell, exitCode, duration,
-                        fullStdout, fullStderr, isTruncated, isHardKilled
+                        output.fullStdout, output.fullStderr, output.isTruncated, isHardKilled
                     ).then((filePath) => {
                         persistAndResolve(exitCode, 'error',
-                            `\n[Error] Command timed out after ${finalTimeout}ms`, filePath);
+                            `\n[Error] Command timed out after ${finalTimeout}ms`, filePath, output);
                     });
                 } else {
                     persistAndResolve(exitCode, 'error',
-                        `\n[Error] Command timed out after ${finalTimeout}ms`, null);
+                        `\n[Error] Command timed out after ${finalTimeout}ms`, null, output);
                 }
             }, finalTimeout);
 
@@ -811,14 +865,15 @@ export class SystemTools {
 
                 // 对最后一份数据做微小延迟确保 onData 队列清空，然后持久化并 resolve
                 setTimeout(async () => {
+                    const output = finalizeOutput();
                     let filePath: string | null = null;
                     if (workspaceRoot) {
                         filePath = await this.persistCommandOutput(
                             workspaceRoot, command, shell, code, duration,
-                            fullStdout, fullStderr, isTruncated, isHardKilled
+                            output.fullStdout, output.fullStderr, output.isTruncated, isHardKilled
                         );
                     }
-                    await persistAndResolve(code, status, extraStderr, filePath);
+                    await persistAndResolve(code, status, extraStderr, filePath, output);
                 }, 10);
             });
 
@@ -829,8 +884,9 @@ export class SystemTools {
                 // spawn 失败（如 shell 不存在），注销可杀登记
                 ProcessSafetyGuard.getInstance().unregisterCommandChild(child.pid ?? -1);
                 // spawn 失败（如 shell 不存在），无需持久化
+                const output = finalizeOutput();
                 resolve({
-                    stdout: stdout,
+                    stdout: output.stdoutFinal,
                     stderr: err.message,
                     status: 'error',
                     code: -1

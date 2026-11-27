@@ -316,6 +316,7 @@ export class FileTools {
         startLine: number = 1,
         lineCount?: number,
         force: boolean = false,
+        encodingOverride?: string,
     ) {
         let fullPath: string;
         try {
@@ -339,7 +340,7 @@ export class FileTools {
                 let fileTotalLines: number | null = null;
                 try {
                     const rawBuf = await fs.readFile(fullPath);
-                    const { content: rawText } = FileIO.decodeBuffer(rawBuf);
+                    const { content: rawText } = FileIO.decodeBuffer(rawBuf, encodingOverride);
                     fileTotalLines = rawText.split(/\r?\n|\r|\u2028|\u2029/).length;
                 } catch {}
                 return {
@@ -353,7 +354,7 @@ export class FileTools {
             const rawBuffer = await fs.readFile(fullPath);
             FileIO.checkBinaryHeader(rawBuffer);
 
-            const { content: rawContent, encoding: fileEncoding } = FileIO.decodeBuffer(rawBuffer);
+            const { content: rawContent, encoding: fileEncoding } = FileIO.decodeBuffer(rawBuffer, encodingOverride);
 
             // 兼容处理不同换行符，包含 Unicode 行分隔符 \u2028/\u2029
             const lines = rawContent.split(/\r?\n|\r|\u2028|\u2029/);

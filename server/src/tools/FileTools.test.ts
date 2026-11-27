@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import iconv from 'iconv-lite';
 
 import { config as globalConfig } from '@/config/index.js';
 import { FileTools, buildNearestMatchHint } from '@/tools/FileTools.js';
@@ -34,6 +35,20 @@ describe('FileTools.readFile', () => {
         expect(result.endLine).toBe(globalConfig.readFile.maxLines);
         expect(result.totalLines).toBe(totalLines);
         expect(result.hasMore).toBe(true);
+    });
+
+    it('auto-detects short/mixed GBK files and honors an explicit encoding override', async () => {
+        const workspaceRoot = await createWorkspace();
+        const text = '中文编码测试：GBK 短文档';
+        await fs.writeFile(path.join(workspaceRoot, 'short-gbk.md'), iconv.encode(text, 'gbk'));
+
+        const auto = await FileTools.readFile(workspaceRoot, 'short-gbk.md');
+        expect(auto.content).toContain(text);
+        expect(String(auto.encoding).toUpperCase()).toMatch(/GB/);
+
+        const forced = await FileTools.readFile(workspaceRoot, 'short-gbk.md', 1, undefined, true, 'gbk');
+        expect(forced.content).toContain(text);
+        expect(forced.encoding).toBe('gbk');
     });
 
     it('clamps an oversized explicit lineCount to the 1000-line hard cap', async () => {
