@@ -7,6 +7,7 @@ import { TodoService } from "@/services/TodoService.js";
 import { TelemetryService } from "@/services/TelemetryService.js";
 import { AgentTurnEngine, type PrepareMessagesOptions } from "@/services/AgentTurnEngine.js";
 import { EvaluationAgentService } from "@/services/EvaluationAgentService.js";
+import { requiresUserInputOrDecision } from "@/services/UserInputIntent.js";
 import { MessagePreparationService } from "@/services/MessagePreparationService.js";
 import { FileIO } from "@/utils/FileIO.js";
 import { getBeijingLogTimePrefix } from "@/utils/TimeUtils.js";
@@ -171,25 +172,6 @@ export class AgentChatComponent {
                             `${idx + 1}. [${String(t?.status || "unknown")}] ${String(t?.title || "(未命名任务)")} (id: ${String(t?.id || "N/A")})`
                     )
                     .join("\n");
-            };
-            const requiresUserInputOrDecision = (reply: string) => {
-                const text = String(reply || "").replace(/\s+/g, " ").trim();
-                if (!text) return false;
-
-                const negation = /(无需|不用|不需要|暂不需要|已无需|no need|not required)/i;
-                if (negation.test(text)) return false;
-
-                const patterns = [
-                    /请(?:你)?(?:先|再)?(?:提供|补充|确认|选择|决定|上传|填写|输入|告知)/,
-                    /需要(?:你|用户)(?:提供|补充|确认|选择|决定|授权|上传|输入)/,
-                    /(是否|能否|可否).*(?:提供|确认|选择|决定|授权|上传|输入)/,
-                    /请问.*(?:提供|确认|选择|决定|授权|上传|输入)/,
-                    /等待(?:你|用户).*(?:提供|确认|选择|决定|授权|上传|输入)/,
-                    /\b(?:please|kindly)\s+(?:provide|confirm|choose|decide|select|upload|input|share)\b/i,
-                    /\bneed your (?:input|decision|confirmation|approval|selection)\b/i,
-                ];
-
-                return patterns.some((re) => re.test(text));
             };
             const isEvaluatorRepairConfirmationOnly = (reply: string) => {
                 const text = String(reply || "").replace(/\s+/g, " ").trim();
