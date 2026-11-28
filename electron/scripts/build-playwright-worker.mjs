@@ -28,6 +28,7 @@ await build({
     format: 'cjs',
     outfile: path.join(workersDir, 'playwrightMcpWorker.cjs'),
     alias: { '@': SERVER_SRC },
+    external: ['playwright', 'playwright-core'],
     define: { 'import.meta.url': '__playwrightImportMetaUrl' },
     banner: {
         js: [

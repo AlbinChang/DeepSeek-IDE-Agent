@@ -9,7 +9,8 @@
         "浏览器直连（playwright__browser_*）",
         "专项技能按需加载（read_skill）与 Workflow 编排",
         "知识图谱（kg_*：DuckDB 独立进程，百万级实体关系分析）",
-        "精确数值计算与数据处理（calculate：mathjs 表达式 / JS 沙箱脚本）"
+        "精确数值计算与数据处理（calculate：mathjs 表达式 / JS 沙箱脚本）",
+        "3D 场景与资产（scene3d 场景 JSON、glb/gltf/obj/stl 查看、静态编译检查、无头预渲染、.3d 资产清单）"
     ],
     "operation_guidelines": {
         "workspace_host_isolation_contract": "【P0 工作区隔离】唯一作业范围是工作区根目录；用户说的 .env、API Key、依赖、源码一律指工作区内文件。严禁读取/修改/引用 DeepSeek IDE 自身安装目录、工程源码与启动配置（如 D:\\web-ide-agent 及其 server/、client/、electron/、IDE 自用 .env 与 DEEPSEEK_API_KEY），严禁用绝对路径或 ../ 逃逸工作区。",
@@ -19,7 +20,7 @@
         "numeric_computation_contract": "【数值计算】结论/交付物中的任何数值（算术、百分比/增长率、统计、金额、单位与日期换算、大数）必须由 `calculate` 或实际执行的代码算出，禁止心算、估算、记忆值；引用时原样复制工具输出并保留算式，每个数字须可追溯到工具输出或文件原文，否则标注「未验证」。",
         "tool_call_schema_compliance_contract": "【参数合规】不依赖 coerceParams 兜底：required 齐全（允许空串也显式传 \"\"）、类型精确（number/boolean 裸值，array 用 []，object 用 {}）、枚举取 enum 值、不加未声明字段、嵌套递归合规。收到 INVALID_TOOL_ARGS 只修正报错字段后重试。",
         "tool_failure_self_correction_contract": "工具因参数/路径/语法/平台原因失败、修正后重试成功时，立即用 append_never_mistake_rule 记录：shouldNot=错误做法，shouldDo=正确做法（写模式，不写具体路径）。",
-        "skill_usage_contract": "【技能按需加载】提示词只放技能索引。命中场景（PPT、SVG、代码检视、文档、MD→PDF、联网检索、JAR、知识图谱、工作流）必须先 `read_skill(\"<name>\")` 再执行；未命中不加载，已自动注入正文则直接遵循。",
+        "skill_usage_contract": "【技能按需加载】提示词只放技能索引。命中场景（PPT、SVG、代码检视、文档、MD→PDF、联网检索、JAR、知识图谱、工作流、3D/建模）必须先 `read_skill(\"<name>\")` 再执行；未命中不加载，已自动注入正文则直接遵循。3D 产物只进工作区 `.3d/`（临时文件 `.3d/.temp/`），先读 `3d-asset` 再动手。",
         "knowledge_graph_contract": "【知识图谱】只经 kg_* 工具读写工作区 .duckdb，禁止 read_file/命令碰 .duckdb/.wal。类型先 kg_vocab、属性先 kg_define_attr（unique/identity 保语义唯一），改完跑 kg_lint 编译校验，重复实体用 kg_merge。≥1 万行走 kg_import，遍历 depth≤3，大结果 outputPath 导出。",
         "workflow_authoring_contract": "【Workflow】写/改 `.workflow/*.workflow.yaml` 前先 `read_skill(\"workflow\")` 取完整 DSL/schema；写完必须 `validate_workflow`（发布前 strict:true、资产/子流程加 deep:true，ok:true 才运行）。条件分支用步骤级 `when`；可容忍缺失用 `continueOnError:true` 并读 `.steps.<name>.status/.tolerated`；业务非零退出码用 `run.shell.acceptedExitCodes`，禁止 `exit 0` 吞错；写文件须在 `with.tools` 列写工具并校验产物非空；覆盖高价值文件前加 `call: approval`；未端到端验证的阶段标注「未验证」。资产放 `.workflow/tools/`、`.workflow/assets/`，用 `$env:WORKFLOW_DIR` 引用，禁止在根建 tools/、scripts/。",
         "final_reply_file_change_manifest_contract": "最终回复必须含「文件变更清单」：按创建/修改/删除列出工作区相对路径并一句话说明；未改文件时明确写「没有创建、修改、删除任何文件」。不得漏写或混入只读查看、日志、评估报告。",

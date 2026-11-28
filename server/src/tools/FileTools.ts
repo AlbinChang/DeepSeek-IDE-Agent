@@ -67,7 +67,10 @@ export class FileTools {
     private static readonly DIRECTORY_TREE_VISIBLE_DOT_DIR_NAMES = new Set([
         ...WORKSPACE_SKILL_CONTAINER_DIRECTORIES,
         '.rules',
-        '.lingma'
+        '.lingma',
+        // 3D 资产与临时目录是工作区常规产物，默认可见（其余点目录仍隐藏）
+        '.3d',
+        '.temp'
     ]);
 
     private static isAgentSystemDirPath(relativePath: string): boolean {

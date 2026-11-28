@@ -7,6 +7,7 @@ import {
 } from '@/services/BuiltinSkillService.js';
 
 const EXPECTED_SKILLS = [
+    '3d-asset',
     'code-review',
     'doc-writing',
     'jar-analysis',

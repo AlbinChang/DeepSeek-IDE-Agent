@@ -14,6 +14,9 @@ export const READONLY_AGENT_TOOLS = [
     'list_files',
     'calculate',
     'check_svg',
+    'inspect_3d_asset',
+    'check_3d_asset',
+    'list_3d_assets',
 ];
 
 export const READONLY_EVALUATOR_TOOLS = [
@@ -23,6 +26,9 @@ export const READONLY_EVALUATOR_TOOLS = [
     'list_files',
     'calculate',
     'check_svg',
+    'inspect_3d_asset',
+    'check_3d_asset',
+    'list_3d_assets',
 ];
 
 /** 禁止在 workflow 内部递归/管理的工具 */

@@ -18,6 +18,8 @@ import { resolveMarkdownLinkCandidates } from '@/utils/markdownLinks';
 
 // PDF 预览组件按需懒加载（避免为所有用户增加 ~200KB bundle）
 const PdfPreview = lazy(() => import('@/components/PdfPreview'));
+// 3D 预览按需懒加载：three.js 体积较大，只有打开模型/场景文件时才加载
+const Model3DPreview = lazy(() => import('@/components/Model3DPreview'));
 
 /**
  * 编辑器视图状态缓存（跨组件生命周期持久化光标/滚动位置）
@@ -44,14 +46,27 @@ const fileEncodingCache = new Map<string, string>();
 
 /**
  * 文件视图模式缓存（跨文件切换保持各自的查看模式：如 md 的 preview、csv 的 table）
- * Key: 文件相对路径, Value: 'editor' | 'preview' | 'table' | 'pdf' | 'image' | 'diff'
+ * Key: 文件相对路径, Value: 'editor' | 'preview' | 'table' | 'pdf' | 'image' | 'diff' | '3d'
  */
-const fileViewModeCache = new Map<string, 'editor' | 'preview' | 'table' | 'pdf' | 'image' | 'diff'>();
+const fileViewModeCache = new Map<string, 'editor' | 'preview' | 'table' | 'pdf' | 'image' | 'diff' | '3d'>();
+
+const MODEL_3D_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl']);
+
+function is3dFilePath(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return lower.endsWith('.scene3d.json') || MODEL_3D_EXTENSIONS.has(lower.split('.').pop() || '');
+}
+
+/** 文本型 3D 文件支持切回编辑器；二进制模型只能预览 */
+function is3dTextEditable(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return lower.endsWith('.scene3d.json') || lower.endsWith('.gltf') || lower.endsWith('.obj');
+}
 
 function resolveTargetViewMode(
   filePath: string,
   externalMode: 'editor' | 'diff' = 'editor'
-): 'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table' {
+): 'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table' | '3d' {
   if (!filePath) return 'editor';
   if (externalMode === 'diff') return 'diff';
 
@@ -62,6 +77,11 @@ function resolveTargetViewMode(
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'tiff', 'tif'].includes(ext)) return 'image';
 
   const cached = fileViewModeCache.get(filePath);
+
+  if (is3dFilePath(filePath)) {
+    if (is3dTextEditable(filePath) && cached === 'editor') return 'editor';
+    return '3d';
+  }
 
   if (lower.endsWith('.md') || lower.endsWith('.markdown')) {
     if (cached === 'preview' || cached === 'editor') return cached;
@@ -127,7 +147,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [originalContent, setOriginalContent] = useState<string>('');
-  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(() =>
+  const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table' | '3d'>(() =>
     resolveTargetViewMode(activeFile, mode)
   );
 
@@ -178,6 +198,9 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   }, [activeFile]);
   const isMarkdown = useMemo(() => activeFile.toLowerCase().endsWith('.md'), [activeFile]);
   const isPdf = useMemo(() => activeFile.toLowerCase().endsWith('.pdf'), [activeFile]);
+  const is3d = useMemo(() => is3dFilePath(activeFile), [activeFile]);
+  const is3dText = useMemo(() => is3dTextEditable(activeFile), [activeFile]);
+  const is3dBinary = is3d && !is3dText;
   const isCsv = useMemo(() => {
     const lower = activeFile.toLowerCase();
     return lower.endsWith('.csv') || lower.endsWith('.tsv');
@@ -241,7 +264,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
   const markdownLinkProviderRef = useRef<monaco.IDisposable | null>(null);
 
   // 方案十二：模式切换护栏，记录上一次模式，防止在同模式下错误地执行 setModel(null) 触发 wordHighlighter 销毁
-  const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table'>(mode);
+  const lastModeRef = useRef<'editor' | 'diff' | 'preview' | 'pdf' | 'image' | 'table' | '3d'>(mode);
 
   const getCurrentEditorContent = () => {
     if (viewMode === 'editor' && editorRef.current) {
@@ -267,7 +290,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
   const handleSaveFile = async () => {
     const filePath = activeFile;
-    if (!filePath || isLocked || isJarEntry || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || viewMode === 'table' || isPdf || isImage || isSaving) return;
+    if (!filePath || isLocked || isJarEntry || viewMode === 'preview' || viewMode === 'pdf' || viewMode === 'image' || viewMode === 'table' || viewMode === '3d' || isPdf || isImage || isSaving) return;
 
     const contentToSave = getCurrentEditorContent();
     if (contentToSave === savedContent) {
@@ -354,6 +377,14 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
   const handleToggleCsvView = () => {
     const nextMode = viewMode === 'table' ? 'editor' : 'table';
+    if (activeFile) {
+      fileViewModeCache.set(activeFile, nextMode);
+    }
+    setViewMode(nextMode);
+  };
+
+  const handleToggle3dView = () => {
+    const nextMode = viewMode === '3d' ? 'editor' : '3d';
     if (activeFile) {
       fileViewModeCache.set(activeFile, nextMode);
     }
@@ -504,7 +535,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
 
     if (abortControllerRef.current) abortControllerRef.current.abort();
 
-    if (isPdf || isImage) {
+    if (isPdf || isImage || is3dBinary) {
       setFileContent('');
       setSavedContent('');
       setOriginalContent('');
@@ -684,7 +715,7 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
         abortControllerRef.current = null;
       }
     };
-  }, [activeFile, fileName, isPdf, isImage, viewMode, workspaceRoot, languageId]);
+  }, [activeFile, fileName, isPdf, isImage, is3dBinary, viewMode, workspaceRoot, languageId]);
 
   // 监听 Tab 关闭事件，释放被关闭文件的模型与缓存（防内存泄漏）
   useEffect(() => {
@@ -1431,6 +1462,19 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                   {viewMode === 'table' ? 'EDIT' : 'TABLE'}
                 </button>
               )}
+              {is3dText && (
+                <button 
+                  onClick={handleToggle3dView}
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-bold tracking-wider transition-all ${
+                    viewMode === '3d' 
+                      ? 'bg-white/20 text-white border border-white/20' 
+                      : 'text-white/40 hover:text-white hover:bg-white/5 border border-transparent'
+                  }`}
+                >
+                  {viewMode === '3d' ? <Code size={9} /> : <Eye size={9} />}
+                  {viewMode === '3d' ? 'EDIT' : '3D'}
+                </button>
+              )}
               <div className="h-3 w-[1px] bg-white/10 mx-0.5" />
               <div 
                   data-testid="language-status-badge" 
@@ -1613,6 +1657,19 @@ export const FileEditor: React.FC<FileEditorProps> = ({ activeFile, isLocked, mo
                 <span className="text-[8pt]">请切换到编辑视图查看原始内容</span>
               </div>
             )}
+          </div>
+        )}
+
+        {/* 7. 3D 预览层 */}
+        {viewMode === '3d' && is3d && (
+          <div className="absolute inset-0 z-20">
+            <Suspense fallback={
+              <div className="flex items-center justify-center h-full bg-[#0a0a0a] text-white/40 text-[9pt]">
+                正在加载 3D 查看器...
+              </div>
+            }>
+              <Model3DPreview filePath={activeFile} content={fileContent} workspaceRoot={workspaceRoot} />
+            </Suspense>
           </div>
         )}
       </div>

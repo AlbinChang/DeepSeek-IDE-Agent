@@ -7,6 +7,7 @@ import yaml from 'js-yaml';
 import { PathUtils } from '@/utils/PathUtils.js';
 import { FileIO } from '@/utils/FileIO.js';
 import { SvgCheckService } from '@/services/SvgCheckService.js';
+import { validateScene3dSpec } from '@/scene3d/spec.js';
 
 export type SyntaxCheckStatus = 'ok' | 'error' | 'skipped';
 
@@ -246,6 +247,10 @@ export class SyntaxCheckService {
         }
 
         try {
+            if (relativePath.toLowerCase().endsWith('.scene3d.json')) {
+                return await this.checkScene3d(fullPath, relativePath, start);
+            }
+
             if (ext === '.json') {
                 return await this.checkJson(fullPath, relativePath, start);
             }
@@ -312,8 +317,51 @@ export class SyntaxCheckService {
         return content;
     }
 
-    private static async checkJson(fullPath: string, relativePath: string, start: number): Promise<SyntaxCheckResult> {
+    /** scene3d/v1 场景规范校验（写后门禁）：结构错误直接报错，引用存在性交给 check_3d_asset */
+    private static async checkScene3d(fullPath: string, relativePath: string, start: number): Promise<SyntaxCheckResult> {
         const source = await this.readTextFile(fullPath);
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(source.replace(/^\uFEFF/, ''));
+        } catch (e: any) {
+            const message = e?.message || 'JSON 解析失败。';
+            return {
+                path: relativePath,
+                extension: '.json',
+                checker: 'scene3d-spec',
+                status: 'error',
+                message,
+                diagnostics: [{ message }],
+                durationMs: Date.now() - start,
+            };
+        }
+        const validation = validateScene3dSpec(parsed);
+        const diagnostics: SyntaxCheckDiagnostic[] = validation.errors.map((issue) => ({
+            message: `${issue.path}: ${issue.message}${issue.fix ? `（${issue.fix}）` : ''}`,
+        }));
+        const warningText = validation.warnings.length > 0 ? `，${validation.warnings.length} 条告警` : '';
+        if (validation.errors.length === 0) {
+            return {
+                path: relativePath,
+                extension: '.json',
+                checker: 'scene3d-spec',
+                status: 'ok',
+                message: `scene3d 规范校验通过${warningText}。`,
+                durationMs: Date.now() - start,
+            };
+        }
+        return {
+            path: relativePath,
+            extension: '.json',
+            checker: 'scene3d-spec',
+            status: 'error',
+            message: `scene3d 规范校验失败（${validation.errors.length} 个错误${warningText}）；完整检查请调用 check_3d_asset。`,
+            diagnostics,
+            durationMs: Date.now() - start,
+        };
+    }
+
+    private static async checkJson(fullPath: string, relativePath: string, start: number): Promise<SyntaxCheckResult> {        const source = await this.readTextFile(fullPath);
         try {
             JSON.parse(source);
             return {

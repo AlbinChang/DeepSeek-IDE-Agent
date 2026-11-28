@@ -51,6 +51,13 @@ const PRELOAD_PATH = path.join(ELECTRON_ROOT, 'dist', 'preload.cjs');
 process.env.SERVER_ROOT = SERVER_SRC;
 process.env.PROJECT_ROOT = PROJECT_ROOT;
 process.env.CONFIG_ROOT = CONFIG_ROOT;
+// 3D 无头预渲染产物：打包后在 resources/three/，开发时在 electron/dist/three/
+process.env.SCENE3D_RUNTIME = isPackaged
+    ? path.join(process.resourcesPath, 'three', 'scene-runtime.js')
+    : path.join(ELECTRON_ROOT, 'dist', 'three', 'scene-runtime.js');
+// Playwright 是 external 依赖：utilityProcess Worker 从 resources/workers 启动时
+// 无法按相对路径解析，这里给出应用根 package.json 供 createRequire 定位 node_modules。
+process.env.SCENE3D_REQUIRE_BASE = path.join(ELECTRON_ROOT, 'package.json');
 
 // ── 加载 .env ──
 // 使用动态 import 避免顶层 dotenv 副作用

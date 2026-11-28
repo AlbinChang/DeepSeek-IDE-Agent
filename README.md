@@ -141,8 +141,9 @@ pnpm run electron:dev
 - **语法高亮**：TS、JS、Python、Java、JSON、YAML、HTML、CSS、XML、Markdown 等 15+ 种语言
 - **Markdown 预览**：打开 `.md` 文件后点击 `PREVIEW` 按钮实时渲染
 - **PDF/图片预览**：直接打开 `.pdf`、`.png`、`.jpg` 等文件即可预览
+- **3D 预览**：打开 `.glb`、`.gltf`、`.obj`、`.stl` 或 `.scene3d.json` 自动进入 3D 视口，支持轨道旋转、线框、网格、自动旋转、视角重置与 PNG 导出
 - **Diff 对比**：在 Git 面板中点击文件查看差异
-- **语法检查**：保存文件后自动检查语法（支持 TS/JS/Python/Java/JSON/YAML/HTML/CSS/XML/SVG/MD），`.svg` 额外做画布越界校验
+- **语法检查**：保存文件后自动检查语法（支持 TS/JS/Python/Java/JSON/YAML/HTML/CSS/XML/SVG/MD），`.svg` 额外做画布越界校验，`.scene3d.json` 额外做场景规范校验
 
 ### 3.5 终端使用
 
@@ -186,8 +187,9 @@ pnpm run electron:dev
 | 📋 文件列表 | 受控递归目录结构获取 |
 | 🔀 Git 版本控制 | 查看状态、历史、差异、分支 |
 | 🖼️ SVG 边界校验 | `check_svg`：解析 `transform`/`path`/图元/文本，静态检测元素是否越出 `viewBox`（含描边外扩、`<use>` 引用、嵌套视口），给出越界像素、行号与修正建议；不渲染、无原生依赖 |
+| 🧊 3D 场景与资产 | `create_3d_scene` / `check_3d_asset` / `render_3d_preview` / `inspect_3d_asset` / `list_3d_assets` / `register_3d_asset`：声明式 `scene3d/v1` 场景、GLB/glTF/OBJ/STL 结构解析与静态编译检查（缓冲/索引/节点环/动画/蒙皮）、Playwright 无头渲染出图并回报三角面/包围盒/像素覆盖率；资产统一归档到 `.3d/` |
 | 🔌 MCP 工具 | 用户自定义 MCP 服务器工具动态注入 |
-| 🧩 专项技能 | `read_skill` 按需加载内置技能（PPT 设计、SVG 图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱） |
+| 🧩 专项技能 | `read_skill` 按需加载内置技能（PPT 设计、SVG 图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱、3D 资产） |
 | 🕸️ 知识图谱 | `kg_*`：DuckDB 独立进程（NDJSON IPC），百万级实体/关系/属性建模、RDF 风格词表（domain/range）、语义唯一性（unique/identity）、`kg_lint` 编译式校验、`kg_merge` 实体归一、多跳属性推理、PageRank/社区分析；数据仅存于工作区 `.duckdb/` |
 
 > 工具命名统一为「动 + 宾」（verb-object）：`write_file`、`replace_in_file`、`insert_in_file`、`replace_all_in_file`、`kg_define_attr`、`kg_list_attrs`、`kg_delete_attr`。历史「宾 + 动」名字（`file_write`、`file_replace`、`file_insert`、`file_replace_all`、`kg_attr_define`、`kg_attr_list`、`kg_attr_delete`）作为别名仍可调用，`validate_workflow` 会对它们报 `tool_deprecated` 提示迁移。
@@ -198,7 +200,7 @@ pnpm run electron:dev
 
 - **常驻部分**只保留角色、核心契约、工作区元信息、工具策略与技能索引；
 - **数值计算契约**常驻：结论/交付物中的算术、百分比、统计、金额、单位/日期换算等数值必须由 `calculate` 或实际执行的代码算出并原样引用，凭心算、估算或记忆写出的数字视为幻觉；评估 Agent 会独立复算，不一致判为问题；
-- **专业任务规范**（PPT/幻灯片、SVG/图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱）以 `SKILL.md` 形式内置在 `server/src/config/skills/`，命中用户指令关键词时由服务端自动装配，未命中时由模型调用 `read_skill("<name>")` 按需拉取；
+- **专业任务规范**（PPT/幻灯片、SVG/图表、代码检视、JAR 包分析、文档写作、Markdown→PDF、联网检索、知识图谱、3D 资产）以 `SKILL.md` 形式内置在 `server/src/config/skills/`，命中用户指令关键词时由服务端自动装配，未命中时由模型调用 `read_skill("<name>")` 按需拉取；
 - 同一内容不再在 `main-agent.json`、`evaluator-agent.json` 与各服务内重复注入，避免提示词膨胀。
 
 新增内置技能：在 `server/src/config/skills/<name>/SKILL.md` 写入 YAML frontmatter（`name` / `description` / `triggers`）与正文即可，无需改代码。
@@ -235,6 +237,32 @@ pnpm run electron:dev
 | `.png` `.jpg` `.gif` `.webp` | 原生图片预览 | 自动跳过 |
 | `.docx` `.xlsx` `.pptx` | 暂不支持预览 | 自动跳过 |
 | `.svg` | 源码编辑 / 图片预览 | XML 良构 + 画布越界校验 |
+| `.glb` `.gltf` `.obj` `.stl` | 3D 视口（轨道/线框/网格/自动旋转/PNG 导出） | 自动跳过 |
+| `.scene3d.json` | 3D 场景预览，可切回源码编辑 | JSON 解析 + scene3d 规范校验 |
+
+### 4.5 3D 场景与资产
+
+内置一条"AI 可自检"的 3D 生产线，资产统一沉淀到工作区 `.3d/`：
+
+```text
+.3d/
+  manifest.json      # 资产索引（工具维护）
+  scenes/            # <slug>.scene3d.json（声明式场景，可 git diff）
+  models/            # <slug>.glb / gltf / obj / stl
+  textures/          # 贴图
+  renders/           # <slug>.png 预览
+  .temp/             # 临时产物（gitignore）
+```
+
+典型闭环：
+
+1. `create_3d_scene` 写入 `scene3d/v1` 场景（角度制、Y 轴向上、单位米），默认立即渲染；
+2. `check_3d_asset` 做静态编译检查（引用、缓冲/索引越界、贴图、manifest），不渲染、秒级返回；
+3. 从返回值读取三角面、包围盒、**像素覆盖率**，判断主体是否过小/全黑/被裁切；
+4. 覆盖同一文件迭代，直到构图达标；导入的 Blender 模型先用 `inspect_3d_asset` 看结构、`check_3d_asset` 查数据合法性、再 `register_3d_asset` 归档；
+5. IDE 中直接打开场景或模型即可交互查看；需要静态图时用 `render_3d_preview`，交付前 `check_3d_asset path=.3d` 全量体检。
+
+分工原则：**资产的物理属性归 Blender（导出 GLB 勾 `+Y Up`、关闭 Draco），显示与交互归 Three.js**。完整架构、工具参考、性能预算与 Blender 导出清单见 [docs/3d-integration.md](docs/3d-integration.md)。
 
 ---
 

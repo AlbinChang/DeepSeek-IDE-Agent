@@ -164,6 +164,8 @@ const BINARY_EXTENSIONS = new Set([
     '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.jar', '.war', '.ear', '.iso', '.dmg',
     // 二进制可执行与动态库
     '.exe', '.dll', '.so', '.dylib', '.bin', '.node', '.wasm', '.obj', '.o', '.a', '.lib',
+    // 3D 模型（gltf/obj 为文本，仍可搜索）
+    '.glb', '.stl', '.fbx', '.blend',
     // 编译字节码
     '.pyc', '.pyo', '.pyd', '.class', '.dex',
     // 数据库与数据文件
@@ -197,6 +199,11 @@ function getMimeType(filePath: string): string {
         '.ico': 'image/x-icon',
         '.tiff': 'image/tiff',
         '.tif': 'image/tiff',
+        '.glb': 'model/gltf-binary',
+        '.gltf': 'model/gltf+json',
+        '.obj': 'text/plain; charset=utf-8',
+        '.stl': 'model/stl',
+        '.bin': 'application/octet-stream',
     };
     return mimeMap[ext] || 'application/octet-stream';
 }

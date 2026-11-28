@@ -29,6 +29,11 @@ pnpm run electron:dist
 - **安装包**：`DeepSeek IDE Agent Setup 1.0.0.exe`（约 92.8 MB，推荐）
 - **绿色便携版**：`win-unpacked/`（文件夹内含 `DeepSeek IDE Agent.exe`）
 
+> **3D 预览/预渲染说明**：`render_3d_preview` 复用 Playwright 的 Chromium（SwiftShader 软件渲染，无需显示器）。
+> 目标机器未安装浏览器时执行 `pnpm exec playwright install chromium`（或随安装包预置浏览器缓存）。
+> 静态校验、资产解析与 `.3d` 清单不依赖浏览器；打包时 `build` 会自动生成
+> `electron/dist/three/scene-runtime.js` 并随 `resources/three/` 一起发布。
+
 ---
 
 ## 二、目标生产环境安装 (Windows 10/11)

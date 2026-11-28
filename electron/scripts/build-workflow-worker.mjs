@@ -27,6 +27,8 @@ await build({
     format: 'cjs',
     outfile: path.join(workersDir, 'workflowWorker.cjs'),
     alias: { '@': SERVER_SRC },
+    // 3D 预渲染依赖 Playwright，运行时通过 createRequire(应用根 package.json) 解析
+    external: ['playwright', 'playwright-core'],
     define: { 'import.meta.url': '__workflowImportMetaUrl' },
     banner: {
         js: [

@@ -102,6 +102,12 @@ describe('system prompt assembly contracts', () => {
         expect(workflow).toContain('acceptedExitCodes');
         expect(workflow).toContain('call: agent');
         expect(workflow).toContain('document.input.schema');
+
+        const threeD = await readSource('config/skills/3d-asset/SKILL.md');
+        expect(threeD).toContain('scene3d/v1');
+        expect(threeD).toContain('create_3d_scene');
+        expect(threeD).toContain('+Y Up');
+        expect(threeD).toContain('.3d/.temp/');
     });
 
     it('routes java archive inspection to the jar skill instead of reading binaries', async () => {

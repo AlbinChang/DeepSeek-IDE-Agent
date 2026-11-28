@@ -19,6 +19,8 @@ extraResources:
     to: .env
   - from: dist/workers
     to: workers
+  - from: dist/three
+    to: three
 
 win:
   target:

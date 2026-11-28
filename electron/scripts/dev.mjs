@@ -160,6 +160,21 @@ function buildPlaywrightWorker() {
     }
 }
 
+// ── 步骤 2.8: 构建 scene3d 无头渲染运行时（浏览器 IIFE） ──
+function buildSceneRuntime() {
+    log('SCENE3D', colors.magenta, 'Building 3D scene runtime...');
+    try {
+        execSync('node scripts/build-scene-runtime.mjs', {
+            cwd: ELECTRON_ROOT,
+            stdio: 'pipe',
+        });
+        log('SCENE3D', colors.green, '3D runtime built → dist/three/scene-runtime.js');
+    } catch (err) {
+        log('SCENE3D', colors.red, '3D runtime build failed:', err.message);
+        process.exit(1);
+    }
+}
+
 // ── 步骤 3: 编译 Main Process ──
 function buildMainProcess() {
     log('MAIN', colors.magenta, 'Building main process...');
@@ -177,6 +192,8 @@ function buildMainProcess() {
                 '--external:electron',
                 '--external:node-pty',
                 '--external:simple-git',
+                '--external:playwright',
+                '--external:playwright-core',
                 '--external:iconv-lite',
                 '--external:jschardet',
                 '--external:mathjs',
@@ -513,6 +530,9 @@ async function main() {
 
     // 2.7 编译 Playwright MCP Worker（独立进程，CJS）
     buildPlaywrightWorker();
+
+    // 2.8 构建 scene3d 无头渲染运行时
+    buildSceneRuntime();
 
     // 3. 编译 Main Process（ESM）
     buildMainProcess();

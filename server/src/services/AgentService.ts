@@ -11,6 +11,7 @@ import { UserPreferenceTools } from '@/tools/UserPreferenceTools.js';
 import { MainAgentReplyTools } from '@/tools/MainAgentReplyTools.js';
 import { KnowledgeGraphTools } from '@/tools/KnowledgeGraphTools.js';
 import { FileTools } from '@/tools/FileTools.js';
+import { Scene3dTools } from '@/tools/Scene3dTools.js';
 import { BrowserMcpAdapter } from '@/services/BrowserMcpAdapter.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
 import { PowerShellSessionManager } from '@/services/PowerShellSessionManager.js';
@@ -704,6 +705,28 @@ export class AgentService extends EventEmitter {
                 workspaceRoot: this.resolveWorkspaceRootFromContext(context),
             }),
         });
+
+        console.log('[AgentService] Registering Scene3dTools (scene3d/glb preview & manifest)...');
+        for (const def of Scene3dTools.getDefinitions()) {
+            const toolName = def.name;
+            this.toolManager.registerTool({
+                ...def,
+                execute: async (params, context) => {
+                    const root = this.resolveWorkspaceRootFromContext(context);
+                    if (!root) throw new Error('Workspace not initialized');
+                    const tools = new Scene3dTools(root);
+                    switch (toolName) {
+                        case 'create_3d_scene': return await tools.createScene(params);
+                        case 'render_3d_preview': return await tools.renderPreview(params);
+                        case 'inspect_3d_asset': return await tools.inspectAsset(params);
+                        case 'check_3d_asset': return await tools.checkAsset(params);
+                        case 'list_3d_assets': return await tools.listAssets(params);
+                        case 'register_3d_asset': return await tools.registerAsset(params);
+                        default: throw new Error(`Unknown scene3d tool: ${toolName}`);
+                    }
+                }
+            });
+        }
 
         console.log('[AgentService] Registering WorkflowTools (declarative .workflow)...');
         if (globalConfig.workflow.enabled) {

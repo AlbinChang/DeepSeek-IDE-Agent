@@ -1066,6 +1066,10 @@ export function useAgentSSE() {
                     'insert_in_file',
                     'replace_all_in_file',
                     'delete_path',
+                    // 3D：create_3d_scene 通过结果 path 触发编辑器/查看器刷新
+                    'create_3d_scene',
+                    'render_3d_preview',
+                    'register_3d_asset',
                     // 兼容历史（宾+动）命名与其他别名
                     'file_write',
                     'file_replace',

@@ -1599,7 +1599,8 @@ export class AgentTurnEngine {
                         // - filePath: Agent 传入的相对路径（原样）
                         // - absolutePath: 基于工作区 root 解析的绝对路径
                         //   前端用两者 + workspaceRoot 做归一化比较，兼容绝对/相对两种 activeFile
-                        const fileRelPath =
+                        // 参数没有 path 时回退到工具结果里的 path（如 create_3d_scene 返回生成路径）
+                        const argsPath =
                             typeof parsedArgs === 'object' && parsedArgs !== null
                                 ? (typeof (parsedArgs as any).path === 'string'
                                     ? (parsedArgs as any).path
@@ -1609,6 +1610,11 @@ export class AgentTurnEngine {
                                             ? (parsedArgs as any).targetPath
                                             : null)))
                                 : null;
+                        const resultPath =
+                            result && typeof result === 'object' && typeof (result as any).path === 'string'
+                                ? String((result as any).path)
+                                : null;
+                        const fileRelPath = argsPath || resultPath;
 
                         emit({
                             type: "annotation",
