@@ -13,6 +13,7 @@ import { KnowledgeGraphTools } from '@/tools/KnowledgeGraphTools.js';
 import { FileTools } from '@/tools/FileTools.js';
 import { BrowserMcpAdapter } from '@/services/BrowserMcpAdapter.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
+import { PowerShellSessionManager } from '@/services/PowerShellSessionManager.js';
 import { FileIO } from '@/utils/FileIO.js';
 import { SystemTools } from '@/tools/SystemTools.js';
 import { CalculatorTool } from '@/tools/custom/CalculatorTool.js';
@@ -1491,6 +1492,8 @@ export class AgentService extends EventEmitter {
     }
 
     public async resetWorkspace(userId: string): Promise<void> {
+        // 释放该用户的长驻 PowerShell 会话，避免切换工作区后宿主进程残留
+        PowerShellSessionManager.getInstance().disposeUser(userId);
         // 先断开 MCP 连接和 Playwright MCP 连接
         const root = this.workspaces.get(userId);
         if (root) {
@@ -1510,6 +1513,8 @@ export class AgentService extends EventEmitter {
     }
 
     public disconnectWorkspaceConnections(userId: string, reason: string, previousWorkspaceRoot: string | null): void {
+        // 释放该用户的长驻 PowerShell 会话（后台服务由命令自行管理，不受影响）
+        PowerShellSessionManager.getInstance().disposeUser(userId);
         // Handle workspace disconnection logic
         console.log(`Disconnecting workspace for user ${userId}: ${reason}`);
 

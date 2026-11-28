@@ -150,6 +150,7 @@ pnpm run electron:dev
 - 支持 `node`、`npm`、`git`、`python` 等所有命令行工具
 - 多终端会话管理
 - 快捷键：`Ctrl+S` 保存文件
+- **PowerShell 长驻会话**：首次命令后台预热宿主进程，后续命令复用同一 `powershell.exe`（每条命令独立 Runspace，变量/函数不跨命令泄漏），常规命令开销从 ~0.8–1.2s 降到 ~0.1s；含 `exit` 或 `.ps1` 脚本的命令自动回退一次性进程以保证退出码语义；超时/取消会终止整个会话进程树。`AGENT_POWERSHELL_SESSION=0` 可关闭，`AGENT_POWERSHELL_SESSION_IDLE_MS` 控制空闲回收（默认 10 分钟）
 
 ### 3.6 MCP 工具扩展
 
@@ -179,7 +180,7 @@ pnpm run electron:dev
 | 工具类别 | 说明 |
 |----------|------|
 | 📄 文件操作 | 读取、写入（`write_file`）、精准替换（`replace_in_file`）、行号插入（`insert_in_file`）、删除工作区文件 |
-| 🖥️ 终端命令 | PowerShell / CMD 命令执行（阻塞式，返回完整输出） |
+| 🖥️ 终端命令 | PowerShell / CMD 命令执行（阻塞式，返回完整输出）；PowerShell 复用长驻宿主进程（每命令独立 Runspace，`exit`/`.ps1` 自动回退一次性进程） |
 | 🧮 数值计算 | `calculate`：mathjs 精确求值（算术、百分比、统计、单位/进制换算）或 vm 沙箱 JS 脚本；结论与交付物中的数值必须先由它算出，禁止心算与估算 |
 | 🔍 代码搜索 | 工作区内的文件搜索与内容搜索 |
 | 📋 文件列表 | 受控递归目录结构获取 |

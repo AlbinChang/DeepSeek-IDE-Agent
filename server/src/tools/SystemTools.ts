@@ -3,6 +3,11 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
+import {
+    PowerShellSessionManager,
+    PowerShellSessionUnavailableError,
+} from '@/services/PowerShellSessionManager.js';
+import type { PowerShellSessionRunResult } from '@/services/PowerShellSessionManager.js';
 import { GitService } from '@/services/GitService.js';
 import { FileIO } from '@/utils/FileIO.js';
 
@@ -356,6 +361,68 @@ export class SystemTools {
     }
 
     /**
+     * Windows: 决定注入 JAVA_TOOL_OPTIONS 的 -Dfile.encoding 值，
+     * 保证 Maven 自身 JVM 与 fork 出的 javac 子进程使用同一编码。
+     *
+     * 注意：Maven 命令行 -Dfile.encoding=xxx 只影响 Maven 自身 JVM（最高优先级 for Maven），
+     *       但 forked javac 子进程继承的是 JAVA_TOOL_OPTIONS，不是 Maven 的 -D 参数。
+     *       因此必须将命令中指定的编码同步写入 JAVA_TOOL_OPTIONS，才能让 javac 也使用同一编码。
+     *
+     * 优先级（高→低）：
+     *   1. 命令中显式 -Dfile.encoding=xxx（LLM 意图最明确）→ 同步注入 JAVA_TOOL_OPTIONS
+     *   2. pom.xml 中声明的 <encoding>（项目级约定）→ 注入该编码
+     *   3. 系统 JAVA_TOOL_OPTIONS 已含 -Dfile.encoding → 保留，不覆盖
+     *   4. 有 pom.xml 但无显式 encoding → 不注入，保留系统默认（GBK 等）
+     *   5. 非 Maven 项目 → 注入 UTF-8（安全默认）
+     */
+    private static buildJavaToolOptions(
+        command: string,
+        javaEncoding: string | null | undefined,
+    ): string | undefined {
+        const existing = process.env.JAVA_TOOL_OPTIONS || '';
+
+        const cmdEncodingMatch = command.match(/-Dfile\.encoding=["']?([A-Za-z0-9_\-]+)["']?/);
+        if (cmdEncodingMatch) {
+            const cmdEnc = cmdEncodingMatch[1];
+            const base = existing.replace(/-Dfile\.encoding=\S+/g, '').trim();
+            return base ? `${base} -Dfile.encoding=${cmdEnc}` : `-Dfile.encoding=${cmdEnc}`;
+        }
+
+        if (existing.includes('-Dfile.encoding=')) return existing;
+
+        if (typeof javaEncoding === 'string') {
+            return existing ? `${existing} -Dfile.encoding=${javaEncoding}` : `-Dfile.encoding=${javaEncoding}`;
+        }
+
+        if (javaEncoding === null) {
+            return existing || undefined;
+        }
+
+        return existing ? `${existing} -Dfile.encoding=UTF-8` : '-Dfile.encoding=UTF-8';
+    }
+
+    /** 构造本次命令需要覆盖的环境变量（一次性 spawn 与长驻会话共用）。 */
+    private static buildCommandEnv(
+        command: string,
+        isWin: boolean,
+        javaEncoding: string | null | undefined,
+        extraEnv?: Record<string, string>,
+    ): Record<string, string> {
+        const env: Record<string, string> = {};
+        // 不强制覆盖 NODE_ENV，尊重系统已有配置；未设置时默认 development。
+        // 强制 production 会导致 vite/webpack 等构建工具启用压缩、禁用 HMR。
+        if (!process.env.NODE_ENV) env.NODE_ENV = 'development';
+        if (isWin) {
+            const jto = this.buildJavaToolOptions(command, javaEncoding);
+            if (jto !== undefined) env.JAVA_TOOL_OPTIONS = jto;
+        } else {
+            env.FORCE_COLOR = '1';
+            env.TERM = 'xterm-256color';
+        }
+        return { ...env, ...(extraEnv || {}) };
+    }
+
+    /**
      * 将命令执行的完整输出持久化到工作区的 .command/output.txt
      * Agent 可通过 read_file 按需检索完整输出，避免长输出被截断丢失信息
      */
@@ -566,6 +633,30 @@ export class SystemTools {
         await ProcessSafetyGuard.getInstance().guard(command);
         if (abortSignal?.aborted) throw new Error(`[${toolName}] 命令已被取消`);
 
+        // 长驻 PowerShell 会话：就绪后复用宿主进程；
+        // 未就绪时当前命令走一次性 spawn（不承担冷启动成本），同时后台预热宿主。
+        // 会话不可用返回 null，回退到下面的一次性 spawn（行为与旧实现一致）。
+        if (shell === 'powershell' && PowerShellSessionManager.shouldUseSession(command)) {
+            const sessionManager = PowerShellSessionManager.getInstance();
+            if (sessionManager.isReady(userId)) {
+                const sessionResult = await this.executePowerShellViaSession(
+                    command,
+                    cwd,
+                    userId,
+                    finalTimeout,
+                    javaEncoding,
+                    workspaceRoot,
+                    extraEnv,
+                    abortSignal,
+                );
+                if (sessionResult) return sessionResult;
+            } else {
+                void sessionManager.prewarm(userId).catch((error) => {
+                    console.warn('[SystemTools] PowerShell session prewarm failed:', error);
+                });
+            }
+        }
+
         return new Promise((resolve) => {
             const isWin = process.platform === 'win32';
             const requestedShell = String(shell).toLowerCase();
@@ -596,67 +687,13 @@ export class SystemTools {
                 args = ['-NoProfile', '-NonInteractive', '-Command', command];
             }
             
-            // Windows: 按优先级决定注入 JAVA_TOOL_OPTIONS 的 -Dfile.encoding 值，
-            // 保证 Maven 自身 JVM 与 fork 出的 javac 子进程使用同一编码。
-            //
-            // 注意：Maven 命令行 -Dfile.encoding=xxx 只影响 Maven 自身 JVM（最高优先级 for Maven），
-            //       但 forked javac 子进程继承的是 JAVA_TOOL_OPTIONS，不是 Maven 的 -D 参数。
-            //       因此必须将命令中指定的编码同步写入 JAVA_TOOL_OPTIONS，才能让 javac 也使用同一编码。
-            //
-            // 优先级（高→低）：
-            //   1. 命令中显式 -Dfile.encoding=xxx（LLM 意图最明确）→ 同步注入 JAVA_TOOL_OPTIONS
-            //   2. pom.xml 中声明的 <encoding>（项目级约定）→ 注入该编码
-            //   3. 系统 JAVA_TOOL_OPTIONS 已含 -Dfile.encoding → 保留，不覆盖
-            //   4. 有 pom.xml 但无显式 encoding → 不注入，保留系统默认（GBK 等）
-            //   5. 非 Maven 项目 → 注入 UTF-8（安全默认）
-            const buildJavaToolOptions = (): string | undefined => {
-                const existing = process.env.JAVA_TOOL_OPTIONS || '';
-
-                // 优先级 1：扫描命令字符串中的 -Dfile.encoding=xxx（含引号包裹形式）
-                const cmdEncodingMatch = command.match(/-Dfile\.encoding=["']?([A-Za-z0-9_\-]+)["']?/);
-                if (cmdEncodingMatch) {
-                    const cmdEnc = cmdEncodingMatch[1];
-                    // 将命令中指定的编码同步注入 JAVA_TOOL_OPTIONS，
-                    // 让 forked javac 也使用相同编码，而不是系统默认
-                    const base = existing.replace(/-Dfile\.encoding=\S+/g, '').trim();
-                    return base ? `${base} -Dfile.encoding=${cmdEnc}` : `-Dfile.encoding=${cmdEnc}`;
-                }
-
-                // 优先级 3：系统 JAVA_TOOL_OPTIONS 已设置，不覆盖
-                if (existing.includes('-Dfile.encoding=')) return existing;
-
-                // 优先级 2：pom.xml 中有显式 encoding 声明
-                if (typeof javaEncoding === 'string') {
-                    return existing ? `${existing} -Dfile.encoding=${javaEncoding}` : `-Dfile.encoding=${javaEncoding}`;
-                }
-
-                // 优先级 4：有 pom.xml 但无显式 encoding（javaEncoding === null）→ 不注入
-                if (javaEncoding === null) {
-                    return existing || undefined;
-                }
-
-                // 优先级 5：非 Maven 项目（javaEncoding === undefined）→ 默认 UTF-8
-                return existing ? `${existing} -Dfile.encoding=UTF-8` : '-Dfile.encoding=UTF-8';
-            };
-
             const child = spawn(selectedShell, args, {
                 cwd,
                 // A separate POSIX process group lets cancellation stop the shell and its descendants.
                 detached: !isWin,
-                env: { 
-                    ...process.env, 
-                    // 不强制覆盖 NODE_ENV，尊重系统已有配置；未设置时默认 development
-                    // 强制 production 会导致 vite/webpack 等构建工具启用压缩、禁用 HMR
-                    ...(process.env.NODE_ENV ? {} : { NODE_ENV: 'development' }),
-                    // Windows: JAVA_TOOL_OPTIONS 注入 UTF-8，Linux/macOS: 注入颜色支持
-                    ...(isWin
-                        ? (() => {
-                            const jto = buildJavaToolOptions();
-                            return jto !== undefined ? { JAVA_TOOL_OPTIONS: jto } : {};
-                          })()
-                        : { FORCE_COLOR: '1', TERM: 'xterm-256color' }
-                    ),
-                    ...(extraEnv || {}),
+                env: {
+                    ...process.env,
+                    ...this.buildCommandEnv(command, isWin, javaEncoding, extraEnv),
                 }
             });
 
@@ -702,11 +739,10 @@ export class SystemTools {
              * 对齐 3.2 节 & 41.1：工具输出强力截断逻辑
              * 
              * 阈值说明：
-             * - LLM_MAX_OUTPUT (2.5KB): 返回给大模型推理的内容上限，防止上下文爆炸及链路积压。
+             * - 2.5KB: 返回给大模型推理的内容上限，防止上下文爆炸及链路积压。
              * - PROCESS_HARD_LIMIT (5MB): 允许子进程生存的输出上限，防止恶意输出或死循环。
              * - FULL_OUTPUT_FILE_LIMIT (10MB): 持久化到 .command/output.txt 的完整输出上限。
              */
-            const LLM_MAX_OUTPUT = 2560; // 2.5KB 强力截断点
             const PROCESS_HARD_LIMIT = 5 * 1024 * 1024; // 5MB 物理熔断红线
             const FULL_OUTPUT_FILE_LIMIT = 10 * 1024 * 1024; // 10MB 文件持久化上限
             
@@ -763,31 +799,8 @@ export class SystemTools {
             child.stdout.on('data', (d) => onData(d, 'stdout'));
             child.stderr.on('data', (d) => onData(d, 'stderr'));
 
-            /** 完整字节流解码：严格 UTF-8 优先，非法时按 GB18030 兜底（GBK 超集），再剥离 ANSI/JVM 噪音。 */
-            const decodeOutput = (chunks: Buffer[]): string => {
-                if (chunks.length === 0) return '';
-                return decodeCommandOutput(Buffer.concat(chunks));
-            };
-
-            const finalizeOutput = (): FinalizedCommandOutput => {
-                const fullStdout = decodeOutput(stdoutChunks);
-                const fullStderr = decodeOutput(stderrChunks);
-
-                // stdout 采用滚动尾部窗口：构建结果/测试报告/错误堆栈总在末尾，保留尾部才有意义
-                let stdoutFinal = fullStdout;
-                let isTruncated = false;
-                if (stdoutFinal.length > LLM_MAX_OUTPUT * 2) {
-                    stdoutFinal = stdoutFinal.slice(stdoutFinal.length - LLM_MAX_OUTPUT);
-                    isTruncated = true;
-                }
-
-                let stderrFinal = fullStderr;
-                if (stderrFinal.length > LLM_MAX_OUTPUT) {
-                    stderrFinal = stderrFinal.substring(0, LLM_MAX_OUTPUT) + '\n[stderr截断]';
-                }
-
-                return { fullStdout, fullStderr, stdoutFinal, stderrFinal, isTruncated };
-            };
+            const finalizeOutput = (): FinalizedCommandOutput =>
+                this.finalizeBuffers(stdoutChunks, stderrChunks);
 
             /**
              * 在命令执行完毕后，将完整输出写入 .command/output.txt 供 Agent 按需检索
@@ -796,31 +809,20 @@ export class SystemTools {
                 exitCode: number | string | null,
                 status: 'success' | 'error',
                 extraStderr: string,
-                outputFilePath: string | null,
                 output: FinalizedCommandOutput,
             ) => {
-                const encodingHint = buildEncodingHint(
+                const result = await this.buildCommandResult({
                     command,
-                    output.stdoutFinal,
-                    output.stderrFinal + extraStderr,
-                );
-                const hint = status === 'error'
-                    ? buildFailureHints(command, output.stdoutFinal, output.stderrFinal + extraStderr)
-                    : '';
-                const resultStderr = output.stderrFinal + extraStderr + encodingHint + hint;
-
-                // 仅当输出被截断或熔断时才追加简短提示，避免每次命令执行都浪费 ~150 字符
-                // 完整输出始终持久化到 .command/output.txt（已在系统提示词中说明）
-                const fileHint = (outputFilePath && (output.isTruncated || isHardKilled))
-                    ? `\n[截断，完整日志: ${this.COMMAND_OUTPUT_DIR}/${this.COMMAND_OUTPUT_FILE}]`
-                    : '';
-
-                resolve({
-                    stdout: (output.isTruncated ? '[截断，仅保留尾部]\n' : '') + output.stdoutFinal + fileHint,
-                    stderr: resultStderr,
+                    shell,
+                    exitCode,
                     status,
-                    code: exitCode
+                    extraStderr,
+                    workspaceRoot,
+                    output,
+                    hardKilled: isHardKilled,
+                    durationMs: Date.now() - commandStartTime,
                 });
+                resolve(result);
             };
 
             timer = setTimeout(() => {
@@ -832,20 +834,13 @@ export class SystemTools {
                 ProcessSafetyGuard.getInstance().unregisterCommandChild(child.pid ?? -1);
                 // 超时路径：异步持久化后再 resolve
                 const exitCode = 'SIGTERM';
-                const duration = Date.now() - commandStartTime;
                 const output = finalizeOutput();
-                if (workspaceRoot) {
-                    this.persistCommandOutput(
-                        workspaceRoot, command, shell, exitCode, duration,
-                        output.fullStdout, output.fullStderr, output.isTruncated, isHardKilled
-                    ).then((filePath) => {
-                        persistAndResolve(exitCode, 'error',
-                            `\n[Error] Command timed out after ${finalTimeout}ms`, filePath, output);
-                    });
-                } else {
-                    persistAndResolve(exitCode, 'error',
-                        `\n[Error] Command timed out after ${finalTimeout}ms`, null, output);
-                }
+                void persistAndResolve(
+                    exitCode,
+                    'error',
+                    `\n[Error] Command timed out after ${finalTimeout}ms`,
+                    output,
+                );
             }, finalTimeout);
 
             child.on('close', (code) => {
@@ -861,19 +856,11 @@ export class SystemTools {
                     : (aborted ? '\n[错误] 命令已被取消' : '');
 
                 const status = code === 0 && !aborted ? 'success' as const : 'error' as const;
-                const duration = Date.now() - commandStartTime;
 
                 // 对最后一份数据做微小延迟确保 onData 队列清空，然后持久化并 resolve
                 setTimeout(async () => {
                     const output = finalizeOutput();
-                    let filePath: string | null = null;
-                    if (workspaceRoot) {
-                        filePath = await this.persistCommandOutput(
-                            workspaceRoot, command, shell, code, duration,
-                            output.fullStdout, output.fullStderr, output.isTruncated, isHardKilled
-                        );
-                    }
-                    await persistAndResolve(code, status, extraStderr, filePath, output);
+                    await persistAndResolve(code, status, extraStderr, output);
                 }, 10);
             });
 
@@ -892,6 +879,141 @@ export class SystemTools {
                     code: -1
                 });
             });
+        });
+    }
+
+    /** 完整字节流解码 + 截断（一次性 spawn 与长驻会话共用）。 */
+    private static finalizeBuffers(stdoutChunks: Buffer[], stderrChunks: Buffer[]): FinalizedCommandOutput {
+        const LLM_MAX_OUTPUT = 2560;
+        const fullStdout = stdoutChunks.length ? decodeCommandOutput(Buffer.concat(stdoutChunks)) : '';
+        const fullStderr = stderrChunks.length ? decodeCommandOutput(Buffer.concat(stderrChunks)) : '';
+
+        // stdout 采用滚动尾部窗口：构建结果/测试报告/错误堆栈总在末尾，保留尾部才有意义
+        let stdoutFinal = fullStdout;
+        let isTruncated = false;
+        if (stdoutFinal.length > LLM_MAX_OUTPUT * 2) {
+            stdoutFinal = stdoutFinal.slice(stdoutFinal.length - LLM_MAX_OUTPUT);
+            isTruncated = true;
+        }
+
+        let stderrFinal = fullStderr;
+        if (stderrFinal.length > LLM_MAX_OUTPUT) {
+            stderrFinal = stderrFinal.substring(0, LLM_MAX_OUTPUT) + '\n[stderr截断]';
+        }
+
+        return { fullStdout, fullStderr, stdoutFinal, stderrFinal, isTruncated };
+    }
+
+    /**
+     * 统一组装最终结果：编码提示、失败提示、完整输出持久化到 .command/output.txt。
+     */
+    private static async buildCommandResult(params: {
+        command: string;
+        shell: 'powershell' | 'cmd';
+        exitCode: number | string | null;
+        status: 'success' | 'error';
+        extraStderr: string;
+        workspaceRoot: string | undefined;
+        output: FinalizedCommandOutput;
+        hardKilled: boolean;
+        durationMs: number;
+    }): Promise<CommandResult> {
+        const {
+            command, shell, exitCode, status, extraStderr,
+            workspaceRoot, output, hardKilled, durationMs,
+        } = params;
+
+        const encodingHint = buildEncodingHint(
+            command,
+            output.stdoutFinal,
+            output.stderrFinal + extraStderr,
+        );
+        const hint = status === 'error'
+            ? buildFailureHints(command, output.stdoutFinal, output.stderrFinal + extraStderr)
+            : '';
+        const resultStderr = output.stderrFinal + extraStderr + encodingHint + hint;
+
+        let outputFilePath: string | null = null;
+        if (workspaceRoot) {
+            outputFilePath = await this.persistCommandOutput(
+                workspaceRoot, command, shell, exitCode, durationMs,
+                output.fullStdout, output.fullStderr, output.isTruncated, hardKilled,
+            );
+        }
+
+        // 仅当输出被截断或熔断时才追加简短提示，避免每次命令执行都浪费 ~150 字符
+        // 完整输出始终持久化到 .command/output.txt（已在系统提示词中说明）
+        const fileHint = (outputFilePath && (output.isTruncated || hardKilled))
+            ? `\n[截断，完整日志: ${this.COMMAND_OUTPUT_DIR}/${this.COMMAND_OUTPUT_FILE}]`
+            : '';
+
+        return {
+            stdout: (output.isTruncated ? '[截断，仅保留尾部]\n' : '') + output.stdoutFinal + fileHint,
+            stderr: resultStderr,
+            status,
+            code: exitCode,
+        };
+    }
+
+    /**
+     * 走长驻 PowerShell 会话执行；会话未启动成功时返回 null，由调用方回退一次性 spawn。
+     */
+    private static async executePowerShellViaSession(
+        command: string,
+        cwd: string,
+        userId: string | undefined,
+        timeout: number,
+        javaEncoding: string | null | undefined,
+        workspaceRoot: string | undefined,
+        extraEnv: Record<string, string> | undefined,
+        abortSignal: AbortSignal | undefined,
+    ): Promise<CommandResult | null> {
+        let sessionResult: PowerShellSessionRunResult;
+        try {
+            sessionResult = await PowerShellSessionManager.getInstance().run(userId, {
+                command,
+                cwd,
+                timeout,
+                extraEnv: this.buildCommandEnv(command, process.platform === 'win32', javaEncoding, extraEnv),
+                abortSignal,
+            });
+        } catch (error) {
+            const unavailable = error instanceof PowerShellSessionUnavailableError
+                || (error as { name?: string } | null)?.name === 'PowerShellSessionUnavailableError';
+            if (unavailable) {
+                console.warn(
+                    '[SystemTools] PowerShell long-lived session unavailable, falling back to one-shot spawn:',
+                    (error as Error)?.message || error,
+                );
+                return null;
+            }
+            throw error;
+        }
+
+        const output = this.finalizeBuffers([sessionResult.stdout], [sessionResult.stderr]);
+        const extraStderr = sessionResult.timedOut
+            ? `\n[Error] Command timed out after ${timeout}ms`
+            : sessionResult.hardKilled
+                ? '\n[错误] 命令输出超过 5MB 物理上限，进程已被强制终止。请优化命令减少输出量（如加 --silent / -q 参数）。'
+                : sessionResult.aborted
+                    ? '\n[错误] 命令已被取消'
+                    : sessionResult.hostError
+                        ? `\n[错误] ${sessionResult.hostError}`
+                        : '';
+        const status = (sessionResult.timedOut || sessionResult.aborted || sessionResult.hardKilled || sessionResult.hostError)
+            ? 'error'
+            : sessionResult.status;
+
+        return this.buildCommandResult({
+            command,
+            shell: 'powershell',
+            exitCode: sessionResult.code,
+            status,
+            extraStderr,
+            workspaceRoot,
+            output,
+            hardKilled: sessionResult.hardKilled,
+            durationMs: sessionResult.durationMs,
         });
     }
 }

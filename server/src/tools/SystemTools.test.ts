@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import iconv from 'iconv-lite';
 
 import {
@@ -10,6 +10,12 @@ import {
     terminatePosixCommandGroup,
 } from '@/tools/SystemTools.js';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
+import { PowerShellSessionManager } from '@/services/PowerShellSessionManager.js';
+
+afterAll(() => {
+    // 首次 PowerShell 命令会后台预热长驻宿主，测试结束统一释放，避免影响其他用例。
+    PowerShellSessionManager.getInstance().disposeAll();
+});
 
 describe('SystemTools failure hints', () => {
     it('suggests writing a file for broken inline python', () => {
@@ -146,6 +152,36 @@ describe('SystemTools.executePowerShellCommand runtime options', () => {
                 kill.mockRestore();
             }
         });
+    });
+
+    it.skipIf(process.platform !== 'win32')('reuses one long-lived PowerShell host across regular commands', async () => {
+        const user = 'systemtools-session-reuse';
+        const manager = PowerShellSessionManager.getInstance();
+        try {
+            expect(await manager.prewarm(user)).toBe(true);
+
+            const first = await SystemTools.executePowerShellCommand(
+                'Write-Output $PID', process.cwd(), user, 30_000, null,
+            );
+            const second = await SystemTools.executePowerShellCommand(
+                'Write-Output $PID', process.cwd(), user, 30_000, null,
+            );
+
+            expect(first.status).toBe('success');
+            expect(second.status).toBe('success');
+            expect(first.stdout.trim()).toBe(second.stdout.trim());
+        } finally {
+            manager.disposeUser(user);
+        }
+    }, 30_000);
+
+    it.skipIf(process.platform !== 'win32')('keeps exit-code semantics for commands that call exit', async () => {
+        const result = await SystemTools.executePowerShellCommand(
+            'exit 5', process.cwd(), undefined, 30_000, null,
+        );
+
+        expect(result.status).toBe('error');
+        expect(result.code).toBe(5);
     });
 
     it('kills the command when the abort signal fires', async () => {

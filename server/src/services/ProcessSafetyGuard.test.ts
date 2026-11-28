@@ -7,8 +7,21 @@
  * - Agent 端口绑定 PID 检测
  * - 跨平台 kill 命令模式识别
  */
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { ProcessSafetyGuard } from '@/services/ProcessSafetyGuard.js';
+
+describe('ProcessSafetyGuard — command hot path', () => {
+    it('does not enumerate the process tree for non-kill commands', async () => {
+        const guard = ProcessSafetyGuard.getInstance();
+        const spy = vi.spyOn(guard, 'refreshChildPids');
+        try {
+            await guard.guard('Write-Output 1');
+            expect(spy).not.toHaveBeenCalled();
+        } finally {
+            spy.mockRestore();
+        }
+    });
+});
 
 describe('ProcessSafetyGuard — Kill intent parsing', () => {
     let guard: ProcessSafetyGuard;

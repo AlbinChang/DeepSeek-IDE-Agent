@@ -874,16 +874,18 @@ export class ProcessSafetyGuard {
      */
     async evaluate(command: string): Promise<KillVerdict> {
         this.refreshProtectedPorts();
-        await this.refreshChildPids();
-        const blockedPids: number[] = [];
-        const blockedPorts: number[] = [];
-        const reasons: string[] = [];
 
-        // === 第 0 层：检测是否有 kill 意图 ===
+        // 先做纯字符串级 kill 意图识别：非 kill 命令直接放行。
+        // refreshChildPids 会走 WMI/ps 枚举进程树（~1s+），绝不能对每条普通命令都执行。
         const killIntent = await this.parseKillIntent(command);
         if (!killIntent) {
             return { allowed: true, reason: '非进程终止命令', blockedPids: [], blockedPorts: [] };
         }
+
+        await this.refreshChildPids();
+        const blockedPids: number[] = [];
+        const blockedPorts: number[] = [];
+        const reasons: string[] = [];
 
         // === 第 0.5 层：端口杀进程工具/管道命中受保护端口时，先验拦截 ===
         const protectedTargetPorts = this.getProtectedMatches(killIntent.targetPorts);
