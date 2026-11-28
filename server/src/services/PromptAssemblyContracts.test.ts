@@ -40,9 +40,24 @@ describe('system prompt assembly contracts', () => {
             .reduce((total, text) => total + text.length, 0);
 
         expect(Object.keys(config.operation_guidelines).length).toBeLessThanOrEqual(14);
-        // 预算含「知识图谱」约束；新增常驻能力时同步评估，避免提示词持续膨胀。
-        expect(guidelineChars).toBeLessThanOrEqual(2200);
+        // 预算含「知识图谱」与「数值计算」约束；新增常驻能力时同步评估，避免提示词持续膨胀。
+        expect(guidelineChars).toBeLessThanOrEqual(2400);
         expect(tipChars).toBeLessThanOrEqual(800);
+    });
+
+    it('forces numeric results through the calculate tool instead of mental math', async () => {
+        const main = await readJson('config/main-agent.json');
+        const evaluator = await readJson('config/evaluator-agent.json');
+        const workflowStep = await readJson('config/workflow-step-agent.json');
+
+        expect(main.operation_guidelines.numeric_computation_contract).toContain('`calculate`');
+        expect(main.operation_guidelines.numeric_computation_contract).toContain('禁止心算');
+        expect(evaluator.operation_guidelines.numeric_verification_contract).toContain('`calculate`');
+        expect(workflowStep.operation_guidelines.numeric_contract).toContain('`calculate`');
+
+        const service = await readSource('services/AgentService.ts');
+        expect(service).toContain('### 数值计算准则：先算后写，禁止心算');
+        expect(service).toContain('凭心算、估算或记忆写出的数字一律视为幻觉');
     });
 
     it('keeps the evaluator config compact', async () => {

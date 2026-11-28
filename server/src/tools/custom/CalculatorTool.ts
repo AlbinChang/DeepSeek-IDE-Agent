@@ -237,7 +237,7 @@ function executeAndCapture(script: string, sandbox: Record<string, any>, timeout
  */
 export const CalculatorTool: ToolDefinition = {
     name: 'calculate',
-    description: `精确数学计算与批量数据处理：单位/进制转换、字符串与日期运算。心算即可完成的小事直接算，不要调用。
+    description: `精确数学计算：结论/交付物中的任何数值都必须先用本工具算出，禁止心算或估算。覆盖算术、百分比、统计、单位/进制转换、日期与字符串运算。
 单行数学表达式走 mathjs；多行或含 JS 语法走 vm 沙箱脚本（可用 math.evaluate/math.unit，console 输出收集到 logs，可用 return 或末表达式返回）。沙箱无 require/process/fs/net/child_process。`,
 
     parameters: {

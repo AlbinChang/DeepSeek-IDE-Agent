@@ -110,6 +110,16 @@ describe('evaluateCompletionClaims', () => {
         expect(issues.map((issue) => issue.kind)).toContain('unverified_claimed_target');
     });
 
+    it('does not treat a calculation as proof that work was completed', () => {
+        const reply = '本次任务已完成。';
+        const evidence: ToolEvidence[] = [
+            { name: 'calculate', ok: true, args: { expression: '1 + 1' } },
+        ];
+
+        expect(evaluateCompletionClaims(reply, evidence).map((issue) => issue.kind))
+            .toContain('missing_write_evidence');
+    });
+
     it('treats a shell command mentioning the target as evidence', () => {
         const reply = '已把 `gitcode访问令牌.txt` 加入 `.gitignore`。';
         const evidence: ToolEvidence[] = [{

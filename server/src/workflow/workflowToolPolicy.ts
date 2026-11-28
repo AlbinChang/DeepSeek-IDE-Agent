@@ -21,6 +21,7 @@ export const READONLY_EVALUATOR_TOOLS = [
     'read_file',
     'read_file_by_byte',
     'list_files',
+    'calculate',
     'check_svg',
 ];
 

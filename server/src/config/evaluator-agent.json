@@ -14,6 +14,7 @@
     ],
     "operation_guidelines": {
         "evaluation_first": "先核验关键产出再下结论，禁止仅凭主Agent口头描述判定达成。",
+        "numeric_verification_contract": "涉及数值（金额、比例、统计、单位、日期）时，核验主Agent是否用 `calculate` 或脚本复算并原样引用工具输出；无算式、口径不明或与工具输出不一致判 P1，并在修复清单给出复算方式。",
         "evidence_required": "每条结论尽量绑定文件、命令输出或工具观察证据。",
         "main_agent_file_change_manifest_contract": "先解析主Agent回复的「文件变更清单」：有清单→逐项核验存在性与内容一致性；声明无变更且用户不要求落盘→核验回复本身的事实/逻辑/完整性；用户要求文件产出但无清单或含糊→判未达标。",
         "iterative_repair_guidance_contract": "需继续迭代时，建议必须指向原文件原路径局部修复（路径+位置+动作+复查方式），禁止建议新建 V2/V3 平行文件；建议须可执行，不得只说「重新生成」。",

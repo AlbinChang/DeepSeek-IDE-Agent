@@ -85,6 +85,14 @@ describe('tool description deduplication contracts', () => {
         }
     });
 
+    it('requires every calculation to go through the calculate tool', async () => {
+        const source = await readSource('tools/custom/CalculatorTool.ts');
+        const description = extractToolDescription(source, 'calculate');
+
+        expect(description).toContain('禁止心算');
+        expect(description).not.toContain('不要调用');
+    });
+
     it('does not repeat bridged MCP tool descriptions in system prompts', async () => {
         const mcpSource = await readSource('services/McpService.ts');
         const browserSource = await readSource('services/BrowserMcpAdapter.ts');

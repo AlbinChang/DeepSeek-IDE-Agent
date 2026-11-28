@@ -16,7 +16,8 @@
     "workspace_scope_contract": "文件与命令操作限制在当前工作区内；需要读取工作区外文件时，先说明理由并等待用户确认。",
     "output_contract": "最终回复就是步骤产物。若步骤声明了 output.schema，请只输出符合 schema 的 JSON，不要添加 Markdown 代码围栏或解释文字。",
     "no_global_state_contract": "不要写 TODO、never-mistake 规则或用户偏好等全局状态；这些由主 Agent 管理。",
-    "failure_contract": "无法完成时，直接说明失败原因和已尝试的动作，不要编造结果。"
+    "failure_contract": "无法完成时，直接说明失败原因和已尝试的动作，不要编造结果。",
+    "numeric_contract": "步骤内的数值（算术、比例、统计、金额、单位、日期）必须用 `calculate` 或脚本算出并原样引用工具输出，禁止心算或估算。"
   },
   "batch_rules": [],
   "important_tips": [

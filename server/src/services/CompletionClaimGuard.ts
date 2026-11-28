@@ -85,7 +85,7 @@ const READ_ONLY_TOOL_NAMES = new Set<string>([
     'read_main_agent_reply',
     'list_user_preferences',
     'get_env_info',
-    'calculator',
+    'calculate',
     'validate_workflow',
     'list_workflows',
     'get_workflow_run',
